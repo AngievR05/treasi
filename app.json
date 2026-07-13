@@ -1,11 +1,11 @@
 {
   "expo": {
     "name": "treasi",
-    "slug": "treasi",
+    "slug": "angie-van-rooyen",
     "version": "1.0.0",
-    "orientation": "portrait",
+    "orientation": "default",
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "light",
+    "userInterfaceStyle": "dark",
     "ios": {
       "supportsTablet": true
     },
@@ -20,6 +20,17 @@
     },
     "web": {
       "favicon": "./assets/favicon.png"
-    }
+    },
+    "splash": {
+      "image": "./src/assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0F172A"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "daf25bd0-37ea-42ab-85cf-7abf94c9e0d7"
+      }
+    },
+    "owner": "angievr05s-team"
   }
 }
