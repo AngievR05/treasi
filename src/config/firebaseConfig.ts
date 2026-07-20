@@ -4,30 +4,28 @@ import { initializeFirestore } from 'firebase/firestore';
 import { getStorage } from 'firebase/storage';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-// Replace these placeholders with your actual Firebase Web App credentials from your console
+// Replace these placeholder values with your official Firebase Project Console web app keys!
 const firebaseConfig = {
-  apiKey: "YOUR_FIREBASE_API_KEY",
-  authDomain: "treasi-app.firebaseapp.com",
-  projectId: "treasi-app",
-  storageBucket: "treasi-app.appspot.com",
-  messagingSenderId: "000000000000",
-  appId: "1:000000000000:web:abcdef"
+  apiKey: "YOUR_API_KEY",
+  authDomain: "treasi-xxxx.firebaseapp.com",
+  projectId: "treasi-xxxx",
+  storageBucket: "treasi-xxxx.appspot.com",
+  messagingSenderId: "XXXXXXXXXXXX",
+  appId: "1:XXXXXX:web:XXXXXX"
 };
 
-// Safeguard against hot-reloading instantiating multiple Firebase app instances
+// Prevent multi-app instance crashes on fast-refresh cycles
 const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
 
-// Authentication persistent session instance (so users stay logged in when rotating the app)
+// Rigorously enforce persistent authentication tracking using local storage state
 const auth = initializeAuth(app, {
   persistence: getReactNativePersistence(AsyncStorage),
 });
 
-// Firestore database configuration instance with auto-long-polling backup handles for patchy mobile grids
 const db = initializeFirestore(app, {
-  experimentalAutoDetectLongPolling: true,
+  experimentalAutoDetectLongPolling: true, // Prevents hanging connections on restricted academic WiFi networks
 });
 
-// Storage engine instance to hold treasure images/media capture cards
 const storage = getStorage(app);
 
 export { app, auth, db, storage };
