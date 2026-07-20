@@ -1,21 +1,30 @@
 import { useState, useEffect } from 'react';
 import { onAuthStateChanged, User } from 'firebase/auth';
-// FIX: Change 'firebaseAuth' to 'auth' to match your firebase.ts exports
-import { auth } from '../config/firebase'; 
+import { auth } from '../config/firebase'; // Ensure your firebase.ts exports 'auth'
 
-export function useAuth() {
-  const [user, setUser] = useState<User | null>(null);
-  const [isLoading, setIsLoading] = useState<boolean>(true);
+export interface AuthState {
+  user: User | null;
+  loading: boolean;
+}
+
+export const useAuth = (): AuthState => {
+  const [state, setState] = useState<AuthState>({
+    user: null,
+    loading: true,
+  });
 
   useEffect(() => {
-    // Listens to persistent native token changes automatically using the verified auth engine
-    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
-      setUser(currentUser);
-      setIsLoading(false);
+    // Listen for persistent auth state changes natively cached by Firebase
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      setState({
+        user: user,
+        loading: false,
+      });
     });
 
-    return unsubscribe; // Clean up subscription on unmount
+    // Clean up subscription on unmount
+    return unsubscribe;
   }, []);
 
-  return { user, isLoading };
-}
+  return state;
+};
