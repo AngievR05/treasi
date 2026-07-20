@@ -1,42 +1,44 @@
 import React from 'react';
-import { StyleSheet, Text, View, useWindowDimensions } from 'react-native';
+import { StyleSheet, View, ActivityIndicator, useWindowDimensions } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
+import { RootNavigator } from './src/navigation/RootNavigator';
+import { useAuth } from './src/hooks/useAuth';
 
 export default function App() {
   const { width, height } = useWindowDimensions();
   const isLandscape = width > height;
+  const { loading } = useAuth();
+
+  // Show an interactive loading state on boot while validating persistent session states
+  if (loading) {
+    return (
+      <View style={[styles.loadingContainer, isLandscape && styles.landscapeBackground]}>
+        <ActivityIndicator size="large" color="#38E54D" />
+        <StatusBar style="light" />
+      </View>
+    );
+  }
 
   return (
-    <View style={[styles.container, isLandscape && styles.landscapeBackground]}>
-      <Text style={styles.title}>Treasi Scaffolding Complete 🗺️</Text>
-      <Text style={styles.subtitle}>
-        Orientation: {isLandscape ? "Landscape 🌅" : "Portrait 📱"}
-      </Text>
-      <StatusBar style="auto" />
+    <View style={styles.appContainer}>
+      <RootNavigator />
+      <StatusBar style="light" />
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
+  appContainer: {
+    flex: 1,
+    backgroundColor: '#121214',
+  },
+  loadingContainer: {
     flex: 1,
     backgroundColor: '#121214',
     alignItems: 'center',
     justifyContent: 'center',
-    padding: 20,
   },
   landscapeBackground: {
-    backgroundColor: '#1a1a24', // Subtle visual cue when shifting to landscape
-  },
-  title: {
-    color: '#ffffff',
-    fontSize: 24,
-    fontWeight: 'bold',
-    marginBottom: 8,
-    textAlign: 'center',
-  },
-  subtitle: {
-    color: '#8b8b93',
-    fontSize: 16,
+    backgroundColor: '#1a1a24', // Subtle visual adaptation for landscape boot screens
   },
 });

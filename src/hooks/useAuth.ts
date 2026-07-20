@@ -15,10 +15,17 @@ export function useAuth() {
 
   useEffect(() => {
     // Automatically binds the active session across device reboots
-    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
-      setUser(currentUser);
-      setLoading(false);
-    });
+    const unsubscribe = onAuthStateChanged(
+      auth, 
+      (currentUser) => {
+        setUser(currentUser);
+        setLoading(false);
+      },
+      (err) => {
+        setError(err.message);
+        setLoading(false);
+      }
+    );
     return unsubscribe;
   }, []);
 
