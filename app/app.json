@@ -6,7 +6,7 @@
     "orientation": "landscape",
     "userInterfaceStyle": "dark",
     "splash": {
-      "image": "./assets/splash.png",
+      "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
       "backgroundColor": "#2C3B2E"
     },
