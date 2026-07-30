@@ -1,40 +1,97 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { StatusBar } from 'expo-status-bar';
 import { StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 
+// Screen Imports
+import { SplashScreen } from './src/screens/SplashScreen';
+import { OnboardingScreen } from './src/screens/OnboardingScreen';
+import LoginScreen from './src/screens/Auth/LoginScreen';
+import { SignUpScreen } from './src/screens/Auth/SignUpScreen';
+import { DashboardScreen } from './src/screens/DashboardScreen';
+import { HuntScreen } from './src/screens/HuntScreen';
+import { LeaderboardScreen } from './src/screens/LeaderboardScreen';
+import { InventoryScreen } from './src/screens/InventoryScreen';
+import { ProfileSettingsScreen } from './src/screens/ProfileSettingsScreen';
+
+type ScreenState = 
+  | 'SPLASH' 
+  | 'ONBOARDING' 
+  | 'LOGIN' 
+  | 'SIGNUP' 
+  | 'DASHBOARD' 
+  | 'HUNT' 
+  | 'LEADERBOARD' 
+  | 'INVENTORY' 
+  | 'PROFILE';
+
 export default function App() {
   const { width, height } = useWindowDimensions();
-  
-  // Enforce a quick programmatic check for landscape layout safety
   const isLandscape = width > height;
+
+  // Active Navigation State
+  const [currentScreen, setCurrentScreen] = useState<ScreenState>('SPLASH');
+
+  // Splash Screen Timeout Preview
+  useEffect(() => {
+    if (currentScreen === 'SPLASH') {
+      const timer = setTimeout(() => setCurrentScreen('ONBOARDING'), 2000);
+      return () => clearTimeout(timer);
+    }
+  }, [currentScreen]);
+
+  const renderActiveScreen = () => {
+    switch (currentScreen) {
+      case 'SPLASH':
+        return <SplashScreen />;
+      case 'ONBOARDING':
+        return <OnboardingScreen onComplete={() => setCurrentScreen('LOGIN')} />;
+      case 'LOGIN':
+        return (
+          <LoginScreen 
+            onNavigateSignUp={() => setCurrentScreen('SIGNUP')} 
+            onLoginSuccess={() => setCurrentScreen('DASHBOARD')} 
+          />
+        );
+      case 'SIGNUP':
+        return (
+          <SignUpScreen 
+            onNavigateLogin={() => setCurrentScreen('LOGIN')} 
+            onSignUpSuccess={() => setCurrentScreen('DASHBOARD')} 
+          />
+        );
+      case 'DASHBOARD':
+        return <DashboardScreen onNavigate={(target) => setCurrentScreen(target as ScreenState)} />;
+      case 'HUNT':
+        return <HuntScreen onBack={() => setCurrentScreen('DASHBOARD')} />;
+      case 'LEADERBOARD':
+        return <LeaderboardScreen onBack={() => setCurrentScreen('DASHBOARD')} />;
+      case 'INVENTORY':
+        return <InventoryScreen onBack={() => setCurrentScreen('DASHBOARD')} />;
+      case 'PROFILE':
+        return (
+          <ProfileSettingsScreen 
+            onBack={() => setCurrentScreen('DASHBOARD')} 
+            onSignOut={() => setCurrentScreen('LOGIN')} 
+          />
+        );
+      default:
+        return <DashboardScreen onNavigate={(target) => setCurrentScreen(target as ScreenState)} />;
+    }
+  };
 
   return (
     <View style={styles.container}>
       <StatusBar style="light" hidden />
       
       {isLandscape ? (
-        <View style={styles.splitWrapper}>
-          {/* Left Operational Viewport - 60% Scale */}
-          {/* This will eventually house your Custom Styled Map and Radar/Compass Dials */}
-          <View style={styles.leftViewport}>
-            <Text style={styles.headingText}>TREASI</Text>
-            <Text style={styles.bodyText}>Hide. Explore. Stay connected.</Text>
-            <Text style={styles.telemetryText}>[ Operational Viewport - 60% ]</Text>
-          </View>
-
-          {/* Right Control Panel - 40% Scale */}
-          {/* This will house your Telemetry readouts, Field Bag CRUD mechanics, and Stamp CTAs */}
-          <View style={styles.rightViewport}>
-            <Text style={styles.panelTitleText}>CONTROL CONSOLE</Text>
-            <View style={styles.rivetPlaceholder} />
-            <Text style={styles.consoleTelemetryText}>[ Tactical Panel - 40% ]</Text>
-          </View>
-        </View>
+        renderActiveScreen()
       ) : (
-        /* Accessibility safety net for incorrect orientations during development testing */
+        /* Accessibility safety net for landscape constraint */
         <View style={styles.orientationWarning}>
-          <Text style={styles.warningText}>Tilt Instrument Horizontally</Text>
-          <Text style={styles.warningSubText}>Treasi requires landscape alignment to calibrate sensors.</Text>
+          <Text style={styles.warningTitle}>TILT INSTRUMENT HORIZONTALLY</Text>
+          <Text style={styles.warningSubText}>
+            Treasi requires landscape alignment to calibrate sensor array.
+          </Text>
         </View>
       )}
     </View>
@@ -46,62 +103,6 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#2C3B2E', // Forest Deep
   },
-  splitWrapper: {
-    flex: 1,
-    flexDirection: 'row',
-  },
-  leftViewport: {
-    flex: 0.60,
-    backgroundColor: '#E8DCC0', // Parchment
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: 24,
-  },
-  rightViewport: {
-    flex: 0.40,
-    backgroundColor: '#2C3B2E', // Forest Deep
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: 24,
-    borderLeftWidth: 3,
-    borderColor: '#B08D57', // Brass Trim
-  },
-  headingText: {
-    color: '#2A2420', // Ink Black
-    fontSize: 32,
-    fontWeight: 'bold',
-    letterSpacing: 4,
-    marginBottom: 4,
-  },
-  bodyText: {
-    color: '#2A2420', // Ink Black
-    fontSize: 14,
-    fontStyle: 'italic',
-    marginBottom: 20,
-  },
-  telemetryText: {
-    color: '#A64B2A', // Sienna Accent preview
-    fontSize: 11,
-    fontWeight: '600',
-  },
-  panelTitleText: {
-    color: '#E8DCC0', // Parchment
-    fontSize: 16,
-    fontWeight: 'bold',
-    letterSpacing: 2,
-    marginBottom: 12,
-  },
-  consoleTelemetryText: {
-    color: '#B08D57', // Brass Trim
-    fontSize: 11,
-  },
-  rivetPlaceholder: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: '#B08D57', // Brass Trim Rivet
-    marginVertical: 10,
-  },
   orientationWarning: {
     flex: 1,
     justifyContent: 'center',
@@ -109,16 +110,16 @@ const styles = StyleSheet.create({
     backgroundColor: '#2C3B2E',
     padding: 32,
   },
-  warningText: {
-    color: '#E8DCC0',
-    fontSize: 20,
+  warningTitle: {
+    color: '#E8DCC0', // Parchment
+    fontSize: 18,
     fontWeight: 'bold',
-    letterSpacing: 1,
+    letterSpacing: 1.2,
     textAlign: 'center',
     marginBottom: 8,
   },
   warningSubText: {
-    color: '#B08D57',
+    color: '#B08D57', // Brass Trim
     fontSize: 12,
     textAlign: 'center',
   },

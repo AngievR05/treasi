@@ -1,178 +1,87 @@
-import React, { useState } from 'react';
-import { 
-  StyleSheet, 
-  Text, 
-  TextInput, 
-  TouchableOpacity, 
-  View, 
-  ActivityIndicator,
-  KeyboardAvoidingView,
-  Platform
-} from 'react-native';
-import { LandscapeSplitLayout } from '../../components/LandscapeSplitLayout';
+import React from 'react';
+import { View, Text, StyleSheet, TouchableOpacity, useWindowDimensions } from 'react-native';
 
-export default function LoginScreen() {
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [loading, setLoading] = useState(false);
+// 1. Define and export the Screen Props interface
+export interface LoginScreenProps {
+  onNavigateSignUp: () => void;
+  onLoginSuccess: () => void;
+}
 
-  const handleLogin = async () => {
-    if (!email || !password) return;
-    setLoading(true);
-    try {
-      // Firebase Auth integration points here via useAuth hooks
-    } catch (error) {
-      console.error(error);
-    } finally {
-      setLoading(false);
-    }
-  };
+const LoginScreen: React.FC<LoginScreenProps> = ({ onNavigateSignUp, onLoginSuccess }) => {
+  const { width, height } = useWindowDimensions();
+  const isLandscape = width > height;
 
   return (
-    <KeyboardAvoidingView 
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'} 
-      style={styles.container}
-    >
-      <LandscapeSplitLayout
-        // Left 60%: Thematic Branding & Skeuomorphic Aesthetic
-        leftComponent={
-          <View style={styles.brandingWrapper}>
-            <Text style={styles.vintageTitle}>TREASI</Text>
-            <View style={styles.dividerLine} />
-            <Text style={styles.tagline}>"Hide. Explore. Stay connected."</Text>
-            <Text style={styles.sensorStatus}>[ SYSTEM STATUS: RADAR OFFLINE ]</Text>
-          </View>
-        }
-        // Right 40%: Ergonomic Tactical Control Console
-        rightComponent={
-          <View style={styles.formWrapper}>
-            <Text style={styles.formTitle}>OPERATOR SIGN-IN</Text>
-            
-            <TextInput
-              style={styles.inputField}
-              placeholder="EXPEDITION EMAIL"
-              placeholderTextColor="#A69E8A"
-              value={email}
-              onChangeText={setEmail}
-              autoCapitalize="none"
-              keyboardType="email-address"
-            />
+    <View style={[styles.container, { flexDirection: isLandscape ? 'row' : 'column' }]}>
+      {/* Tactical / Vintage Login Form */}
+      <View style={styles.formPanel}>
+        <Text style={styles.title}>FIELD AUTHENTICATION</Text>
+        <Text style={styles.subtitle}>Identify yourself, Explorer.</Text>
 
-            <TextInput
-              style={styles.inputField}
-              placeholder="ACCESS CREDENTIAL (PASSWORD)"
-              placeholderTextColor="#A69E8A"
-              secureTextEntry
-              value={password}
-              onChangeText={setPassword}
-              autoCapitalize="none"
-            />
+        {/* Action Triggers */}
+        <TouchableOpacity style={styles.primaryButton} onPress={onLoginSuccess}>
+          <Text style={styles.buttonText}>ENTER THE FIELD</Text>
+        </TouchableOpacity>
 
-            <TouchableOpacity 
-              style={[styles.stampButton, loading && styles.disabledButton]} 
-              onPress={handleLogin}
-              disabled={loading}
-              activeOpacity={0.8}
-            >
-              {loading ? (
-                <ActivityIndicator color="#E8DCC0" />
-              ) : (
-                <Text style={styles.stampButtonText}>STAMP LOCATION & ENTER</Text>
-              )}
-            </TouchableOpacity>
-          </View>
-        }
-      />
-    </KeyboardAvoidingView>
+        <TouchableOpacity onPress={onNavigateSignUp} style={styles.linkContainer}>
+          <Text style={styles.linkText}>Need credentials? Register New Explorer</Text>
+        </TouchableOpacity>
+      </View>
+    </View>
   );
-}
+};
+
+export default LoginScreen;
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-  },
-  brandingWrapper: {
-    flex: 1,
-    backgroundColor: '#2C3B2E', // Forest Deep Dark Chassis
+    backgroundColor: '#2C3B2E', // Forest Deep
     justifyContent: 'center',
     alignItems: 'center',
+    padding: 16,
+  },
+  formPanel: {
+    width: '80%',
+    maxWidth: 500,
+    backgroundColor: '#E8DCC0', // Parchment
     padding: 24,
+    borderRadius: 8,
+    borderWidth: 2,
+    borderColor: '#B08D57', // Brass Trim
   },
-  vintageTitle: {
-    fontFamily: Platform.OS === 'ios' ? 'Courier New' : 'monospace', 
-    fontSize: 42,
+  title: {
+    fontSize: 20,
     fontWeight: 'bold',
-    color: '#E8DCC0', // Parchment Primary Tone
-    letterSpacing: 6,
-  },
-  dividerLine: {
-    width: '60%',
-    height: 2,
-    backgroundColor: '#B08D57', // Brass Trim Accents
-    marginVertical: 16,
-  },
-  tagline: {
-    fontFamily: Platform.OS === 'ios' ? 'Georgia' : 'serif',
-    fontSize: 16,
-    fontStyle: 'italic',
-    color: '#E8DCC0',
-    opacity: 0.8,
-  },
-  sensorStatus: {
-    fontFamily: Platform.OS === 'ios' ? 'Courier New' : 'monospace',
-    fontSize: 11,
-    color: '#A64B2A', // Sienna Alert Accent
-    marginTop: 32,
-    letterSpacing: 2,
-  },
-  formWrapper: {
-    flex: 1,
-    backgroundColor: '#F3ECD8', // Secondary Parchment Base Sheet
-    justifyContent: 'center',
-    paddingHorizontal: 24,
-  },
-  formTitle: {
-    fontFamily: Platform.OS === 'ios' ? 'Courier New' : 'monospace',
-    fontSize: 16,
-    fontWeight: '700',
-    color: '#2A2420', // Crisp Ink Black
-    marginBottom: 20,
-    letterSpacing: 2,
+    color: '#2A2420', // Ink Black
     textAlign: 'center',
+    letterSpacing: 1.5,
   },
-  inputField: {
-    backgroundColor: '#E8DCC0',
-    borderWidth: 1,
-    borderColor: '#B08D57',
-    color: '#2A2420',
-    fontFamily: Platform.OS === 'ios' ? 'Courier New' : 'monospace',
-    fontSize: 14,
-    paddingHorizontal: 12,
-    height: 48, // Strict WCAG compliance target size
-    marginBottom: 14,
+  subtitle: {
+    fontSize: 12,
+    color: '#A64B2A', // Sienna Accent
+    textAlign: 'center',
+    marginBottom: 20,
+  },
+  primaryButton: {
+    backgroundColor: '#A64B2A',
+    paddingVertical: 12,
     borderRadius: 4,
-  },
-  stampButton: {
-    backgroundColor: '#A64B2A', // High-priority Sienna CTA Stamp
-    height: 50, // Massive clickable baseline ergonomics
-    justifyContent: 'center',
     alignItems: 'center',
-    borderRadius: 4,
-    marginTop: 10,
-    shadowColor: '#2A2420',
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.3,
-    shadowRadius: 4,
-    elevation: 4,
+    marginTop: 12,
   },
-  disabledButton: {
-    opacity: 0.6,
-  },
-  stampButtonText: {
+  buttonText: {
     color: '#E8DCC0',
-    fontFamily: Platform.OS === 'ios' ? 'Courier New' : 'monospace',
     fontWeight: 'bold',
-    fontSize: 14,
     letterSpacing: 1,
+  },
+  linkContainer: {
+    marginTop: 16,
+    alignItems: 'center',
+  },
+  linkText: {
+    color: '#2A2420',
+    fontSize: 12,
+    textDecorationLine: 'underline',
   },
 });
