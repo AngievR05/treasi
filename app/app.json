@@ -1,10 +1,9 @@
 {
   "expo": {
     "name": "Treasi",
-    "slug": "treasi-app",
+    "slug": "treasi",
     "version": "1.0.0",
     "orientation": "landscape",
-    "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
     "splash": {
       "image": "./assets/splash.png",
@@ -13,21 +12,10 @@
     },
     "ios": {
       "supportsTablet": true,
-      "infoPlist": {
-        "NSLocationWhenInUseUsageDescription": "Treasi requires access to your coordinates to track asynchronous geocaches across campus.",
-        "NSMotionUsageDescription": "Treasi uses the device magnetometer and accelerometer to animate the instrument radar dial."
-      }
+      "requireFullScreen": true
     },
     "android": {
-      "adaptiveIcon": {
-        "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#2C3B2E"
-      },
-      "permissions": [
-        "ACCESS_FINE_LOCATION",
-        "ACCESS_COARSE_LOCATION",
-        "HIGH_SAMPLING_RATE_SENSORS"
-      ]
+      "screenOrientation": "landscape"
     }
   }
 }
