@@ -4,15 +4,15 @@ import { StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 // Screen Imports
-import { SplashScreen } from './src/screens/SplashScreen';
-import { OnboardingScreen } from './src/screens/OnboardingScreen';
-import LoginScreen from './src/screens/Auth/LoginScreen';
-import { SignUpScreen } from './src/screens/Auth/SignUpScreen';
-import { DashboardScreen } from './src/screens/DashboardScreen';
-import { HuntScreen } from './src/screens/HuntScreen';
-import { LeaderboardScreen } from './src/screens/LeaderboardScreen';
-import { InventoryScreen } from './src/screens/InventoryScreen';
-import { ProfileSettingsScreen } from './src/screens/ProfileSettingsScreen';
+const SplashScreen = React.lazy(() => import('./src/screens/SplashScreen').then((module) => ({ default: module.SplashScreen })));
+const OnboardingScreen = React.lazy(() => import('./src/screens/OnboardingScreen').then((module) => ({ default: module.OnboardingScreen })));
+const LoginScreen = React.lazy(() => import('./src/screens/Auth/LoginScreen').then((module) => ({ default: module.default })));
+const SignUpScreen = React.lazy(() => import('./src/screens/Auth/SignUpScreen').then((module) => ({ default: module.SignUpScreen })));
+const DashboardScreen = React.lazy(() => import('./src/screens/DashboardScreen').then((module) => ({ default: module.DashboardScreen })));
+const HuntScreen = React.lazy(() => import('./src/screens/HuntScreen').then((module) => ({ default: module.HuntScreen })));
+const LeaderboardScreen = React.lazy(() => import('./src/screens/LeaderboardScreen').then((module) => ({ default: module.LeaderboardScreen })));
+const InventoryScreen = React.lazy(() => import('./src/screens/InventoryScreen').then((module) => ({ default: module.InventoryScreen })));
+const ProfileSettingsScreen = React.lazy(() => import('./src/screens/ProfileSettingsScreen').then((module) => ({ default: module.ProfileSettingsScreen })));
 
 type ScreenState = 
   | 'SPLASH' 
@@ -55,42 +55,53 @@ function MainNavigator() {
   }, [currentScreen, skipOnboardingToggle, bypassAuthToggle]);
 
   const renderActiveScreen = () => {
+    const renderWithSuspense = (element: React.ReactNode) => (
+      <React.Suspense fallback={<View style={styles.loadingState}><Text style={styles.loadingText}>LOADING...</Text></View>}>
+        {element}
+      </React.Suspense>
+    );
+
     switch (currentScreen) {
       case 'SPLASH':
-        return <SplashScreen />;
+        return renderWithSuspense(<SplashScreen />);
       case 'ONBOARDING':
-        return <OnboardingScreen onComplete={() => setCurrentScreen('LOGIN')} />;
+        return renderWithSuspense(<OnboardingScreen onComplete={() => setCurrentScreen('LOGIN')} />);
       case 'LOGIN':
-        return (
+        return renderWithSuspense(
           <LoginScreen 
             onNavigateSignUp={() => setCurrentScreen('SIGNUP')} 
             onLoginSuccess={() => setCurrentScreen('DASHBOARD')} 
           />
         );
       case 'SIGNUP':
-        return (
+        return renderWithSuspense(
           <SignUpScreen 
             onNavigateLogin={() => setCurrentScreen('LOGIN')} 
             onSignUpSuccess={() => setCurrentScreen('DASHBOARD')} 
           />
         );
       case 'DASHBOARD':
-        return <DashboardScreen onNavigate={(target) => setCurrentScreen(target as ScreenState)} />;
+        return renderWithSuspense(<DashboardScreen onNavigate={(target) => setCurrentScreen(target as ScreenState)} />);
       case 'HUNT':
-        return <HuntScreen onBack={() => setCurrentScreen('DASHBOARD')} />;
+        return renderWithSuspense(<HuntScreen onBack={() => setCurrentScreen('DASHBOARD')} />);
       case 'LEADERBOARD':
-        return <LeaderboardScreen onBack={() => setCurrentScreen('DASHBOARD')} />;
+        return renderWithSuspense(<LeaderboardScreen onBack={() => setCurrentScreen('DASHBOARD')} />);
       case 'INVENTORY':
-        return <InventoryScreen onBack={() => setCurrentScreen('DASHBOARD')} />;
+        return renderWithSuspense(
+          <InventoryScreen
+            onBack={() => setCurrentScreen('DASHBOARD')}
+            onNavigate={(target) => setCurrentScreen(target as ScreenState)}
+          />
+        );
       case 'PROFILE':
-        return (
+        return renderWithSuspense(
           <ProfileSettingsScreen 
             onBack={() => setCurrentScreen('DASHBOARD')} 
             onSignOut={() => setCurrentScreen('LOGIN')} 
           />
         );
       default:
-        return <DashboardScreen onNavigate={(target) => setCurrentScreen(target as ScreenState)} />;
+        return renderWithSuspense(<DashboardScreen onNavigate={(target) => setCurrentScreen(target as ScreenState)} />);
     }
   };
 
@@ -156,5 +167,17 @@ const styles = StyleSheet.create({
     color: '#B08D57', // Brass Trim
     fontSize: 12,
     textAlign: 'center',
+  },
+  loadingState: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: '#2C3B2E',
+  },
+  loadingText: {
+    color: '#E8DCC0',
+    fontSize: 16,
+    fontWeight: '600',
+    letterSpacing: 1.2,
   },
 });

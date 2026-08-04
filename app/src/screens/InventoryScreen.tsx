@@ -24,7 +24,8 @@ export interface CacheItem {
 }
 
 interface InventoryScreenProps {
-onBack: () => void;
+  onBack: () => void;
+  onNavigate?: (screen: string) => void;
 }
 
 // Initial mock data mirroring your vintage wireframe designs
@@ -99,6 +100,7 @@ const INITIAL_EPHEMERA: CacheItem[] = [
 
 export const InventoryScreen: React.FC<InventoryScreenProps> = ({
   onBack,
+  onNavigate,
 }) => {
   const { width, height } = useWindowDimensions();
   const isLandscape = width > height;
@@ -124,6 +126,9 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({
 
   const handleNavigate = (screen: string) => {
     setActiveScreen(screen as NavigationTab);
+    if (onNavigate) {
+      onNavigate(screen);
+    }
   };
 
   // Handler: Add New Cache (CREATE)
@@ -396,7 +401,7 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({
 {/* Integrated Field Navigation Bar */}
 <FieldNavBar 
   currentTab={activeScreen as NavigationTab} 
-  onNavigate={onNavigate} 
+  onNavigate={handleNavigate} 
 />
         </View>
 
