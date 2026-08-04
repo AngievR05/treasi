@@ -6,7 +6,7 @@ export type NavigationTab = 'MAP' | 'HUNT' | 'LEADERBOARD' | 'INVENTORY' | 'PROF
 
 interface FieldNavBarProps {
   currentTab: NavigationTab;
-  onNavigate: (screen: string) => void;
+  onNavigate?: (screen: string) => void;
 }
 
 interface NavItem {
@@ -33,7 +33,7 @@ export const FieldNavBar: React.FC<FieldNavBarProps> = ({ currentTab, onNavigate
             key={item.key}
             style={[styles.navButton, isActive && styles.navButtonActive]}
             activeOpacity={0.75}
-            onPress={() => onNavigate(item.key)}
+            onPress={() => onNavigate?.(item.key)}
           >
             <Ionicons
               name={item.iconName}

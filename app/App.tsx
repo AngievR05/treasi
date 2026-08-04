@@ -87,7 +87,12 @@ function MainNavigator() {
       case 'HUNT':
         return renderWithSuspense(<HuntScreen onBack={() => setCurrentScreen('DASHBOARD')} />);
       case 'LEADERBOARD':
-        return renderWithSuspense(<LeaderboardScreen onBack={() => setCurrentScreen('DASHBOARD')} />);
+        return renderWithSuspense(
+          <LeaderboardScreen
+            onBack={() => setCurrentScreen('DASHBOARD')}
+            onNavigate={(target) => setCurrentScreen(target as ScreenState)}
+          />
+        );
       case 'INVENTORY':
         return renderWithSuspense(
           <InventoryScreen

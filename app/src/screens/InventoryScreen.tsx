@@ -126,9 +126,7 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({
 
   const handleNavigate = (screen: string) => {
     setActiveScreen(screen as NavigationTab);
-    if (onNavigate) {
-      onNavigate(screen);
-    }
+    onNavigate?.(screen);
   };
 
   // Handler: Add New Cache (CREATE)

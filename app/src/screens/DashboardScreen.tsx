@@ -24,7 +24,7 @@ import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { FieldNavBar } from '../components/FieldNavBar';
 
 interface Props {
-  onNavigate: (screen: string) => void;
+  onNavigate?: (screen: string) => void;
 }
 
 const VINTAGE_MAP_STYLE = [
@@ -158,7 +158,7 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
       `${coordsText}\n\nReady to bury a new field cache here?`,
       [
         { text: 'CANCEL', style: 'cancel' },
-        { text: 'BURY CACHE', onPress: () => onNavigate('HUNT') },
+        { text: 'BURY CACHE', onPress: () => onNavigate?.('HUNT') },
       ]
     );
   };
