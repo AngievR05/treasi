@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { StatusBar } from 'expo-status-bar';
 import { StyleSheet, Text, View, useWindowDimensions } from 'react-native';
-import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
+import { SafeAreaProvider, useSafeAreaInsets, initialWindowMetrics } from 'react-native-safe-area-context';
 
 // Screen Imports
 const SplashScreen = React.lazy(() => import('./src/screens/SplashScreen').then((module) => ({ default: module.SplashScreen })));
@@ -144,7 +144,7 @@ function MainNavigator() {
 
 export default function App() {
   return (
-    <SafeAreaProvider>
+    <SafeAreaProvider initialMetrics={initialWindowMetrics}>
       <MainNavigator />
     </SafeAreaProvider>
   );

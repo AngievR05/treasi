@@ -1,5 +1,6 @@
 // metro.config.js
-const { getDefaultConfig } = require("expo/metro-config");
+const path = require('path');
+const { getDefaultConfig } = require('expo/metro-config');
 
 module.exports = (() => {
   const config = getDefaultConfig(__dirname);
@@ -8,12 +9,15 @@ module.exports = (() => {
 
   config.transformer = {
     ...transformer,
-    babelTransformerPath: require.resolve("react-native-svg-transformer"),
+    babelTransformerPath: require.resolve('react-native-svg-transformer'),
   };
   config.resolver = {
     ...resolver,
-    assetExts: resolver.assetExts.filter((ext) => ext !== "svg"),
-    sourceExts: [...resolver.sourceExts, "svg"],
+    assetExts: resolver.assetExts.filter((ext) => ext !== 'svg'),
+    sourceExts: [...resolver.sourceExts, 'svg'],
+    extraNodeModules: {
+      'react-native-safe-area-context': path.resolve(__dirname, 'node_modules/react-native-safe-area-context'),
+    },
   };
 
   return config;
