@@ -5,12 +5,12 @@ export interface UserDocument {
   username: string;
   email: string;
   totalPoints: number;
-  hasCompletedOnboarding: boolean;
-  telemetryEnabled: boolean; // default: false
-  hapticFeedbackEnabled: boolean; // default: false
-  motionSensitivityEnabled: boolean; // default: false
-  batteryOptimizerEnabled: boolean; // default: false
-  nightModeEnabled: boolean; // default: false
+  hasCompletedOnboarding: boolean; // Default: false
+  telemetryEnabled: boolean; // Default: false
+  hapticFeedbackEnabled: boolean; // Default: false
+  motionSensitivityEnabled: boolean; // Default: false
+  batteryOptimizerEnabled: boolean; // Default: false
+  nightModeEnabled: boolean; // Default: false
   createdAt: Timestamp;
   updatedAt: Timestamp;
 }
@@ -42,3 +42,29 @@ export interface ChatMessageDocument {
   text: string;
   createdAt: Timestamp;
 }
+
+/**
+ * Helper to generate initial Firestore payload for new users.
+ * Guarantees all toggles and onboarding flags start strictly disabled (false).
+ */
+export const createInitialUserData = (
+  uid: string,
+  username: string,
+  email: string
+): Omit<UserDocument, 'createdAt' | 'updatedAt'> & {
+  createdAt: ReturnType<typeof Timestamp.now>;
+  updatedAt: ReturnType<typeof Timestamp.now>;
+} => ({
+  uid,
+  username,
+  email,
+  totalPoints: 0,
+  hasCompletedOnboarding: false,
+  telemetryEnabled: false,
+  hapticFeedbackEnabled: false,
+  motionSensitivityEnabled: false,
+  batteryOptimizerEnabled: false,
+  nightModeEnabled: false,
+  createdAt: Timestamp.now(),
+  updatedAt: Timestamp.now(),
+});

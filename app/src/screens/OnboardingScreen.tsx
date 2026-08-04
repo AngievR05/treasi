@@ -29,7 +29,7 @@ const PALETTE = {
 };
 
 interface Props {
-  onComplete: (telemetryEnabled: boolean) => void;
+  onComplete: (telemetryEnabled: boolean, skipForever: boolean) => void;
 }
 
 interface OnboardingStep {
@@ -77,8 +77,9 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
   const insets = useSafeAreaInsets();
   const [index, setIndex] = useState(0);
 
-  // --- TOGGLE STATE (Must default to OFF per spec) ---
+  // --- TOGGLE STATES (All default to OFF per spec) ---
   const [telemetryAuthorized, setTelemetryAuthorized] = useState(false);
+  const [dontShowAgain, setDontShowAgain] = useState(false);
 
   // --- ANIMATION REFS ---
   const fadeAnim = useRef(new Animated.Value(1)).current;
@@ -118,7 +119,7 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
     }).start();
   }, [index]);
 
-  // Request native hardware permissions when toggle is flipped
+  // Request native hardware permissions when telemetry toggle is flipped
   const handleToggleTelemetry = async (value: boolean) => {
     if (value) {
       const { status } = await Location.requestForegroundPermissionsAsync();
@@ -171,10 +172,15 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
   const finalizeOnboarding = async () => {
     try {
       await AsyncStorage.setItem('@treasi_onboarding_completed', 'true');
+      if (dontShowAgain) {
+        await AsyncStorage.setItem('@treasi_skip_onboarding_forever', 'true');
+      } else {
+        await AsyncStorage.setItem('@treasi_skip_onboarding_forever', 'false');
+      }
     } catch (e) {
       console.warn('Failed to save onboarding state locally', e);
     }
-    onComplete(telemetryAuthorized);
+    onComplete(telemetryAuthorized, dontShowAgain);
   };
 
   const handleNext = () => {
@@ -202,9 +208,9 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
   const isFinalStep = index === STEPS.length - 1;
   const isLandscape = width > height;
 
-  // Responsive dynamic padding accounting for Dynamic Island & notches
+  // Dynamic padding accounting for Dynamic Island & iPhone hardware notches in landscape
   const safeLandscapeStyle = {
-    paddingLeft: Math.max(insets.left, 16),
+    paddingLeft: Math.max(insets.left, insets.top, 16),
     paddingRight: Math.max(insets.right, 16),
     paddingTop: Math.max(insets.top, 12),
     paddingBottom: Math.max(insets.bottom, 12),
@@ -286,7 +292,7 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
               </Text>
             </View>
 
-            {/* Tactical Toggle (Defaults to OFF) */}
+            {/* Tactical Telemetry Toggle (Defaults to OFF) */}
             <View style={styles.toggleRow}>
               <View style={styles.toggleTextContainer}>
                 <Text style={styles.toggleLabel}>SENSOR FEED</Text>
@@ -298,6 +304,21 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
                 ios_backgroundColor="#1E281F"
                 onValueChange={handleToggleTelemetry}
                 value={telemetryAuthorized}
+              />
+            </View>
+
+            {/* Bypass/Skip Onboarding Future Toggle (Defaults to OFF) */}
+            <View style={styles.toggleRow}>
+              <View style={styles.toggleTextContainer}>
+                <Text style={styles.toggleLabel}>BYPASS TUTORIAL</Text>
+                <Text style={styles.toggleSublabel}>DO NOT SHOW AGAIN</Text>
+              </View>
+              <Switch
+                trackColor={{ false: '#1E281F', true: PALETTE.sienna }}
+                thumbColor={dontShowAgain ? PALETTE.brass : '#555'}
+                ios_backgroundColor="#1E281F"
+                onValueChange={(val) => setDontShowAgain(val)}
+                value={dontShowAgain}
               />
             </View>
 
@@ -517,28 +538,28 @@ const styles = StyleSheet.create({
     borderWidth: 2,
     borderColor: PALETTE.brass,
     backgroundColor: 'rgba(0, 0, 0, 0.25)',
-    padding: 12,
+    padding: 10,
     borderRadius: 4,
     justifyContent: 'space-between',
   },
   consoleHeader: {
     color: PALETTE.parchment,
-    fontSize: 11,
+    fontSize: 10,
     fontWeight: 'bold',
     letterSpacing: 2,
     textAlign: 'center',
-    marginBottom: 6,
+    marginBottom: 4,
     fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
   },
   telemetryStatusBox: {
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: 'rgba(44, 59, 46, 0.8)',
-    padding: 6,
+    padding: 5,
     borderRadius: 4,
     borderWidth: 1,
     borderColor: PALETTE.brass,
-    marginBottom: 6,
+    marginBottom: 4,
   },
   statusDot: {
     width: 8,
@@ -554,24 +575,25 @@ const styles = StyleSheet.create({
     fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
   },
 
-  // --- TOGGLE ROW ---
+  // --- TOGGLE ROWS ---
   toggleRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     backgroundColor: 'rgba(0,0,0,0.2)',
-    padding: 6,
+    paddingHorizontal: 6,
+    paddingVertical: 3,
     borderRadius: 4,
     borderWidth: 1,
     borderColor: 'rgba(176, 141, 87, 0.3)',
-    marginBottom: 8,
+    marginBottom: 4,
   },
   toggleTextContainer: {
     flex: 1,
   },
   toggleLabel: {
     color: PALETTE.parchment,
-    fontSize: 9,
+    fontSize: 8,
     fontWeight: 'bold',
     letterSpacing: 1,
     fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
@@ -583,19 +605,19 @@ const styles = StyleSheet.create({
   },
 
   progressTrackerContainer: {
-    marginBottom: 6,
+    marginBottom: 4,
   },
   progressLabel: {
     color: PALETTE.brass,
     fontSize: 8,
     fontWeight: 'bold',
     letterSpacing: 1,
-    marginBottom: 3,
+    marginBottom: 2,
   },
   progressBarTrack: {
-    height: 5,
+    height: 4,
     backgroundColor: '#1E281F',
-    borderRadius: 3,
+    borderRadius: 2,
     overflow: 'hidden',
     borderWidth: 1,
     borderColor: PALETTE.brass,
@@ -608,8 +630,8 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'center',
     alignItems: 'center',
-    marginVertical: 4,
-    gap: 10,
+    marginVertical: 2,
+    gap: 8,
   },
   stepNode: {
     width: 8,
@@ -628,15 +650,15 @@ const styles = StyleSheet.create({
   },
   actionSection: {
     marginTop: 'auto',
-    gap: 6,
+    gap: 4,
   },
   primaryButton: {
     backgroundColor: PALETTE.sienna,
-    paddingVertical: 10,
+    paddingVertical: 8,
     paddingHorizontal: 12,
     borderRadius: 4,
     alignItems: 'center',
-    minHeight: 44,
+    minHeight: 40,
     justifyContent: 'center',
     borderWidth: 1,
     borderColor: PALETTE.brass,
@@ -652,17 +674,17 @@ const styles = StyleSheet.create({
   buttonText: {
     color: PALETTE.parchmentLight,
     fontWeight: 'bold',
-    fontSize: 11,
+    fontSize: 10,
     letterSpacing: 1.5,
     fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
   },
   skipButton: {
     alignItems: 'center',
-    paddingVertical: 4,
+    paddingVertical: 2,
   },
   skipButtonText: {
     color: PALETTE.brass,
-    fontSize: 9,
+    fontSize: 8,
     letterSpacing: 1,
     textDecorationLine: 'underline',
     fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
