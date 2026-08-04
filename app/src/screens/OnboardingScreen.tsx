@@ -88,7 +88,7 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const buttonScaleAnim = useRef(new Animated.Value(1)).current;
 
-  // Continuous status indicator pulse animation
+  // Continuous telemetry status indicator pulse animation
   useEffect(() => {
     const pulseLoop = Animated.loop(
       Animated.sequence([
@@ -117,7 +117,7 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
       duration: 300,
       useNativeDriver: false,
     }).start();
-  }, [index]);
+  }, [index, progressAnim]);
 
   // Request native hardware permissions when telemetry toggle is flipped
   const handleToggleTelemetry = async (value: boolean) => {
@@ -129,7 +129,7 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
         setTelemetryAuthorized(false);
         Alert.alert(
           'TELEMETRY DENIED',
-          'Hardware GPS permissions are required to active live target vectoring.'
+          'Hardware GPS permissions are required to activate live target vectoring.'
         );
       }
     } else {
@@ -208,7 +208,7 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
   const isFinalStep = index === STEPS.length - 1;
   const isLandscape = width > height;
 
-  // Dynamic padding accounting for Dynamic Island & iPhone hardware notches in landscape
+  // Dynamic padding accounting for Dynamic Island & hardware notches in landscape
   const safeLandscapeStyle = {
     paddingLeft: Math.max(insets.left, insets.top, 16),
     paddingRight: Math.max(insets.right, 16),
@@ -307,7 +307,7 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
               />
             </View>
 
-            {/* Bypass/Skip Onboarding Future Toggle (Defaults to OFF) */}
+            {/* Bypass/Skip Onboarding Toggle (Defaults to OFF) */}
             <View style={styles.toggleRow}>
               <View style={styles.toggleTextContainer}>
                 <Text style={styles.toggleLabel}>BYPASS TUTORIAL</Text>
