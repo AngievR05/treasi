@@ -24,8 +24,7 @@ export interface CacheItem {
 }
 
 interface InventoryScreenProps {
-  onNavigate: (screenName: string) => void;
-  activeScreen?: string;
+onBack: () => void;
 }
 
 // Initial mock data mirroring your vintage wireframe designs
@@ -99,8 +98,7 @@ const INITIAL_EPHEMERA: CacheItem[] = [
 ];
 
 export const InventoryScreen: React.FC<InventoryScreenProps> = ({
-  onNavigate,
-  activeScreen = 'BAG',
+  onBack,
 }) => {
   const { width, height } = useWindowDimensions();
   const isLandscape = width > height;
@@ -118,10 +116,15 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({
   const [newTitle, setNewTitle] = useState('');
   const [newHint, setNewHint] = useState('');
   const [newCoordinates, setNewCoordinates] = useState("40°45.7'N 122°25.5'W");
+  const [activeScreen, setActiveScreen] = useState<NavigationTab>('INVENTORY');
 
   // Filter items based on active tab
   const currentList = items.filter((item) => item.category === activeTab);
   const selectedItem = items.find((item) => item.id === selectedId) || currentList[0];
+
+  const handleNavigate = (screen: string) => {
+    setActiveScreen(screen as NavigationTab);
+  };
 
   // Handler: Add New Cache (CREATE)
   const handleBuryCache = () => {

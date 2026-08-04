@@ -1,5 +1,7 @@
+// src/components/LandscapeSplitLayout.tsx
 import React from 'react';
-import { StyleSheet, View, useWindowDimensions, SafeAreaView } from 'react-native';
+import { StyleSheet, View, useWindowDimensions } from 'react-native';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 interface LandscapeSplitLayoutProps {
   leftComponent: React.ReactNode;
@@ -18,14 +20,23 @@ export const LandscapeSplitLayout: React.FC<LandscapeSplitLayoutProps> = ({
 }) => {
   const { width, height } = useWindowDimensions();
   const isLandscape = width > height;
+  const insets = useSafeAreaInsets();
 
-  // Structural enforcement: If the device orientation isn't locked natively yet,
-  // this ensures the layout safely maintains its field-instrument split aspect ratio.
   const dynamicDirection = isLandscape ? 'row' : 'column';
 
   return (
-    <SafeAreaView style={styles.outerContainer}>
-      <View style={[styles.wrapper, { flexDirection: dynamicDirection }]}>
+    <SafeAreaView 
+      style={styles.outerContainer} 
+      edges={['top', 'bottom', 'left', 'right']}
+    >
+      <View 
+        style={[
+          styles.wrapper, 
+          { flexDirection: dynamicDirection },
+          // Applies safe horizontal padding to prevent Dynamic Island/notch overlap
+          { paddingLeft: insets.left, paddingRight: insets.right }
+        ]}
+      >
         
         {/* Left Operational Viewport (60% Width) - Houses Map Canvas / Radar Instrument */}
         <View 
@@ -62,12 +73,11 @@ export const LandscapeSplitLayout: React.FC<LandscapeSplitLayoutProps> = ({
 const styles = StyleSheet.create({
   outerContainer: {
     flex: 1,
-    backgroundColor: '#2C3B2E', // Thematic Grounding Color: Forest Deep
+    backgroundColor: '#2C3B2E', // Forest Deep
   },
   wrapper: {
     flex: 1,
   },
-  // Split Dimension Constraints
   flexSixty: {
     flex: 0.60,
   },
@@ -77,11 +87,10 @@ const styles = StyleSheet.create({
   flexFull: {
     flex: 1,
   },
-  // Operational Components Layout
   leftViewport: {
-    backgroundColor: '#E8DCC0', // Thematic Background: Parchment Base
+    backgroundColor: '#E8DCC0', // Parchment Base
     justifyContent: 'center',
-    alignItems: 'stretch', // Stretches map engines and canvas instances fully
+    alignItems: 'stretch',
   },
   rightViewport: {
     backgroundColor: '#2C3B2E', // Forest Deep chassis frame
@@ -92,16 +101,15 @@ const styles = StyleSheet.create({
     flex: 1,
     paddingHorizontal: 20,
     paddingVertical: 16,
-    justifyContent: 'space-between', // Forces top readouts and bottom CTAs apart
+    justifyContent: 'space-between',
   },
-  // Mechanical Style Token Accents
   brassDivider: {
     width: 6,
-    backgroundColor: '#B08D57', // Style Token Accent: Brass Trim
+    backgroundColor: '#B08D57', // Brass Trim
     height: '100%',
     borderLeftWidth: 1,
     borderRightWidth: 1,
-    borderColor: '#2A2420', // Ink Black structural shadow lines
+    borderColor: '#2A2420', // Ink Black
     opacity: 0.9,
   },
 });

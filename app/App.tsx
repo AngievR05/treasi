@@ -1,6 +1,8 @@
+// App.tsx
 import React, { useState, useEffect } from 'react';
 import { StatusBar } from 'expo-status-bar';
 import { StyleSheet, Text, View, useWindowDimensions } from 'react-native';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 // Screen Imports
 import { SplashScreen } from './src/screens/SplashScreen';
@@ -31,13 +33,26 @@ export default function App() {
   // Active Navigation State
   const [currentScreen, setCurrentScreen] = useState<ScreenState>('SPLASH');
 
-  // Splash Screen Timeout Preview
+  // Flow controls - Toggles are OFF by default per specification.
+  // When false, onboarding and auth flow are always enforced on launch.
+  const [skipOnboardingToggle, setSkipOnboardingToggle] = useState<boolean>(false);
+  const [bypassAuthToggle, setBypassAuthToggle] = useState<boolean>(false);
+
+  // Splash Screen Timeout Logic
   useEffect(() => {
     if (currentScreen === 'SPLASH') {
-      const timer = setTimeout(() => setCurrentScreen('ONBOARDING'), 2000);
+      const timer = setTimeout(() => {
+        if (!skipOnboardingToggle) {
+          setCurrentScreen('ONBOARDING');
+        } else if (!bypassAuthToggle) {
+          setCurrentScreen('LOGIN');
+        } else {
+          setCurrentScreen('DASHBOARD');
+        }
+      }, 2000);
       return () => clearTimeout(timer);
     }
-  }, [currentScreen]);
+  }, [currentScreen, skipOnboardingToggle, bypassAuthToggle]);
 
   const renderActiveScreen = () => {
     switch (currentScreen) {
@@ -80,21 +95,23 @@ export default function App() {
   };
 
   return (
-    <View style={styles.container}>
-      <StatusBar style="light" hidden />
-      
-      {isLandscape ? (
-        renderActiveScreen()
-      ) : (
-        /* Accessibility safety net for landscape constraint */
-        <View style={styles.orientationWarning}>
-          <Text style={styles.warningTitle}>TILT INSTRUMENT HORIZONTALLY</Text>
-          <Text style={styles.warningSubText}>
-            Treasi requires landscape alignment to calibrate sensor array.
-          </Text>
-        </View>
-      )}
-    </View>
+    <SafeAreaProvider>
+      <View style={styles.container}>
+        <StatusBar style="light" hidden />
+        
+        {isLandscape ? (
+          renderActiveScreen()
+        ) : (
+          /* Accessibility safety net for landscape constraint */
+          <View style={styles.orientationWarning}>
+            <Text style={styles.warningTitle}>TILT INSTRUMENT HORIZONTALLY</Text>
+            <Text style={styles.warningSubText}>
+              Treasi requires landscape alignment to calibrate sensor array.
+            </Text>
+          </View>
+        )}
+      </View>
+    </SafeAreaProvider>
   );
 }
 
