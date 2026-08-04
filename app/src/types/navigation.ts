@@ -53,3 +53,7 @@ export type MainTabScreenProps<T extends keyof MainTabParamList> =
     BottomTabScreenProps<MainTabParamList, T>,
     NativeStackScreenProps<RootStackParamList>
   >;
+
+  declare module 'firebase/auth' {
+  export function getReactNativePersistence(storage: any): any;
+}

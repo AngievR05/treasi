@@ -1,21 +1,19 @@
-import { initializeApp, getApps, getApp } from "firebase/app";
-import { initializeAuth } from "firebase/auth";
-import { initializeFirestore } from "firebase/firestore";
-import { getStorage } from "firebase/storage";
+import { initializeApp, getApps, getApp, FirebaseApp } from "firebase/app";
+import { 
+  initializeAuth, 
+  getAuth, 
+  Auth,
+  getReactNativePersistence 
+} from "firebase/auth";
+import { 
+  initializeFirestore, 
+  getFirestore, 
+  Firestore 
+} from "firebase/firestore";
+import { getStorage, FirebaseStorage } from "firebase/storage";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { Persistence, ReactNativeAsyncStorage } from "firebase/auth";
 
-// 1. Corrected TypeScript Module Augmentation
-declare module "firebase/auth" {
-  export function getReactNativePersistence(
-    storage: ReactNativeAsyncStorage
-  ): Persistence;
-}
-
-// Now safely extract the augmented persistence function
-import { getReactNativePersistence } from "firebase/auth";
-
-// Your verified credentials pulled from the Firebase Project Console
+// Production Firebase Configuration
 const firebaseConfig = {
   apiKey: "AIzaSyDFctFnRon4DATHpGXQ3Bt3FsqMGJshrMU",
   authDomain: "treasi-5bcff.firebaseapp.com",
@@ -26,20 +24,31 @@ const firebaseConfig = {
   measurementId: "G-LF7P0NWTNX"
 };
 
-// Protect the runtime against double-initialization cycles during hot-reloads
-const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
+// 1. Singleton App Safeguard
+const app: FirebaseApp = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
 
-// Fulfill the primary 'Stay Connected' persistence mandate across app reboots
-const auth = initializeAuth(app, {
-  persistence: getReactNativePersistence(AsyncStorage),
-});
+// 2. Defensive Auth Setup with Native Persistence
+let auth: Auth;
+try {
+  auth = initializeAuth(app, {
+    persistence: getReactNativePersistence(AsyncStorage),
+  });
+} catch (error) {
+  // Fallback instance to prevent Fast Refresh duplication crashes
+  auth = getAuth(app);
+}
 
-// Configure the Firestore Database Engine with long-polling hooks for stable local testing
-const db = initializeFirestore(app, {
-  experimentalAutoDetectLongPolling: true,
-});
+// 3. Defensive Firestore Setup
+let db: Firestore;
+try {
+  db = initializeFirestore(app, {
+    experimentalAutoDetectLongPolling: true,
+  });
+} catch (error) {
+  db = getFirestore(app);
+}
 
-// Reference connection hook for handling physical scavenger hunt media assets
-const storage = getStorage(app);
+// 4. Storage Reference
+const storage: FirebaseStorage = getStorage(app);
 
 export { app, auth, db, storage };
