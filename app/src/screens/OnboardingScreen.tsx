@@ -6,23 +6,27 @@ import {
   TouchableOpacity,
   Animated,
   useWindowDimensions,
-  SafeAreaView,
   Platform,
+  Switch,
+  Easing,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { MaterialCommunityIcons } from '@expo/vector-icons';
 
 // --- DESIGN SYSTEM TOKENS (DV300 Spec) ---
 const PALETTE = {
-  forestDeep: '#2C3B2E',    // Main dark chassis backdrop
-  parchment: '#E8DCC0',     // Map & card viewport backdrop
-  parchmentLight: '#F3ECD8',// Secondary card panel background
-  sienna: '#A64B2A',        // High-priority CTAs & badges
-  brass: '#B08D57',         // Borders, rivets, and hardware trim
-  inkBlack: '#2A2420',      // High-contrast readable body text
-  mutedGreen: '#3D5040',    // Secondary console text
+  forestDeep: '#2C3B2E',     // Main dark chassis backdrop
+  parchment: '#E8DCC0',      // Map & card viewport backdrop
+  parchmentLight: '#F3ECD8', // Secondary card panel background
+  sienna: '#A64B2A',         // High-priority CTAs & badges
+  brass: '#B08D57',          // Borders, rivets, and hardware trim
+  inkBlack: '#2A2420',       // High-contrast readable body text
+  mutedGreen: '#3D5040',     // Secondary console text
+  activeGreen: '#4CAF50',    // Telemetry active indicator
 };
 
 interface Props {
-  onComplete: () => void;
+  onComplete: (telemetryEnabled: boolean) => void;
 }
 
 interface OnboardingStep {
@@ -31,7 +35,7 @@ interface OnboardingStep {
   title: string;
   subtitle: string;
   desc: string;
-  badgeIcon: string;
+  iconName: keyof typeof MaterialCommunityIcons.glyphMap;
   telemetryStatus: string;
 }
 
@@ -42,7 +46,7 @@ const STEPS: OnboardingStep[] = [
     title: 'ALIGN INSTRUMENT',
     subtitle: 'LANDSCAPE LOCK MANDATORY',
     desc: 'Lock device horizontally into landscape orientation to calibrate analogue dials and unlock field telemetry.',
-    badgeIcon: '🧭',
+    iconName: 'compass-rose',
     telemetryStatus: 'GYRO & ACCEL: CALIBRATED',
   },
   {
@@ -51,7 +55,7 @@ const STEPS: OnboardingStep[] = [
     title: 'TRACK TARGETS',
     subtitle: 'GEOSPATIAL VECTORING',
     desc: 'Follow continuous live heading and GPS telemetry to navigate towards hidden field caches scattered across campus.',
-    badgeIcon: '📡',
+    iconName: 'radar',
     telemetryStatus: 'GPS & MAGNETOMETER: ONLINE',
   },
   {
@@ -60,19 +64,47 @@ const STEPS: OnboardingStep[] = [
     title: 'EXCAVATE REWARDS',
     subtitle: 'KINETIC SHAKE TRIGGER',
     desc: 'Apply physical kinetic shaking motion when within 5 meters of target coordinates to unearth hidden payloads.',
-    badgeIcon: '⛏️',
+    iconName: 'shovel',
     telemetryStatus: 'KINETIC TRIGGER: READY',
   },
 ];
 
 export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
   const { width, height } = useWindowDimensions();
+  const insets = useSafeAreaInsets(); // Dynamic Island & notch handling in landscape
   const [index, setIndex] = useState(0);
 
-  // --- TWEENING & ANIMATION STATE ---
+  // --- TOGGLE STATE (Must default to OFF per spec) ---
+  const [telemetryAuthorized, setTelemetryAuthorized] = useState(false);
+
+  // --- ANIMATION REFS ---
   const fadeAnim = useRef(new Animated.Value(1)).current;
   const slideAnim = useRef(new Animated.Value(0)).current;
   const progressAnim = useRef(new Animated.Value(1 / STEPS.length)).current;
+  const pulseAnim = useRef(new Animated.Value(1)).current;
+  const buttonScaleAnim = useRef(new Animated.Value(1)).current;
+
+  // Continuous status indicator pulse animation
+  useEffect(() => {
+    const pulseLoop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulseAnim, {
+          toValue: 0.3,
+          duration: 800,
+          easing: Easing.inOut(Easing.quad),
+          useNativeDriver: true,
+        }),
+        Animated.timing(pulseAnim, {
+          toValue: 1,
+          duration: 800,
+          easing: Easing.inOut(Easing.quad),
+          useNativeDriver: true,
+        }),
+      ])
+    );
+    pulseLoop.start();
+    return () => pulseLoop.stop();
+  }, [pulseAnim]);
 
   // Sync progress indicator bar on step change
   useEffect(() => {
@@ -84,7 +116,6 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
   }, [index]);
 
   const handleStepTransition = (nextIndex: number) => {
-    // 1. Fade & slide out current view
     Animated.parallel([
       Animated.timing(fadeAnim, {
         toValue: 0,
@@ -97,11 +128,9 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
         useNativeDriver: true,
       }),
     ]).start(() => {
-      // 2. Update step state
       setIndex(nextIndex);
       slideAnim.setValue(20);
 
-      // 3. Fade & slide in new view
       Animated.parallel([
         Animated.timing(fadeAnim, {
           toValue: 1,
@@ -119,28 +148,48 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
   };
 
   const handleNext = () => {
+    // Tactile button bounce micro-interaction
+    Animated.sequence([
+      Animated.timing(buttonScaleAnim, {
+        toValue: 0.95,
+        duration: 80,
+        useNativeDriver: true,
+      }),
+      Animated.spring(buttonScaleAnim, {
+        toValue: 1,
+        friction: 4,
+        useNativeDriver: true,
+      }),
+    ]).start();
+
     if (index < STEPS.length - 1) {
       handleStepTransition(index + 1);
     } else {
-      onComplete();
+      onComplete(telemetryAuthorized);
     }
   };
 
   const current = STEPS[index];
   const isFinalStep = index === STEPS.length - 1;
-
-  // Responsive layout sanity check (Guarantees landscape aspect ratio handling)
   const isLandscape = width > height;
 
+  // Responsive dynamic padding accounting for iPhone Dynamic Island / Side Notches
+  const safeLandscapeStyle = {
+    paddingLeft: Math.max(insets.left, 16),
+    paddingRight: Math.max(insets.right, 16),
+    paddingTop: Math.max(insets.top, 12),
+    paddingBottom: Math.max(insets.bottom, 12),
+  };
+
   return (
-    <SafeAreaView style={styles.safeArea}>
+    <View style={[styles.mainChassis, safeLandscapeStyle]}>
       <View style={[styles.container, !isLandscape && styles.portraitWarningContainer]}>
-        
+
         {/* ============================================================== */}
         {/* LEFT VIEWPORT (60%): OPERATIONAL CARD & FIELD INSTRUCTIONS      */}
         {/* ============================================================== */}
         <View style={styles.leftViewport}>
-          {/* Rivet Accents (Skeuomorphic hardware detail) */}
+          {/* Rivet Hardware Accents */}
           <View style={[styles.rivet, styles.rivetTopLeft]} />
           <View style={[styles.rivet, styles.rivetTopRight]} />
           <View style={[styles.rivet, styles.rivetBottomLeft]} />
@@ -161,7 +210,11 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
             ]}
           >
             <View style={styles.iconWrapper}>
-              <Text style={styles.iconText}>{current.badgeIcon}</Text>
+              <MaterialCommunityIcons
+                name={current.iconName}
+                size={26}
+                color={PALETTE.sienna}
+              />
             </View>
 
             <Text style={styles.protocolCodeText}>{current.protocolCode}</Text>
@@ -183,16 +236,40 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
         {/* RIGHT VIEWPORT (40%): TACTICAL CONTROL & TELEMETRY CONSOLE      */}
         {/* ============================================================== */}
         <View style={styles.rightViewport}>
-          {/* Hardware Brass Frame Accent */}
           <View style={styles.consoleCard}>
             <Text style={styles.consoleHeader}>SYSTEM TELEMETRY</Text>
-            
-            {/* Status Indicator */}
+
+            {/* Status Indicator with Animated Pulse */}
             <View style={styles.telemetryStatusBox}>
-              <View style={styles.statusDot} />
+              <Animated.View
+                style={[
+                  styles.statusDot,
+                  {
+                    opacity: pulseAnim,
+                    backgroundColor: telemetryAuthorized
+                      ? PALETTE.activeGreen
+                      : PALETTE.sienna,
+                  },
+                ]}
+              />
               <Text style={styles.telemetryStatusText}>
-                {current.telemetryStatus}
+                {telemetryAuthorized ? current.telemetryStatus : 'TELEMETRY: STANDBY'}
               </Text>
+            </View>
+
+            {/* Tactical Toggle (Defaults to OFF) */}
+            <View style={styles.toggleRow}>
+              <View style={styles.toggleTextContainer}>
+                <Text style={styles.toggleLabel}>SENSOR FEED</Text>
+                <Text style={styles.toggleSublabel}>GPS / GYRO STREAM</Text>
+              </View>
+              <Switch
+                trackColor={{ false: '#1E281F', true: PALETTE.sienna }}
+                thumbColor={telemetryAuthorized ? PALETTE.brass : '#555'}
+                ios_backgroundColor="#1E281F"
+                onValueChange={setTelemetryAuthorized}
+                value={telemetryAuthorized}
+              />
             </View>
 
             {/* Step Progress Tracker Bar */}
@@ -232,25 +309,34 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
 
             {/* Action Buttons */}
             <View style={styles.actionSection}>
-              <TouchableOpacity
-                style={[
-                  styles.primaryButton,
-                  isFinalStep && styles.primaryButtonComplete,
-                ]}
-                activeOpacity={0.8}
-                onPress={handleNext}
-                accessibilityRole="button"
-                accessibilityLabel={isFinalStep ? 'Enter Field' : 'Next Protocol'}
-              >
-                <Text style={styles.buttonText}>
-                  {isFinalStep ? 'ENTER FIELD ›' : 'NEXT PROTOCOL ›'}
-                </Text>
-              </TouchableOpacity>
+              <Animated.View style={{ transform: [{ scale: buttonScaleAnim }] }}>
+                <TouchableOpacity
+                  style={[
+                    styles.primaryButton,
+                    isFinalStep && styles.primaryButtonComplete,
+                  ]}
+                  activeOpacity={0.8}
+                  onPress={handleNext}
+                  accessibilityRole="button"
+                  accessibilityLabel={isFinalStep ? 'Enter Field' : 'Next Protocol'}
+                >
+                  <View style={styles.buttonContentRow}>
+                    <Text style={styles.buttonText}>
+                      {isFinalStep ? 'ENTER FIELD' : 'NEXT PROTOCOL'}
+                    </Text>
+                    <MaterialCommunityIcons
+                      name="chevron-right"
+                      size={18}
+                      color={PALETTE.parchmentLight}
+                    />
+                  </View>
+                </TouchableOpacity>
+              </Animated.View>
 
               {!isFinalStep && (
                 <TouchableOpacity
                   style={styles.skipButton}
-                  onPress={onComplete}
+                  onPress={() => onComplete(telemetryAuthorized)}
                   hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
                 >
                   <Text style={styles.skipButtonText}>ABORT TUTORIAL [SKIP]</Text>
@@ -261,13 +347,13 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
         </View>
 
       </View>
-    </SafeAreaView>
+    </View>
   );
 };
 
-// --- STYLESHEET (Skeuomorphic & Responsive Layout) ---
+// --- STYLESHEET (Skeuomorphic & Dynamic Landscape Layout) ---
 const styles = StyleSheet.create({
-  safeArea: {
+  mainChassis: {
     flex: 1,
     backgroundColor: PALETTE.forestDeep,
   },
@@ -276,7 +362,6 @@ const styles = StyleSheet.create({
     flexDirection: 'row', // 60/40 Horizontal Split Layout
   },
   portraitWarningContainer: {
-    // Graceful fallback if orientation switch is delayed
     opacity: 0.9,
   },
 
@@ -284,17 +369,18 @@ const styles = StyleSheet.create({
   leftViewport: {
     flex: 0.6,
     backgroundColor: PALETTE.parchment,
-    padding: 20,
+    padding: 16,
     justifyContent: 'space-between',
     borderRightWidth: 3,
     borderColor: PALETTE.brass,
     position: 'relative',
+    borderRadius: 4,
   },
   headerMetaRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 8,
+    marginBottom: 4,
   },
   metaDocCode: {
     color: PALETTE.mutedGreen,
@@ -307,16 +393,16 @@ const styles = StyleSheet.create({
     backgroundColor: PALETTE.sienna,
     color: PALETTE.parchmentLight,
     fontWeight: 'bold',
-    fontSize: 11,
+    fontSize: 10,
     paddingVertical: 2,
-    paddingHorizontal: 8,
+    paddingHorizontal: 6,
     borderRadius: 2,
     letterSpacing: 1,
   },
   contentContainer: {
     flex: 1,
     justifyContent: 'center',
-    paddingHorizontal: 12,
+    paddingHorizontal: 8,
   },
   iconWrapper: {
     width: 44,
@@ -327,14 +413,11 @@ const styles = StyleSheet.create({
     borderColor: PALETTE.brass,
     alignItems: 'center',
     justifyContent: 'center',
-    marginBottom: 8,
-  },
-  iconText: {
-    fontSize: 22,
+    marginBottom: 6,
   },
   protocolCodeText: {
     color: PALETTE.sienna,
-    fontSize: 11,
+    fontSize: 10,
     fontWeight: '800',
     letterSpacing: 2,
     marginBottom: 2,
@@ -342,28 +425,28 @@ const styles = StyleSheet.create({
   },
   titleText: {
     color: PALETTE.inkBlack,
-    fontSize: 22,
+    fontSize: 20,
     fontWeight: '900',
     letterSpacing: 1.5,
   },
   subtitleText: {
     color: PALETTE.mutedGreen,
-    fontSize: 11,
+    fontSize: 10,
     fontWeight: '700',
     letterSpacing: 1,
-    marginBottom: 10,
+    marginBottom: 8,
   },
   dividerLine: {
     height: 2,
     backgroundColor: PALETTE.brass,
     width: '40%',
-    marginBottom: 10,
+    marginBottom: 8,
     opacity: 0.5,
   },
   descText: {
     color: PALETTE.inkBlack,
-    fontSize: 13,
-    lineHeight: 18,
+    fontSize: 12,
+    lineHeight: 16,
     fontWeight: '500',
   },
   footerNoteRow: {
@@ -371,16 +454,16 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     borderTopWidth: 1,
     borderColor: 'rgba(176, 141, 87, 0.4)',
-    paddingTop: 6,
+    paddingTop: 4,
   },
   footerNote: {
     color: PALETTE.mutedGreen,
-    fontSize: 9,
+    fontSize: 8,
     letterSpacing: 1,
     fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
   },
 
-  // --- RIVETS (Skeuomorphic Detail) ---
+  // --- RIVETS ---
   rivet: {
     position: 'absolute',
     width: 6,
@@ -388,72 +471,100 @@ const styles = StyleSheet.create({
     borderRadius: 3,
     backgroundColor: PALETTE.brass,
   },
-  rivetTopLeft: { top: 8, left: 8 },
-  rivetTopRight: { top: 8, right: 8 },
-  rivetBottomLeft: { bottom: 8, left: 8 },
-  rivetBottomRight: { bottom: 8, right: 8 },
+  rivetTopLeft: { top: 6, left: 6 },
+  rivetTopRight: { top: 6, right: 6 },
+  rivetBottomLeft: { bottom: 6, left: 6 },
+  rivetBottomRight: { bottom: 6, right: 6 },
 
   // --- RIGHT VIEWPORT (40%) ---
   rightViewport: {
     flex: 0.4,
     backgroundColor: PALETTE.forestDeep,
-    padding: 16,
+    paddingLeft: 12,
     justifyContent: 'center',
   },
   consoleCard: {
     flex: 1,
     borderWidth: 2,
     borderColor: PALETTE.brass,
-    backgroundColor: 'rgba(0, 0, 0, 0.2)',
-    padding: 16,
+    backgroundColor: 'rgba(0, 0, 0, 0.25)',
+    padding: 12,
     borderRadius: 4,
     justifyContent: 'space-between',
   },
   consoleHeader: {
     color: PALETTE.parchment,
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: 'bold',
     letterSpacing: 2,
     textAlign: 'center',
-    marginBottom: 12,
+    marginBottom: 6,
     fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
   },
   telemetryStatusBox: {
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: 'rgba(44, 59, 46, 0.8)',
-    padding: 8,
+    padding: 6,
     borderRadius: 4,
     borderWidth: 1,
     borderColor: PALETTE.brass,
-    marginBottom: 12,
+    marginBottom: 6,
   },
   statusDot: {
     width: 8,
     height: 8,
     borderRadius: 4,
-    backgroundColor: '#4CAF50', // Live telemetry green signal indicator
     marginRight: 8,
   },
   telemetryStatusText: {
     color: PALETTE.parchmentLight,
+    fontSize: 8,
+    fontWeight: 'bold',
+    letterSpacing: 1,
+    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+  },
+
+  // --- TOGGLE ROW ---
+  toggleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: 'rgba(0,0,0,0.2)',
+    padding: 6,
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: 'rgba(176, 141, 87, 0.3)',
+    marginBottom: 8,
+  },
+  toggleTextContainer: {
+    flex: 1,
+  },
+  toggleLabel: {
+    color: PALETTE.parchment,
     fontSize: 9,
     fontWeight: 'bold',
     letterSpacing: 1,
     fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
   },
+  toggleSublabel: {
+    color: PALETTE.brass,
+    fontSize: 7,
+    letterSpacing: 0.5,
+  },
+
   progressTrackerContainer: {
-    marginBottom: 12,
+    marginBottom: 6,
   },
   progressLabel: {
     color: PALETTE.brass,
-    fontSize: 9,
+    fontSize: 8,
     fontWeight: 'bold',
     letterSpacing: 1,
-    marginBottom: 4,
+    marginBottom: 3,
   },
   progressBarTrack: {
-    height: 6,
+    height: 5,
     backgroundColor: '#1E281F',
     borderRadius: 3,
     overflow: 'hidden',
@@ -468,56 +579,61 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'center',
     alignItems: 'center',
-    marginVertical: 8,
-    gap: 12,
+    marginVertical: 4,
+    gap: 10,
   },
   stepNode: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
+    width: 8,
+    height: 8,
+    borderRadius: 4,
     borderWidth: 1.5,
     borderColor: PALETTE.brass,
     backgroundColor: 'transparent',
   },
   stepNodeActive: {
     backgroundColor: PALETTE.sienna,
-    transform: [{ scale: 1.2 }],
+    transform: [{ scale: 1.25 }],
   },
   stepNodeCompleted: {
     backgroundColor: PALETTE.brass,
   },
   actionSection: {
     marginTop: 'auto',
-    gap: 8,
+    gap: 6,
   },
   primaryButton: {
     backgroundColor: PALETTE.sienna,
-    paddingVertical: 14,
+    paddingVertical: 10,
     paddingHorizontal: 12,
     borderRadius: 4,
     alignItems: 'center',
-    minHeight: 48, // Accessibility 48dp target minimum
+    minHeight: 44,
     justifyContent: 'center',
     borderWidth: 1,
     borderColor: PALETTE.brass,
   },
   primaryButtonComplete: {
-    backgroundColor: '#2E6F40', // Tactical green upon final step unlock
+    backgroundColor: '#2E6F40',
+  },
+  buttonContentRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
   },
   buttonText: {
     color: PALETTE.parchmentLight,
     fontWeight: 'bold',
-    fontSize: 12,
-    letterSpacing: 2,
+    fontSize: 11,
+    letterSpacing: 1.5,
     fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
   },
   skipButton: {
     alignItems: 'center',
-    paddingVertical: 6,
+    paddingVertical: 4,
   },
   skipButtonText: {
     color: PALETTE.brass,
-    fontSize: 10,
+    fontSize: 9,
     letterSpacing: 1,
     textDecorationLine: 'underline',
     fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
