@@ -9,14 +9,39 @@ import {
   Alert,
   useWindowDimensions,
 } from 'react-native';
+import Animated, {
+  FadeIn,
+  FadeOut,
+  Layout,
+  useAnimatedStyle,
+  useSharedValue,
+  withSpring,
+} from 'react-native-reanimated';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import {
+  MapPin,
+  Target,
+  Compass,
+  Trophy,
+  BookOpen,
+  Camera,
+  Flame,
+  Plus,
+  ChevronLeft,
+  Package,
+  ShieldAlert,
+  FileSearch,
+} from 'lucide-react-native';
 import { FieldNavBar, NavigationTab } from '../components/FieldNavBar';
+
+export type IconType = 'map-pin' | 'target' | 'compass' | 'trophy' | 'book' | 'camera';
 
 export interface CacheItem {
   id: string;
   dbRef: string;
   title: string;
   category: 'cache' | 'ephemera';
-  iconSymbol: string;
+  iconType: IconType;
   coordinates: string;
   status: string;
   hint?: string;
@@ -28,14 +53,38 @@ interface InventoryScreenProps {
   onNavigate?: (screen: string) => void;
 }
 
-// Initial mock data mirroring your vintage wireframe designs
+// Helper component for scalable vector icon rendering (No raw emojis)
+const ItemIcon: React.FC<{ type: IconType; size?: number; color?: string }> = ({
+  type,
+  size = 22,
+  color = '#A64B2A',
+}) => {
+  switch (type) {
+    case 'map-pin':
+      return <MapPin size={size} color={color} />;
+    case 'target':
+      return <Target size={size} color={color} />;
+    case 'compass':
+      return <Compass size={size} color={color} />;
+    case 'trophy':
+      return <Trophy size={size} color={color} />;
+    case 'book':
+      return <BookOpen size={size} color={color} />;
+    case 'camera':
+      return <Camera size={size} color={color} />;
+    default:
+      return <Package size={size} color={color} />;
+  }
+};
+
+// Initial mock data mirroring vintage wireframe designs
 const INITIAL_CACHES: CacheItem[] = [
   {
     id: '1',
     dbRef: 'CX-0417',
     title: 'OAK HOLLOW',
     category: 'cache',
-    iconSymbol: '📍',
+    iconType: 'map-pin',
     coordinates: "40°45.6'N 122°26.3'W",
     status: 'IN FIELD',
     hint: 'Where the old oak splits the fence, ten steps toward the setting sun...',
@@ -46,7 +95,7 @@ const INITIAL_CACHES: CacheItem[] = [
     dbRef: 'CX-0892',
     title: 'FENCE POST',
     category: 'cache',
-    iconSymbol: '🎯',
+    iconType: 'target',
     coordinates: "40°45.9'N 122°25.8'W",
     status: 'IN FIELD',
     hint: 'Behind the third rusted iron latch near the south paddock boundary.',
@@ -57,7 +106,7 @@ const INITIAL_CACHES: CacheItem[] = [
     dbRef: 'CX-1104',
     title: 'RIVER BEND',
     category: 'cache',
-    iconSymbol: '🧭',
+    iconType: 'compass',
     coordinates: "40°46.2'N 122°24.1'W",
     status: 'IN FIELD',
     hint: 'Submerged under the flat granite rock near the river bend crossing.',
@@ -71,7 +120,7 @@ const INITIAL_EPHEMERA: CacheItem[] = [
     dbRef: 'EP-1120',
     title: 'BRASS TOKEN',
     category: 'ephemera',
-    iconSymbol: '🏆',
+    iconType: 'trophy',
     coordinates: "40°46.0'N 122°24.9'W",
     status: 'ARCHIVED',
     payloadText: 'Engraved: "To the brave explorers of 1962."',
@@ -81,7 +130,7 @@ const INITIAL_EPHEMERA: CacheItem[] = [
     dbRef: 'EP-1121',
     title: 'FIELD NOTE',
     category: 'ephemera',
-    iconSymbol: '📖',
+    iconType: 'book',
     coordinates: "40°45.8'N 122°25.1'W",
     status: 'ARCHIVED',
     payloadText: 'Weathered journal page detailing campus secrets.',
@@ -91,18 +140,43 @@ const INITIAL_EPHEMERA: CacheItem[] = [
     dbRef: 'EP-1122',
     title: 'OLD PHOTO',
     category: 'ephemera',
-    iconSymbol: '📷',
+    iconType: 'camera',
     coordinates: "40°45.5'N 122°26.0'W",
     status: 'ARCHIVED',
     payloadText: 'Monochrome snapshot of the central quad building.',
   },
 ];
 
+// Interactive Micro-Interaction Button Wrapper
+const AnimatedTouchableOpacity: React.FC<{
+  onPress: () => void;
+  style?: any;
+  children: React.ReactNode;
+}> = ({ onPress, style, children }) => {
+  const scale = useSharedValue(1);
+
+  const animatedStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: scale.value }],
+  }));
+
+  return (
+    <TouchableOpacity
+      activeOpacity={0.8}
+      onPress={onPress}
+      onPressIn={() => (scale.value = withSpring(0.96, { damping: 15 }))}
+      onPressOut={() => (scale.value = withSpring(1, { damping: 15 }))}
+    >
+      <Animated.View style={[style, animatedStyle]}>{children}</Animated.View>
+    </TouchableOpacity>
+  );
+};
+
 export const InventoryScreen: React.FC<InventoryScreenProps> = ({
   onBack,
   onNavigate,
 }) => {
   const { width, height } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
   const isLandscape = width > height;
 
   // State Management
@@ -141,7 +215,7 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({
       dbRef: `CX-${Math.floor(1000 + Math.random() * 9000)}`,
       title: newTitle.toUpperCase(),
       category: 'cache',
-      iconSymbol: '📍',
+      iconType: 'map-pin',
       coordinates: newCoordinates,
       status: 'IN FIELD',
       hint: newHint || 'No clue provided.',
@@ -171,7 +245,6 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({
           onPress: () => {
             const updated = items.filter((i) => i.id !== selectedItem.id);
             setItems(updated);
-            // Re-select first remaining item if possible
             const remainingTabItems = updated.filter((i) => i.category === activeTab);
             if (remainingTabItems.length > 0) {
               setSelectedId(remainingTabItems[0].id);
@@ -182,15 +255,25 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({
     );
   };
 
+  // Dynamic Inset Calculations for iPhone Dynamic Island / Notch in Landscape
+  const safePaddingLeft = Math.max(insets.left, 12);
+  const safePaddingRight = Math.max(insets.right, 12);
+
   return (
     <View style={styles.container}>
-      <View style={styles.splitWrapper}>
-        
+      <View
+        style={[
+          styles.splitWrapper,
+          {
+            paddingLeft: isLandscape ? safePaddingLeft : 0,
+            paddingRight: isLandscape ? safePaddingRight : 0,
+          },
+        ]}
+      >
         {/* ========================================== */}
         {/* LEFT VIEWPORT (60% OPERATIONAL PARCHMENT) */}
         {/* ========================================== */}
         <View style={styles.leftViewport}>
-          
           {/* Top Category Tabs */}
           <View style={styles.tabHeaderRow}>
             <TouchableOpacity
@@ -244,21 +327,33 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({
 
           {/* Sub-Header / Bury Trigger */}
           <View style={styles.leftSubHeader}>
-            <Text style={styles.sectionTitle}>
-              {isBurying
-                ? '★ FABRICATE & BURY NEW CACHE'
-                : activeTab === 'cache'
-                ? 'FIELD BAG (PLANTED)'
-                : 'DISCOVERED ARTIFACTS'}
-            </Text>
+            <View style={styles.sectionHeaderRow}>
+              <FileSearch size={14} color="#2A2420" style={styles.titleIcon} />
+              <Text style={styles.sectionTitle}>
+                {isBurying
+                  ? 'FABRICATE & BURY NEW CACHE'
+                  : activeTab === 'cache'
+                  ? 'FIELD BAG (PLANTED)'
+                  : 'DISCOVERED ARTIFACTS'}
+              </Text>
+            </View>
+
             {activeTab === 'cache' && (
               <TouchableOpacity
                 style={styles.buryToggleButton}
                 onPress={() => setIsBurying(!isBurying)}
               >
-                <Text style={styles.buryToggleText}>
-                  {isBurying ? '‹ CANCEL' : '+ BURY NEW CACHE'}
-                </Text>
+                {isBurying ? (
+                  <View style={styles.btnInnerRow}>
+                    <ChevronLeft size={12} color="#E8DCC0" />
+                    <Text style={styles.buryToggleText}>CANCEL</Text>
+                  </View>
+                ) : (
+                  <View style={styles.btnInnerRow}>
+                    <Plus size={12} color="#E8DCC0" />
+                    <Text style={styles.buryToggleText}>BURY NEW CACHE</Text>
+                  </View>
+                )}
               </TouchableOpacity>
             )}
           </View>
@@ -266,52 +361,61 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({
           {/* Dynamic Content Area: Form OR Grid */}
           {isBurying ? (
             /* BURY CACHE FORM (CREATE OPERATION) */
-            <ScrollView
-              style={styles.formContainer}
-              contentContainerStyle={{ paddingBottom: 20 }}
+            <Animated.View
+              entering={FadeIn.duration(200)}
+              exiting={FadeOut.duration(150)}
+              style={{ flex: 1 }}
             >
-              <Text style={styles.label}>CACHE TITLE / LOCATION NAME</Text>
-              <TextInput
-                style={styles.input}
-                placeholder="e.g., OLD WINDMILL CREST"
-                placeholderTextColor="#A09580"
-                value={newTitle}
-                onChangeText={setNewTitle}
-              />
-
-              <Text style={styles.label}>GPS COORDINATES (AUTO-LOCKED)</Text>
-              <TextInput
-                style={[styles.input, styles.inputDisabled]}
-                value={newCoordinates}
-                editable={false}
-              />
-
-              <Text style={styles.label}>CLUE / RIDDLE HINT</Text>
-              <TextInput
-                style={[styles.input, styles.textArea]}
-                placeholder="Enter secret clue for hunters..."
-                placeholderTextColor="#A09580"
-                multiline
-                numberOfLines={3}
-                value={newHint}
-                onChangeText={setNewHint}
-              />
-
-              <TouchableOpacity
-                style={styles.sealAndBuryBtn}
-                onPress={handleBuryCache}
+              <ScrollView
+                style={styles.formContainer}
+                contentContainerStyle={{ paddingBottom: 20 }}
               >
-                <Text style={styles.sealAndBuryText}>SEAL & BURY CACHE</Text>
-              </TouchableOpacity>
-            </ScrollView>
+                <Text style={styles.label}>CACHE TITLE / LOCATION NAME</Text>
+                <TextInput
+                  style={styles.input}
+                  placeholder="e.g., OLD WINDMILL CREST"
+                  placeholderTextColor="#A09580"
+                  value={newTitle}
+                  onChangeText={setNewTitle}
+                />
+
+                <Text style={styles.label}>GPS COORDINATES (AUTO-LOCKED)</Text>
+                <TextInput
+                  style={[styles.input, styles.inputDisabled]}
+                  value={newCoordinates}
+                  editable={false}
+                />
+
+                <Text style={styles.label}>CLUE / RIDDLE HINT</Text>
+                <TextInput
+                  style={[styles.input, styles.textArea]}
+                  placeholder="Enter secret clue for hunters..."
+                  placeholderTextColor="#A09580"
+                  multiline
+                  numberOfLines={3}
+                  value={newHint}
+                  onChangeText={setNewHint}
+                />
+
+                <AnimatedTouchableOpacity
+                  style={styles.sealAndBuryBtn}
+                  onPress={handleBuryCache}
+                >
+                  <Text style={styles.sealAndBuryText}>SEAL & BURY CACHE</Text>
+                </AnimatedTouchableOpacity>
+              </ScrollView>
+            </Animated.View>
           ) : (
             /* ITEM GRID (READ OPERATION) */
             <ScrollView contentContainerStyle={styles.gridContainer}>
-              <View style={styles.grid}>
+              <Animated.View
+                layout={Layout.springify()}
+                style={styles.grid}
+              >
                 {currentList.map((item) => {
                   const isSelected = selectedItem?.id === item.id;
                   return (
-                    <TouchableOpacity
+                    <AnimatedTouchableOpacity
                       key={item.id}
                       style={[
                         styles.itemCard,
@@ -319,11 +423,17 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({
                       ]}
                       onPress={() => setSelectedId(item.id)}
                     >
-                      <Text style={styles.itemIcon}>{item.iconSymbol}</Text>
+                      <View style={styles.iconWrapper}>
+                        <ItemIcon
+                          type={item.iconType}
+                          size={24}
+                          color={isSelected ? '#A64B2A' : '#2A2420'}
+                        />
+                      </View>
                       <Text style={styles.itemText} numberOfLines={1}>
                         {item.title}
                       </Text>
-                    </TouchableOpacity>
+                    </AnimatedTouchableOpacity>
                   );
                 })}
 
@@ -334,7 +444,7 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({
                     </Text>
                   </View>
                 )}
-              </View>
+              </Animated.View>
             </ScrollView>
           )}
         </View>
@@ -344,13 +454,24 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({
         {/* ========================================== */}
         <View style={styles.rightViewport}>
           <View style={styles.telemetryPanel}>
-            <Text style={styles.panelTitle}>★ INSPECTION DETAIL</Text>
+            <View style={styles.panelHeaderRow}>
+              <ShieldAlert size={14} color="#E8DCC0" />
+              <Text style={styles.panelTitle}>INSPECTION DETAIL</Text>
+            </View>
             <View style={styles.divider} />
 
             {selectedItem ? (
-              <View style={styles.detailsBody}>
+              <Animated.View
+                entering={FadeIn.duration(200)}
+                key={selectedItem.id}
+                style={styles.detailsBody}
+              >
                 <View style={styles.iconCircle}>
-                  <Text style={styles.largeIcon}>{selectedItem.iconSymbol}</Text>
+                  <ItemIcon
+                    type={selectedItem.iconType}
+                    size={22}
+                    color="#E8DCC0"
+                  />
                 </View>
 
                 <Text style={styles.itemHeaderTitle}>{selectedItem.title}</Text>
@@ -376,7 +497,7 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({
                     <Text style={styles.hintText}>"{selectedItem.hint}"</Text>
                   </View>
                 )}
-              </View>
+              </Animated.View>
             ) : (
               <View style={styles.detailsBody}>
                 <Text style={styles.metaLabel}>No items selected for inspection.</Text>
@@ -385,24 +506,26 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({
 
             {/* DELETE CTA BUTTON */}
             {selectedItem && (
-              <TouchableOpacity
+              <AnimatedTouchableOpacity
                 style={styles.burnButton}
                 onPress={handleBurnEvidence}
               >
-                <Text style={styles.burnButtonText}>
-                  🔥 BURN EVIDENCE / ERASE CACHE
-                </Text>
-              </TouchableOpacity>
+                <View style={styles.burnBtnInner}>
+                  <Flame size={14} color="#F3ECD8" />
+                  <Text style={styles.burnButtonText}>
+                    BURN EVIDENCE / ERASE CACHE
+                  </Text>
+                </View>
+              </AnimatedTouchableOpacity>
             )}
           </View>
 
-{/* Integrated Field Navigation Bar */}
-<FieldNavBar 
-  currentTab={activeScreen as NavigationTab} 
-  onNavigate={handleNavigate} 
-/>
+          {/* Integrated Field Navigation Bar */}
+          <FieldNavBar
+            currentTab={activeScreen as NavigationTab}
+            onNavigate={handleNavigate}
+          />
         </View>
-
       </View>
     </View>
   );
@@ -465,6 +588,14 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 12,
   },
+  sectionHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  titleIcon: {
+    marginTop: 1,
+  },
   sectionTitle: {
     fontSize: 12,
     fontWeight: 'bold',
@@ -474,10 +605,15 @@ const styles = StyleSheet.create({
   buryToggleButton: {
     backgroundColor: '#2C3B2E',
     paddingHorizontal: 10,
-    paddingVertical: 5,
+    paddingVertical: 6,
     borderRadius: 3,
     borderWidth: 1,
     borderColor: '#B08D57',
+  },
+  btnInnerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
   },
   buryToggleText: {
     color: '#E8DCC0',
@@ -510,8 +646,7 @@ const styles = StyleSheet.create({
     borderWidth: 2,
     borderColor: '#A64B2A',
   },
-  itemIcon: {
-    fontSize: 24,
+  iconWrapper: {
     marginBottom: 6,
   },
   itemText: {
@@ -523,6 +658,7 @@ const styles = StyleSheet.create({
   emptyState: {
     padding: 20,
     alignItems: 'center',
+    width: '100%',
   },
   emptyText: {
     color: '#8A7E6B',
@@ -589,12 +725,17 @@ const styles = StyleSheet.create({
   telemetryPanel: {
     flex: 1,
   },
+  panelHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 6,
+  },
   panelTitle: {
     color: '#E8DCC0',
     fontWeight: 'bold',
-    fontSize: 13,
+    fontSize: 12,
     letterSpacing: 1,
-    marginBottom: 6,
   },
   divider: {
     height: 1,
@@ -606,9 +747,9 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
   },
   iconCircle: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
     backgroundColor: '#1C2A20',
     borderWidth: 1,
     borderColor: '#B08D57',
@@ -616,12 +757,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 8,
   },
-  largeIcon: {
-    fontSize: 22,
-  },
   itemHeaderTitle: {
     color: '#E8DCC0',
-    fontSize: 15,
+    fontSize: 14,
     fontWeight: 'bold',
     letterSpacing: 1,
     marginBottom: 10,
@@ -673,6 +811,11 @@ const styles = StyleSheet.create({
     borderRadius: 4,
     alignItems: 'center',
     marginTop: 10,
+  },
+  burnBtnInner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
   },
   burnButtonText: {
     color: '#F3ECD8',

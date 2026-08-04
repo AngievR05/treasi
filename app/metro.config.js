@@ -14,11 +14,14 @@ module.exports = (() => {
   config.resolver = {
     ...resolver,
     assetExts: resolver.assetExts.filter((ext) => ext !== 'svg'),
-    sourceExts: [...resolver.sourceExts, 'svg'],
+    sourceExts: [...resolver.sourceExts, 'svg', 'mjs'],
     extraNodeModules: {
       'react-native-safe-area-context': path.resolve(__dirname, 'node_modules/react-native-safe-area-context'),
+      react: path.resolve(__dirname, 'node_modules/react'),
+      'react-native': path.resolve(__dirname, 'node_modules/react-native'),
     },
   };
+  config.watchFolders = [path.resolve(__dirname, 'node_modules')];
 
   return config;
 })();
