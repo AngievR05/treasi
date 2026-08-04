@@ -80,19 +80,19 @@ const styles = StyleSheet.create({
   },
   leftViewport: {
     backgroundColor: '#E8DCC0',
-    justifyContent: 'center',
+    justifyContent: 'flex-start',
     alignItems: 'stretch',
   },
   rightViewport: {
     backgroundColor: '#2C3B2E',
-    justifyContent: 'center',
+    justifyContent: 'flex-start',
     alignItems: 'stretch',
   },
   innerConsoleContainer: {
     flex: 1,
-    paddingHorizontal: 20,
-    paddingVertical: 16,
-    justifyContent: 'space-between',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    justifyContent: 'flex-start',
   },
   brassDivider: {
     width: 6,

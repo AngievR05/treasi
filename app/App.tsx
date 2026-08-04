@@ -29,6 +29,8 @@ function MainNavigator() {
   const { width, height } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const isLandscape = width > height;
+  const horizontalEdgePadding = Math.min(insets.left, 6);
+  const horizontalEdgePaddingRight = Math.min(insets.right, 6);
 
   // Active Navigation State
   const [currentScreen, setCurrentScreen] = useState<ScreenState>('SPLASH');
@@ -110,11 +112,11 @@ function MainNavigator() {
       style={[
         styles.container, 
         { 
-          // Dynamic Island & Notch Hardware Padding for Landscape
-          paddingLeft: insets.left, 
-          paddingRight: insets.right,
-          paddingTop: insets.top,
-          paddingBottom: insets.bottom 
+          // Keep a minimal edge buffer while letting content fill the screen
+          paddingLeft: horizontalEdgePadding,
+          paddingRight: horizontalEdgePaddingRight,
+          paddingTop: 0,
+          paddingBottom: 0,
         }
       ]}
     >
