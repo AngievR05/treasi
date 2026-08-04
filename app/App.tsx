@@ -1,8 +1,7 @@
-// App.tsx
 import React, { useState, useEffect } from 'react';
 import { StatusBar } from 'expo-status-bar';
 import { StyleSheet, Text, View, useWindowDimensions } from 'react-native';
-import { SafeAreaProvider } from 'react-native-safe-area-context';
+import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 // Screen Imports
 import { SplashScreen } from './src/screens/SplashScreen';
@@ -26,17 +25,18 @@ type ScreenState =
   | 'INVENTORY' 
   | 'PROFILE';
 
-export default function App() {
+function MainNavigator() {
   const { width, height } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
   const isLandscape = width > height;
 
   // Active Navigation State
   const [currentScreen, setCurrentScreen] = useState<ScreenState>('SPLASH');
 
   // Flow controls - Toggles are OFF by default per specification.
-  // When false, onboarding and auth flow are always enforced on launch.
-  const [skipOnboardingToggle, setSkipOnboardingToggle] = useState<boolean>(false);
-  const [bypassAuthToggle, setBypassAuthToggle] = useState<boolean>(false);
+  // Enforces Onboarding and Auth on launch.
+  const [skipOnboardingToggle] = useState<boolean>(false);
+  const [bypassAuthToggle] = useState<boolean>(false);
 
   // Splash Screen Timeout Logic
   useEffect(() => {
@@ -95,22 +95,39 @@ export default function App() {
   };
 
   return (
+    <View 
+      style={[
+        styles.container, 
+        { 
+          // Dynamic Island & Notch Hardware Padding for Landscape
+          paddingLeft: insets.left, 
+          paddingRight: insets.right,
+          paddingTop: insets.top,
+          paddingBottom: insets.bottom 
+        }
+      ]}
+    >
+      <StatusBar style="light" hidden />
+      
+      {isLandscape ? (
+        renderActiveScreen()
+      ) : (
+        /* Accessibility safety net for landscape constraint */
+        <View style={styles.orientationWarning}>
+          <Text style={styles.warningTitle}>TILT INSTRUMENT HORIZONTALLY</Text>
+          <Text style={styles.warningSubText}>
+            Treasi requires landscape alignment to calibrate sensor array.
+          </Text>
+        </View>
+      )}
+    </View>
+  );
+}
+
+export default function App() {
+  return (
     <SafeAreaProvider>
-      <View style={styles.container}>
-        <StatusBar style="light" hidden />
-        
-        {isLandscape ? (
-          renderActiveScreen()
-        ) : (
-          /* Accessibility safety net for landscape constraint */
-          <View style={styles.orientationWarning}>
-            <Text style={styles.warningTitle}>TILT INSTRUMENT HORIZONTALLY</Text>
-            <Text style={styles.warningSubText}>
-              Treasi requires landscape alignment to calibrate sensor array.
-            </Text>
-          </View>
-        )}
-      </View>
+      <MainNavigator />
     </SafeAreaProvider>
   );
 }
@@ -118,7 +135,7 @@ export default function App() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#2C3B2E', // Forest Deep
+    backgroundColor: '#2C3B2E', // Forest Deep Chassis
   },
   orientationWarning: {
     flex: 1,

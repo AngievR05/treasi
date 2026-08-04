@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -7,15 +7,26 @@ import {
   ScrollView,
   useWindowDimensions,
   Alert,
+  ActivityIndicator,
 } from 'react-native';
-import MapView, { Marker, PROVIDER_DEFAULT } from 'react-native-maps';
-import { FieldNavBar, NavigationTab } from '../components/FieldNavBar';
+import MapView, { Marker, PROVIDER_DEFAULT, Region } from 'react-native-maps';
+import * as Location from 'expo-location';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import Animated, {
+  useSharedValue,
+  useAnimatedStyle,
+  withSpring,
+  withRepeat,
+  withSequence,
+  withTiming,
+} from 'react-native-reanimated';
+import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
+import { FieldNavBar } from '../components/FieldNavBar';
 
 interface Props {
   onNavigate: (screen: string) => void;
 }
 
-// Custom map styling matrix array to transform map vectors into vintage parchment tones
 const VINTAGE_MAP_STYLE = [
   { elementType: 'geometry', stylers: [{ color: '#E8DCC0' }] },
   { elementType: 'labels.text.fill', stylers: [{ color: '#2A2420' }] },
@@ -28,29 +39,123 @@ const VINTAGE_MAP_STYLE = [
   { featureType: 'water', elementType: 'geometry', stylers: [{ color: '#A0B2A6' }] },
 ];
 
+const AnimatedTouchableOpacity = Animated.createAnimatedComponent(TouchableOpacity);
+
 export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
   const { width, height } = useWindowDimensions();
   const isLandscape = width > height;
+  const insets = useSafeAreaInsets();
+  const mapRef = useRef<MapView | null>(null);
 
-  // Mock initial coordinates (replace with live Expo Location state in Phase 3)
-  const [region] = useState({
+  // Sensor state for live coordinates
+  const [userLocation, setUserLocation] = useState<Location.LocationObject | null>(null);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [isInitializingLocation, setIsInitializingLocation] = useState(true);
+
+  // Initial region (Defaulting to Pretoria campus baseline until live GPS fix)
+  const [region, setRegion] = useState<Region>({
     latitude: -25.7479,
     longitude: 28.2293,
-    latitudeDelta: 0.0122,
-    longitudeDelta: 0.0122,
+    latitudeDelta: 0.008,
+    longitudeDelta: 0.008,
   });
 
-  // Mock markers representing hidden field caches
+  // Mock field cache markers
   const [caches] = useState([
     { id: '1', title: 'OLD PROSPECT', latitude: -25.7465, longitude: 28.2280, code: 'A' },
-    { id: '2', title: 'BEAR CREEK', latitude: -25.7490, longitude: 28.2250, code: 'A' },
-    { id: '3', title: 'PINE RIDGE', latitude: -25.7440, longitude: 28.2310, code: 'A' },
+    { id: '2', title: 'BEAR CREEK', latitude: -25.7490, longitude: 28.2250, code: 'B' },
+    { id: '3', title: 'PINE RIDGE', latitude: -25.7440, longitude: 28.2310, code: 'C' },
   ]);
 
+  // Reanimated Shared Values for Tactile Tweens
+  const buttonScale = useSharedValue(1);
+  const pulseOpacity = useSharedValue(1);
+
+  useEffect(() => {
+    // Continuous opacity pulse effect for the radar badge
+    pulseOpacity.value = withRepeat(
+      withSequence(
+        withTiming(0.4, { duration: 1000 }),
+        withTiming(1.0, { duration: 1000 })
+      ),
+      -1,
+      true
+    );
+
+    let locationSubscription: Location.LocationSubscription | null = null;
+
+    (async () => {
+      try {
+        const { status } = await Location.requestForegroundPermissionsAsync();
+        if (status !== 'granted') {
+          setErrorMsg('Location permissions denied. Reverting to manual positioning.');
+          setIsInitializingLocation(false);
+          return;
+        }
+
+        const initialPosition = await Location.getCurrentPositionAsync({
+          accuracy: Location.Accuracy.High,
+        });
+        
+        setUserLocation(initialPosition);
+        const newRegion = {
+          latitude: initialPosition.coords.latitude,
+          longitude: initialPosition.coords.longitude,
+          latitudeDelta: 0.008,
+          longitudeDelta: 0.008,
+        };
+        setRegion(newRegion);
+        mapRef.current?.animateToRegion(newRegion, 1200);
+        setIsInitializingLocation(false);
+
+        // Subscribe to live position stream
+        locationSubscription = await Location.watchPositionAsync(
+          {
+            accuracy: Location.Accuracy.Balanced,
+            timeInterval: 3000,
+            distanceInterval: 5,
+          },
+          (newLocation) => {
+            setUserLocation(newLocation);
+          }
+        );
+      } catch (err) {
+        setErrorMsg('Error initializing GPS stream.');
+        setIsInitializingLocation(false);
+      }
+    })();
+
+    return () => {
+      if (locationSubscription) {
+        locationSubscription.remove();
+      }
+    };
+  }, []);
+
+  const animatedButtonStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: buttonScale.value }],
+  }));
+
+  const animatedBadgeStyle = useAnimatedStyle(() => ({
+    opacity: pulseOpacity.value,
+  }));
+
+  const handlePressIn = () => {
+    buttonScale.value = withSpring(0.95);
+  };
+
+  const handlePressOut = () => {
+    buttonScale.value = withSpring(1.0);
+  };
+
   const handleStampLocation = () => {
+    const coordsText = userLocation
+      ? `Lat: ${userLocation.coords.latitude.toFixed(4)}, Long: ${userLocation.coords.longitude.toFixed(4)}`
+      : 'Current GPS telemetry logged.';
+
     Alert.alert(
       'LOCATION STAMPED',
-      'Current GPS coordinates logged to Field Register. Ready to bury a new cache?',
+      `${coordsText}\n\nReady to bury a new field cache here?`,
       [
         { text: 'CANCEL', style: 'cancel' },
         { text: 'BURY CACHE', onPress: () => onNavigate('HUNT') },
@@ -59,10 +164,22 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
   };
 
   return (
-    <View style={[styles.container, { flexDirection: isLandscape ? 'row' : 'column' }]}>
-      {/* LEFT VIEWPORT: Operational Map Canvas (60% Width in Landscape) */}
+    <View
+      style={[
+        styles.container,
+        {
+          flexDirection: isLandscape ? 'row' : 'column',
+          // Account for iPhone Dynamic Island and landscape notch padding dynamically
+          paddingLeft: isLandscape ? Math.max(insets.left, 12) : 0,
+          paddingRight: isLandscape ? Math.max(insets.right, 12) : 0,
+          paddingTop: isLandscape ? 0 : Math.max(insets.top, 12),
+        },
+      ]}
+    >
+      {/* LEFT VIEWPORT: Operational Parchment Canvas (60% Width in Landscape) */}
       <View style={styles.leftViewport}>
         <MapView
+          ref={mapRef}
           provider={PROVIDER_DEFAULT}
           style={StyleSheet.absoluteFillObject}
           initialRegion={region}
@@ -83,15 +200,29 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
           ))}
         </MapView>
 
-        {/* Vintage Top-Left Compass Overlay Indicator */}
+        {/* Vintage Compass Indicator */}
         <View style={styles.compassOverlay}>
-          <Text style={styles.compassText}>🧭 N</Text>
+          <Ionicons name="compass-outline" size={16} color="#2A2420" />
+          <Text style={styles.compassText}>N</Text>
         </View>
 
-        {/* You Are Here Indicator Header */}
-        <View style={styles.locationBadge}>
-          <Text style={styles.locationBadgeText}>YOU ARE HERE</Text>
-        </View>
+        {/* Live GPS Status Indicator Header */}
+        <Animated.View style={[styles.locationBadge, animatedBadgeStyle]}>
+          <Ionicons name="location-sharp" size={12} color="#A64B2A" style={{ marginRight: 4 }} />
+          <Text style={styles.locationBadgeText}>
+            {isInitializingLocation
+              ? 'ACQUIRING SATELLITE FIX...'
+              : userLocation
+              ? 'GPS SIGNAL LOCK'
+              : 'STATIC SIGNAL'}
+          </Text>
+        </Animated.View>
+
+        {isInitializingLocation && (
+          <View style={styles.loadingContainer}>
+            <ActivityIndicator size="small" color="#A64B2A" />
+          </View>
+        )}
       </View>
 
       {/* RIGHT VIEWPORT: Command Console (40% Width in Landscape) */}
@@ -102,8 +233,13 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
           <View style={styles.rivetTR} />
           <View style={styles.rivetBL} />
           <View style={styles.rivetBR} />
-          
-          <Text style={styles.statusHeader}>★ FIELD STATUS ★</Text>
+
+          <View style={styles.statusHeaderRow}>
+            <MaterialCommunityIcons name="star-four-points" size={12} color="#B08D57" />
+            <Text style={styles.statusHeader}>FIELD STATUS</Text>
+            <MaterialCommunityIcons name="star-four-points" size={12} color="#B08D57" />
+          </View>
+
           <View style={styles.scoreRow}>
             <Text style={styles.scoreText}>2,340</Text>
             <Text style={styles.ptsText}>PTS</Text>
@@ -113,7 +249,11 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
 
         {/* Recent Signals Feed */}
         <View style={styles.signalsContainer}>
-          <Text style={styles.sectionTitle}>★ RECENT SIGNALS</Text>
+          <View style={styles.sectionHeaderRow}>
+            <MaterialCommunityIcons name="radio-handheld" size={14} color="#B08D57" />
+            <Text style={styles.sectionTitle}>RECENT SIGNALS</Text>
+          </View>
+
           <ScrollView
             style={styles.signalsScroll}
             showsVerticalScrollIndicator={false}
@@ -121,7 +261,10 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
           >
             <View style={styles.signalCard}>
               <View style={styles.signalHeader}>
-                <Text style={styles.signalAuthor}>((o)) RANGER_JACK</Text>
+                <View style={styles.authorRow}>
+                  <Ionicons name="radio-outline" size={12} color="#A64B2A" style={{ marginRight: 4 }} />
+                  <Text style={styles.signalAuthor}>RANGER_JACK</Text>
+                </View>
                 <Text style={styles.signalTime}>10:26 AM</Text>
               </View>
               <Text style={styles.signalBody}>
@@ -131,7 +274,10 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
 
             <View style={styles.signalCard}>
               <View style={styles.signalHeader}>
-                <Text style={styles.signalAuthor}>((o)) WILDER_WREN</Text>
+                <View style={styles.authorRow}>
+                  <Ionicons name="radio-outline" size={12} color="#A64B2A" style={{ marginRight: 4 }} />
+                  <Text style={styles.signalAuthor}>WILDER_WREN</Text>
+                </View>
                 <Text style={styles.signalTime}>YESTERDAY</Text>
               </View>
               <Text style={styles.signalBody}>
@@ -141,14 +287,17 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
           </ScrollView>
         </View>
 
-        {/* Primary Action Button */}
-        <TouchableOpacity
-          style={styles.stampButton}
-          activeOpacity={0.8}
+        {/* Primary Animated Stamp Action Button */}
+        <AnimatedTouchableOpacity
+          style={[styles.stampButton, animatedButtonStyle]}
+          activeOpacity={0.85}
+          onPressIn={handlePressIn}
+          onPressOut={handlePressOut}
           onPress={handleStampLocation}
         >
+          <Ionicons name="print-outline" size={16} color="#F3ECD8" style={{ marginRight: 6 }} />
           <Text style={styles.stampButtonText}>STAMP LOCATION</Text>
-        </TouchableOpacity>
+        </AnimatedTouchableOpacity>
 
         {/* Decoupled Navigation Component */}
         <FieldNavBar currentTab="MAP" onNavigate={onNavigate} />
@@ -175,6 +324,16 @@ const styles = StyleSheet.create({
     padding: 12,
     justifyContent: 'space-between',
   },
+  loadingContainer: {
+    position: 'absolute',
+    bottom: 16,
+    right: 16,
+    backgroundColor: '#E8DCC0',
+    padding: 6,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: '#B08D57',
+  },
   /* Map Overlays */
   compassOverlay: {
     position: 'absolute',
@@ -186,6 +345,9 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     paddingHorizontal: 8,
     paddingVertical: 4,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
   },
   compassText: {
     fontSize: 12,
@@ -202,6 +364,8 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     paddingVertical: 3,
     borderRadius: 2,
+    flexDirection: 'row',
+    alignItems: 'center',
   },
   locationBadgeText: {
     fontSize: 10,
@@ -233,11 +397,16 @@ const styles = StyleSheet.create({
     backgroundColor: '#E8DCC0',
     borderWidth: 2,
     borderColor: '#B08D57',
-    paddingVertical: 10,
+    paddingVertical: 8,
     paddingHorizontal: 12,
     alignItems: 'center',
     position: 'relative',
     borderRadius: 2,
+  },
+  statusHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
   },
   statusHeader: {
     color: '#2A2420',
@@ -279,12 +448,17 @@ const styles = StyleSheet.create({
     flex: 1,
     marginVertical: 8,
   },
+  sectionHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginBottom: 6,
+  },
   sectionTitle: {
     color: '#B08D57',
     fontSize: 10,
     fontWeight: 'bold',
     letterSpacing: 1.5,
-    marginBottom: 6,
   },
   signalsScroll: {
     flex: 1,
@@ -300,6 +474,10 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     marginBottom: 4,
+  },
+  authorRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
   },
   signalAuthor: {
     color: '#A64B2A',
@@ -323,7 +501,9 @@ const styles = StyleSheet.create({
     borderRadius: 4,
     borderWidth: 1,
     borderColor: '#B08D57',
+    flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'center',
     marginBottom: 8,
   },
   stampButtonText: {

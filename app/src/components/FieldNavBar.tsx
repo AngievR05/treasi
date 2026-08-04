@@ -1,5 +1,6 @@
 import React from 'react';
 import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 
 export type NavigationTab = 'MAP' | 'HUNT' | 'LEADERBOARD' | 'INVENTORY' | 'PROFILE';
 
@@ -11,15 +12,15 @@ interface FieldNavBarProps {
 interface NavItem {
   key: NavigationTab;
   label: string;
-  symbol: string;
+  iconName: keyof typeof Ionicons.glyphMap;
 }
 
 const NAV_ITEMS: NavItem[] = [
-  { key: 'MAP', label: 'MAP', symbol: '⦿' },
-  { key: 'HUNT', label: 'HUNT', symbol: '🧭' },
-  { key: 'LEADERBOARD', label: 'RANKS', symbol: '🏆' },
-  { key: 'INVENTORY', label: 'BAG', symbol: '🎒' },
-  { key: 'PROFILE', label: 'PROFILE', symbol: '👤' },
+  { key: 'MAP', label: 'MAP', iconName: 'map' },
+  { key: 'HUNT', label: 'HUNT', iconName: 'compass' },
+  { key: 'LEADERBOARD', label: 'RANKS', iconName: 'trophy' },
+  { key: 'INVENTORY', label: 'BAG', iconName: 'briefcase' },
+  { key: 'PROFILE', label: 'PROFILE', iconName: 'person' },
 ];
 
 export const FieldNavBar: React.FC<FieldNavBarProps> = ({ currentTab, onNavigate }) => {
@@ -31,12 +32,15 @@ export const FieldNavBar: React.FC<FieldNavBarProps> = ({ currentTab, onNavigate
           <TouchableOpacity
             key={item.key}
             style={[styles.navButton, isActive && styles.navButtonActive]}
-            activeOpacity={0.7}
+            activeOpacity={0.75}
             onPress={() => onNavigate(item.key)}
           >
-            <Text style={[styles.navSymbol, isActive && styles.navTextActive]}>
-              {item.symbol}
-            </Text>
+            <Ionicons
+              name={item.iconName}
+              size={16}
+              color={isActive ? '#F3ECD8' : '#B08D57'}
+              style={styles.navIcon}
+            />
             <Text style={[styles.navLabel, isActive && styles.navTextActive]}>
               {item.label}
             </Text>
@@ -69,9 +73,7 @@ const styles = StyleSheet.create({
   navButtonActive: {
     backgroundColor: '#A64B2A',
   },
-  navSymbol: {
-    color: '#B08D57',
-    fontSize: 14,
+  navIcon: {
     marginBottom: 2,
   },
   navLabel: {

@@ -1,4 +1,3 @@
-// src/components/LandscapeSplitLayout.tsx
 import React from 'react';
 import { StyleSheet, View, useWindowDimensions } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -8,12 +7,6 @@ interface LandscapeSplitLayoutProps {
   rightComponent: React.ReactNode;
 }
 
-/**
- * LandscapeSplitLayout
- * Enforces the rigid 60/40 split dashboard system for the Treasi Field Console.
- * Left Viewport (60%): Dedicated to high-frequency analogue sensors/maps.
- * Right Panel (40%): Thumb-optimized mechanical command controls.
- */
 export const LandscapeSplitLayout: React.FC<LandscapeSplitLayoutProps> = ({
   leftComponent,
   rightComponent,
@@ -33,12 +26,11 @@ export const LandscapeSplitLayout: React.FC<LandscapeSplitLayoutProps> = ({
         style={[
           styles.wrapper, 
           { flexDirection: dynamicDirection },
-          // Applies safe horizontal padding to prevent Dynamic Island/notch overlap
+          // Prevents hardware Dynamic Island / camera notch overlap in landscape
           { paddingLeft: insets.left, paddingRight: insets.right }
         ]}
       >
-        
-        {/* Left Operational Viewport (60% Width) - Houses Map Canvas / Radar Instrument */}
+        {/* Left Operational Viewport (60% Width) */}
         <View 
           style={[styles.leftViewport, isLandscape ? styles.flexSixty : styles.flexFull]}
           accessibilityRole="summary"
@@ -46,7 +38,7 @@ export const LandscapeSplitLayout: React.FC<LandscapeSplitLayoutProps> = ({
           {leftComponent}
         </View>
 
-        {/* Decorative Structural Border Pin (Asymmetric Brass Trim Divider) */}
+        {/* Brass Hardware Trim Divider */}
         {isLandscape && (
           <View 
             style={styles.brassDivider} 
@@ -55,16 +47,15 @@ export const LandscapeSplitLayout: React.FC<LandscapeSplitLayoutProps> = ({
           />
         )}
 
-        {/* Right Control Console Panel (40% Width) - Ergonomic Target Zone */}
+        {/* Right Command Console Panel (40% Width) */}
         <View 
           style={[styles.rightViewport, isLandscape ? styles.flexForty : styles.flexFull]}
           accessibilityRole="none"
         >
-          <View style={styles.innerConsoleContainer}>
+          <View style={[styles.innerConsoleContainer, { paddingBottom: Math.max(insets.bottom, 16) }]}>
             {rightComponent}
           </View>
         </View>
-
       </View>
     </SafeAreaView>
   );
@@ -73,7 +64,7 @@ export const LandscapeSplitLayout: React.FC<LandscapeSplitLayoutProps> = ({
 const styles = StyleSheet.create({
   outerContainer: {
     flex: 1,
-    backgroundColor: '#2C3B2E', // Forest Deep
+    backgroundColor: '#2C3B2E',
   },
   wrapper: {
     flex: 1,
@@ -88,12 +79,12 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   leftViewport: {
-    backgroundColor: '#E8DCC0', // Parchment Base
+    backgroundColor: '#E8DCC0',
     justifyContent: 'center',
     alignItems: 'stretch',
   },
   rightViewport: {
-    backgroundColor: '#2C3B2E', // Forest Deep chassis frame
+    backgroundColor: '#2C3B2E',
     justifyContent: 'center',
     alignItems: 'stretch',
   },
@@ -105,11 +96,11 @@ const styles = StyleSheet.create({
   },
   brassDivider: {
     width: 6,
-    backgroundColor: '#B08D57', // Brass Trim
+    backgroundColor: '#B08D57',
     height: '100%',
     borderLeftWidth: 1,
     borderRightWidth: 1,
-    borderColor: '#2A2420', // Ink Black
+    borderColor: '#2A2420',
     opacity: 0.9,
   },
 });
