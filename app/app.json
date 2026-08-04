@@ -15,7 +15,8 @@
       "requireFullScreen": true
     },
     "android": {
-      "screenOrientation": "landscape"
+      "screenOrientation": "landscape",
+      "package": "com.angievr05.treasi"
     }
   }
 }
