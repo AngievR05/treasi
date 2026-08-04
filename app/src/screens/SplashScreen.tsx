@@ -8,6 +8,7 @@ import {
   useWindowDimensions,
   Easing,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 // Standard SVG import (requires react-native-svg & react-native-svg-transformer)
 import Logo from '../../assets/Logo.svg';
@@ -30,7 +31,8 @@ const BOOT_DIAGNOSTICS = [
 
 export const SplashScreen: React.FC<Props> = ({ onFinish }) => {
   const { width, height } = useWindowDimensions();
-  
+  const insets = useSafeAreaInsets();
+
   // Animation References
   const progressAnim = useRef(new Animated.Value(0)).current;
   const pulseAnim = useRef(new Animated.Value(1)).current;
@@ -76,7 +78,7 @@ export const SplashScreen: React.FC<Props> = ({ onFinish }) => {
   useEffect(() => {
     const animation = Animated.timing(progressAnim, {
       toValue: 100,
-      duration: 9600, // Slowed down to ~1.2s per telemetry entry
+      duration: 9600,
       easing: Easing.linear,
       useNativeDriver: false, // Required for progress bar width interpolation
     });
@@ -118,12 +120,26 @@ export const SplashScreen: React.FC<Props> = ({ onFinish }) => {
   const fontMonospace = Platform.OS === 'ios' ? 'Courier' : 'monospace';
 
   return (
-    <Animated.View style={[styles.container, { width, height, opacity: fadeAnim }]}>
-      {/* ================= LEFT PANEL: Branding & Dynamic Odometer (60%) ================= */}
+    <Animated.View
+      style={[
+        styles.container,
+        {
+          width,
+          height,
+          opacity: fadeAnim,
+          // Hardware notch & Dynamic Island compensation in landscape
+          paddingTop: Math.max(insets.top, 12),
+          paddingBottom: Math.max(insets.bottom, 12),
+          paddingLeft: Math.max(insets.left, 16),
+          paddingRight: Math.max(insets.right, 16),
+        },
+      ]}
+    >
+      {/* ================= LEFT PANEL: Branding & Odometer (60%) ================= */}
       <View style={styles.leftPanel}>
         {/* Animated Pulsing SVG Logo */}
         <Animated.View style={[styles.logoWrapper, { transform: [{ scale: pulseAnim }] }]}>
-          <Logo width={120} height={120} />
+          <Logo width={110} height={110} />
         </Animated.View>
 
         {/* Brand Identity & Tagline */}
@@ -209,40 +225,39 @@ const styles = StyleSheet.create({
     flex: 1,
     flexDirection: 'row',
     backgroundColor: COLORS.forestDeep,
-    padding: 16,
   },
 
-  /* Left Panel Layout */
+  /* Left Panel Layout (60% proportional flex) */
   leftPanel: {
-    flex: 0.58,
+    flex: 0.60,
     justifyContent: 'center',
     alignItems: 'center',
-    paddingHorizontal: 20,
+    paddingHorizontal: 16,
   },
   logoWrapper: {
-    width: 130,
-    height: 130,
+    width: 120,
+    height: 120,
     justifyContent: 'center',
     alignItems: 'center',
-    marginBottom: 10,
+    marginBottom: 8,
   },
   title: {
     color: COLORS.parchment,
-    fontSize: 30,
+    fontSize: 28,
     fontWeight: 'bold',
-    letterSpacing: 9,
+    letterSpacing: 8,
     marginBottom: 4,
   },
   tagline: {
     color: COLORS.brassTrim,
     fontSize: 9,
     letterSpacing: 2,
-    marginBottom: 24,
+    marginBottom: 20,
     opacity: 0.9,
   },
   progressSection: {
     width: '85%',
-    maxWidth: 320,
+    maxWidth: 300,
   },
   progressBarTrack: {
     height: 12,
@@ -261,29 +276,29 @@ const styles = StyleSheet.create({
   progressLabels: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    marginTop: 8,
+    marginTop: 6,
   },
   progressText: {
     color: COLORS.mutedGreen,
-    fontSize: 10,
-    letterSpacing: 1.5,
+    fontSize: 9.5,
+    letterSpacing: 1.2,
     fontWeight: '600',
   },
 
-  /* Right Panel Terminal */
+  /* Right Panel Terminal (40% proportional flex) */
   rightPanel: {
-    flex: 0.42,
+    flex: 0.40,
     backgroundColor: COLORS.panelBg,
     borderRadius: 8,
     borderWidth: 1,
     borderColor: COLORS.borderColor,
-    padding: 16,
+    padding: 12,
     marginVertical: 4,
   },
   terminalHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 14,
+    marginBottom: 10,
   },
   terminalStar: {
     color: COLORS.siennaAccent,
@@ -291,26 +306,26 @@ const styles = StyleSheet.create({
   },
   terminalTitle: {
     color: COLORS.brassTrim,
-    fontSize: 11,
-    letterSpacing: 2,
+    fontSize: 10.5,
+    letterSpacing: 1.8,
     fontWeight: 'bold',
   },
   headerDivider: {
     flex: 1,
     height: 1,
     backgroundColor: COLORS.borderColor,
-    marginLeft: 10,
+    marginLeft: 8,
   },
   terminalBody: {
     flex: 1,
     justifyContent: 'flex-start',
   },
   logRow: {
-    marginVertical: 2.5,
+    marginVertical: 2,
   },
   logText: {
-    fontSize: 9.5,
-    letterSpacing: 0.8,
+    fontSize: 9,
+    letterSpacing: 0.7,
   },
   logDone: {
     color: COLORS.mutedGreen,

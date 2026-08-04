@@ -24,8 +24,7 @@ export interface CacheItem {
 }
 
 interface InventoryScreenProps {
-  onNavigate: (screenName: string) => void;
-  activeScreen?: string;
+  onBack: () => void;
 }
 
 // Initial mock data mirroring your vintage wireframe designs
@@ -99,8 +98,7 @@ const INITIAL_EPHEMERA: CacheItem[] = [
 ];
 
 export const InventoryScreen: React.FC<InventoryScreenProps> = ({
-  onNavigate,
-  activeScreen = 'BAG',
+  onBack,
 }) => {
   const { width, height } = useWindowDimensions();
   const isLandscape = width > height;
@@ -392,8 +390,10 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({
 
 {/* Integrated Field Navigation Bar */}
 <FieldNavBar 
-  currentTab={activeScreen as NavigationTab} 
-  onNavigate={onNavigate} 
+  currentTab="INVENTORY"
+  onNavigate={(screen: string) => {
+    // Navigation handling can be wired in later if parent navigation becomes available.
+  }}
 />
         </View>
 

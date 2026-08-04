@@ -9,9 +9,12 @@ import {
   Platform,
   Switch,
   Easing,
+  Alert,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
+import * as Location from 'expo-location';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 // --- DESIGN SYSTEM TOKENS (DV300 Spec) ---
 const PALETTE = {
@@ -71,7 +74,7 @@ const STEPS: OnboardingStep[] = [
 
 export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
   const { width, height } = useWindowDimensions();
-  const insets = useSafeAreaInsets(); // Dynamic Island & notch handling in landscape
+  const insets = useSafeAreaInsets();
   const [index, setIndex] = useState(0);
 
   // --- TOGGLE STATE (Must default to OFF per spec) ---
@@ -106,7 +109,7 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
     return () => pulseLoop.stop();
   }, [pulseAnim]);
 
-  // Sync progress indicator bar on step change
+  // Sync progress bar animation on step change
   useEffect(() => {
     Animated.timing(progressAnim, {
       toValue: (index + 1) / STEPS.length,
@@ -115,44 +118,70 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
     }).start();
   }, [index]);
 
+  // Request native hardware permissions when toggle is flipped
+  const handleToggleTelemetry = async (value: boolean) => {
+    if (value) {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status === 'granted') {
+        setTelemetryAuthorized(true);
+      } else {
+        setTelemetryAuthorized(false);
+        Alert.alert(
+          'TELEMETRY DENIED',
+          'Hardware GPS permissions are required to active live target vectoring.'
+        );
+      }
+    } else {
+      setTelemetryAuthorized(false);
+    }
+  };
+
   const handleStepTransition = (nextIndex: number) => {
     Animated.parallel([
       Animated.timing(fadeAnim, {
         toValue: 0,
-        duration: 150,
+        duration: 120,
         useNativeDriver: true,
       }),
       Animated.timing(slideAnim, {
-        toValue: -20,
-        duration: 150,
+        toValue: -15,
+        duration: 120,
         useNativeDriver: true,
       }),
     ]).start(() => {
       setIndex(nextIndex);
-      slideAnim.setValue(20);
+      slideAnim.setValue(15);
 
       Animated.parallel([
         Animated.timing(fadeAnim, {
           toValue: 1,
-          duration: 200,
+          duration: 180,
           useNativeDriver: true,
         }),
         Animated.spring(slideAnim, {
           toValue: 0,
-          friction: 6,
-          tension: 80,
+          friction: 7,
+          tension: 90,
           useNativeDriver: true,
         }),
       ]).start();
     });
   };
 
+  const finalizeOnboarding = async () => {
+    try {
+      await AsyncStorage.setItem('@treasi_onboarding_completed', 'true');
+    } catch (e) {
+      console.warn('Failed to save onboarding state locally', e);
+    }
+    onComplete(telemetryAuthorized);
+  };
+
   const handleNext = () => {
-    // Tactile button bounce micro-interaction
     Animated.sequence([
       Animated.timing(buttonScaleAnim, {
-        toValue: 0.95,
-        duration: 80,
+        toValue: 0.94,
+        duration: 70,
         useNativeDriver: true,
       }),
       Animated.spring(buttonScaleAnim, {
@@ -165,7 +194,7 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
     if (index < STEPS.length - 1) {
       handleStepTransition(index + 1);
     } else {
-      onComplete(telemetryAuthorized);
+      finalizeOnboarding();
     }
   };
 
@@ -173,7 +202,7 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
   const isFinalStep = index === STEPS.length - 1;
   const isLandscape = width > height;
 
-  // Responsive dynamic padding accounting for iPhone Dynamic Island / Side Notches
+  // Responsive dynamic padding accounting for Dynamic Island & notches
   const safeLandscapeStyle = {
     paddingLeft: Math.max(insets.left, 16),
     paddingRight: Math.max(insets.right, 16),
@@ -267,7 +296,7 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
                 trackColor={{ false: '#1E281F', true: PALETTE.sienna }}
                 thumbColor={telemetryAuthorized ? PALETTE.brass : '#555'}
                 ios_backgroundColor="#1E281F"
-                onValueChange={setTelemetryAuthorized}
+                onValueChange={handleToggleTelemetry}
                 value={telemetryAuthorized}
               />
             </View>
@@ -336,7 +365,7 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
               {!isFinalStep && (
                 <TouchableOpacity
                   style={styles.skipButton}
-                  onPress={() => onComplete(telemetryAuthorized)}
+                  onPress={finalizeOnboarding}
                   hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
                 >
                   <Text style={styles.skipButtonText}>ABORT TUTORIAL [SKIP]</Text>
@@ -463,7 +492,7 @@ const styles = StyleSheet.create({
     fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
   },
 
-  // --- RIVETS ---
+  // --- HARDWARE RIVETS ---
   rivet: {
     position: 'absolute',
     width: 6,

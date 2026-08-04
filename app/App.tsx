@@ -1,6 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { StatusBar } from 'expo-status-bar';
-import { StyleSheet, Text, View, useWindowDimensions } from 'react-native';
+import { StyleSheet, Text, View, useWindowDimensions, Animated } from 'react-native';
+import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
+import { onAuthStateChanged, User } from 'firebase/auth';
+import { auth } from './src/config/firebase';
 
 // Screen Imports
 import { SplashScreen } from './src/screens/SplashScreen';
@@ -13,7 +16,7 @@ import { LeaderboardScreen } from './src/screens/LeaderboardScreen';
 import { InventoryScreen } from './src/screens/InventoryScreen';
 import { ProfileSettingsScreen } from './src/screens/ProfileSettingsScreen';
 
-type ScreenState = 
+export type ScreenState = 
   | 'SPLASH' 
   | 'ONBOARDING' 
   | 'LOGIN' 
@@ -24,58 +27,104 @@ type ScreenState =
   | 'INVENTORY' 
   | 'PROFILE';
 
-export default function App() {
+function AppNavigator() {
   const { width, height } = useWindowDimensions();
   const isLandscape = width > height;
+  const insets = useSafeAreaInsets();
 
   // Active Navigation State
   const [currentScreen, setCurrentScreen] = useState<ScreenState>('SPLASH');
+  
+  // Firebase Auth State Tracker
+  const [user, setUser] = useState<User | null>(null);
+  const [authInitialized, setAuthInitialized] = useState<boolean>(false);
+  const [splashMinTimePassed, setSplashMinTimePassed] = useState<boolean>(false);
 
-  // Splash Screen Timeout Preview
+  // Screen Transition Animation Value
+  const fadeAnim = useRef(new Animated.Value(1)).current;
+
+  // 1. Minimum Splash Screen Diagnostic Sequence Timer (2 Seconds)
   useEffect(() => {
-    if (currentScreen === 'SPLASH') {
-      const timer = setTimeout(() => setCurrentScreen('ONBOARDING'), 2000);
-      return () => clearTimeout(timer);
+    const timer = setTimeout(() => {
+      setSplashMinTimePassed(true);
+    }, 2000);
+    return () => clearTimeout(timer);
+  }, []);
+
+  // 2. Background Firebase Auth State Initialization
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+      setAuthInitialized(true);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // 3. Handshake Logic: Route user once minimum splash timer AND auth initialization complete
+  useEffect(() => {
+    if (splashMinTimePassed && authInitialized && currentScreen === 'SPLASH') {
+      if (user) {
+        setCurrentScreen('DASHBOARD');
+      } else {
+        setCurrentScreen('ONBOARDING');
+      }
     }
-  }, [currentScreen]);
+  }, [splashMinTimePassed, authInitialized, user, currentScreen]);
+
+  // Animated Screen Navigation Handler
+  const navigateTo = (target: ScreenState) => {
+    Animated.sequence([
+      Animated.timing(fadeAnim, {
+        toValue: 0.1,
+        duration: 100,
+        useNativeDriver: true,
+      }),
+      Animated.timing(fadeAnim, {
+        toValue: 1,
+        duration: 150,
+        useNativeDriver: true,
+      }),
+    ]).start();
+    setCurrentScreen(target);
+  };
 
   const renderActiveScreen = () => {
     switch (currentScreen) {
       case 'SPLASH':
         return <SplashScreen />;
       case 'ONBOARDING':
-        return <OnboardingScreen onComplete={() => setCurrentScreen('LOGIN')} />;
+        return <OnboardingScreen onComplete={() => navigateTo('LOGIN')} />;
       case 'LOGIN':
         return (
           <LoginScreen 
-            onNavigateSignUp={() => setCurrentScreen('SIGNUP')} 
-            onLoginSuccess={() => setCurrentScreen('DASHBOARD')} 
+            onNavigateSignUp={() => navigateTo('SIGNUP')} 
+            onLoginSuccess={() => navigateTo('DASHBOARD')} 
           />
         );
       case 'SIGNUP':
         return (
           <SignUpScreen 
-            onNavigateLogin={() => setCurrentScreen('LOGIN')} 
-            onSignUpSuccess={() => setCurrentScreen('DASHBOARD')} 
+            onNavigateLogin={() => navigateTo('LOGIN')} 
+            onSignUpSuccess={() => navigateTo('DASHBOARD')} 
           />
         );
       case 'DASHBOARD':
-        return <DashboardScreen onNavigate={(target) => setCurrentScreen(target as ScreenState)} />;
+        return <DashboardScreen onNavigate={(target) => navigateTo(target as ScreenState)} />;
       case 'HUNT':
-        return <HuntScreen onBack={() => setCurrentScreen('DASHBOARD')} />;
+        return <HuntScreen onBack={() => navigateTo('DASHBOARD')} />;
       case 'LEADERBOARD':
-        return <LeaderboardScreen onBack={() => setCurrentScreen('DASHBOARD')} />;
+        return <LeaderboardScreen onBack={() => navigateTo('DASHBOARD')} />;
       case 'INVENTORY':
-        return <InventoryScreen onBack={() => setCurrentScreen('DASHBOARD')} />;
+        return <InventoryScreen onBack={() => navigateTo('DASHBOARD')} />;
       case 'PROFILE':
         return (
           <ProfileSettingsScreen 
-            onBack={() => setCurrentScreen('DASHBOARD')} 
-            onSignOut={() => setCurrentScreen('LOGIN')} 
+            onBack={() => navigateTo('DASHBOARD')} 
+            onSignOut={() => navigateTo('LOGIN')} 
           />
         );
       default:
-        return <DashboardScreen onNavigate={(target) => setCurrentScreen(target as ScreenState)} />;
+        return <DashboardScreen onNavigate={(target) => navigateTo(target as ScreenState)} />;
     }
   };
 
@@ -84,9 +133,22 @@ export default function App() {
       <StatusBar style="light" hidden />
       
       {isLandscape ? (
-        renderActiveScreen()
+        <Animated.View 
+          style={[
+            styles.safeAreaContainer, 
+            { 
+              paddingTop: insets.top,
+              paddingBottom: insets.bottom,
+              paddingLeft: insets.left,
+              paddingRight: insets.right,
+              opacity: fadeAnim 
+            }
+          ]}
+        >
+          {renderActiveScreen()}
+        </Animated.View>
       ) : (
-        /* Accessibility safety net for landscape constraint */
+        /* Landscape constraint safety warning */
         <View style={styles.orientationWarning}>
           <Text style={styles.warningTitle}>TILT INSTRUMENT HORIZONTALLY</Text>
           <Text style={styles.warningSubText}>
@@ -98,10 +160,22 @@ export default function App() {
   );
 }
 
+export default function App() {
+  return (
+    <SafeAreaProvider>
+      <AppNavigator />
+    </SafeAreaProvider>
+  );
+}
+
 const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#2C3B2E', // Forest Deep
+  },
+  safeAreaContainer: {
+    flex: 1,
+    backgroundColor: '#2C3B2E',
   },
   orientationWarning: {
     flex: 1,
