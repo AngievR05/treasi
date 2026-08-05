@@ -77,7 +77,7 @@ const ItemIcon: React.FC<{ type: IconType; size?: number; color?: string }> = ({
   }
 };
 
-// Initial mock data mirroring vintage wireframe designs
+// Initial mock data
 const INITIAL_CACHES: CacheItem[] = [
   {
     id: '1',
@@ -255,7 +255,6 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({
     );
   };
 
-  // Dynamic Inset Calculations for iPhone Dynamic Island / Notch in Landscape
   const safePaddingLeft = Math.max(insets.left, 12);
   const safePaddingRight = Math.max(insets.right, 12);
 
@@ -270,9 +269,6 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({
           },
         ]}
       >
-        {/* ========================================== */}
-        {/* LEFT VIEWPORT (60% OPERATIONAL PARCHMENT) */}
-        {/* ========================================== */}
         <View style={styles.leftViewport}>
           {/* Top Category Tabs */}
           <View style={styles.tabHeaderRow}>
@@ -448,10 +444,6 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({
             </ScrollView>
           )}
         </View>
-
-        {/* ========================================== */}
-        {/* RIGHT VIEWPORT (40% FOREST GREEN CONSOLE) */}
-        {/* ========================================== */}
         <View style={styles.rightViewport}>
           <View style={styles.telemetryPanel}>
             <View style={styles.panelHeaderRow}>
@@ -531,9 +523,6 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({
   );
 };
 
-/* ========================================== */
-/* SKEUOMORPHIC VINTAGE STYLESHEET            */
-/* ========================================== */
 const styles = StyleSheet.create({
   container: {
     flex: 1,

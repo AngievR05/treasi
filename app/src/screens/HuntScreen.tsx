@@ -18,7 +18,6 @@ import Svg, {
   G,
 } from 'react-native-svg';
 
-// Treasi Design Tokens
 const COLORS = {
   forestDeep: '#2C3B2E',
   forestDarker: '#1C2419',
@@ -39,9 +38,7 @@ interface Props {
   authorName?: string;
 }
 
-/* -------------------------------------------------------------------------- */
-/*                            SPLIT-FLAP ODOMETER                             */
-/* -------------------------------------------------------------------------- */
+/* SPLIT-FLAP ODOMETER */
 const OdometerDigit: React.FC<{ char: string }> = ({ char }) => {
   if (char === ' ') return <View style={{ width: 8 }} />;
 
@@ -63,9 +60,7 @@ const OdometerDisplay: React.FC<{ value: string }> = ({ value }) => {
   );
 };
 
-/* -------------------------------------------------------------------------- */
-/*                            BRASS COMPASS DIAL                              */
-/* -------------------------------------------------------------------------- */
+/* BRASS COMPASS DIAL */
 const CompassDialView: React.FC<{ headingValue: { value: number }; size?: number }> = ({
   headingValue,
   size = 220,
@@ -286,9 +281,6 @@ export const HuntScreen: React.FC<Props> = ({
   );
 };
 
-/* -------------------------------------------------------------------------- */
-/*                                STYLESHEET                                  */
-/* -------------------------------------------------------------------------- */
 const styles = StyleSheet.create({
   container: {
     flex: 1,

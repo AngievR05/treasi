@@ -1,4 +1,3 @@
-// metro.config.js
 const path = require('path');
 const { getDefaultConfig } = require('expo/metro-config');
 
@@ -14,7 +13,7 @@ module.exports = (() => {
   config.resolver = {
     ...resolver,
     assetExts: resolver.assetExts.filter((ext) => ext !== 'svg'),
-    sourceExts: [...resolver.sourceExts, 'svg', 'mjs'],
+    sourceExts: [...resolver.sourceExts, 'svg'],
     extraNodeModules: {
       'react-native-safe-area-context': path.resolve(__dirname, 'node_modules/react-native-safe-area-context'),
       react: path.resolve(__dirname, 'node_modules/react'),

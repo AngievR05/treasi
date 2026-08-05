@@ -11,19 +11,17 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Svg, { Path, Circle, Line, Polygon } from 'react-native-svg';
 
-// --- DESIGN SYSTEM TOKENS (DV300 Spec) ---
 const PALETTE = {
-  forestDeep: '#2C3B2E',     // Main dark chassis backdrop
-  parchment: '#E8DCC0',      // Map & card viewport backdrop
-  parchmentLight: '#F3ECD8', // Secondary card panel background
-  sienna: '#A64B2A',         // High-priority CTAs & badges
-  brass: '#B08D57',          // Borders, rivets, and hardware trim
-  inkBlack: '#2A2420',       // High-contrast readable body text
-  mutedGreen: '#3D5040',     // Secondary console text
-  signalGreen: '#4CAF50',    // Live telemetry signal
+  forestDeep: '#2C3B2E',     
+  parchment: '#E8DCC0',    
+  parchmentLight: '#F3ECD8',
+  sienna: '#A64B2A',         
+  brass: '#B08D57',          
+  inkBlack: '#2A2420',       
+  mutedGreen: '#3D5040',   
+  signalGreen: '#4CAF50',   
 };
 
-// --- NATIVE SVG VECTOR ICONS (No Emojis Rule) ---
 const CompassIcon: React.FC<{ color?: string; size?: number }> = ({ 
   color = PALETTE.sienna, 
   size = 24 
@@ -105,8 +103,6 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
   const { width, height } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const [index, setIndex] = useState(0);
-
-  // --- ANIMATION REFS ---
   const fadeAnim = useRef(new Animated.Value(1)).current;
   const slideAnim = useRef(new Animated.Value(0)).current;
   const progressAnim = useRef(new Animated.Value(1 / STEPS.length)).current;
@@ -197,10 +193,6 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
       }
     ]}>
       <View style={[styles.container, !isLandscape && styles.portraitWarningContainer]}>
-        
-        {/* ============================================================== */}
-        {/* LEFT VIEWPORT (60%): OPERATIONAL CARD & FIELD INSTRUCTIONS     */}
-        {/* ============================================================== */}
         <View style={styles.leftViewport}>
           {/* Rivet Hardware Accents */}
           <View style={[styles.rivet, styles.rivetTopLeft]} />
@@ -241,9 +233,6 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
           </View>
         </View>
 
-        {/* ============================================================== */}
-        {/* RIGHT VIEWPORT (40%): TACTICAL CONTROL & TELEMETRY CONSOLE     */}
-        {/* ============================================================== */}
         <View style={styles.rightViewport}>
           <View style={styles.consoleCard}>
             <Text style={styles.consoleHeader}>SYSTEM TELEMETRY</Text>
@@ -326,7 +315,6 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
   );
 };
 
-// --- STYLESHEET ---
 const styles = StyleSheet.create({
   mainWrapper: {
     flex: 1,
@@ -334,13 +322,11 @@ const styles = StyleSheet.create({
   },
   container: {
     flex: 1,
-    flexDirection: 'row', // 60/40 Split
+    flexDirection: 'row', 
   },
   portraitWarningContainer: {
     opacity: 0.95,
   },
-
-  // --- LEFT VIEWPORT (60%) ---
   leftViewport: {
     flex: 0.6,
     backgroundColor: PALETTE.parchment,
@@ -437,8 +423,6 @@ const styles = StyleSheet.create({
     letterSpacing: 1,
     fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
   },
-
-  // --- RIVETS ---
   rivet: {
     position: 'absolute',
     width: 6,
@@ -450,8 +434,6 @@ const styles = StyleSheet.create({
   rivetTopRight: { top: 6, right: 6 },
   rivetBottomLeft: { bottom: 6, left: 6 },
   rivetBottomRight: { bottom: 6, right: 6 },
-
-  // --- RIGHT VIEWPORT (40%) ---
   rightViewport: {
     flex: 0.4,
     backgroundColor: PALETTE.forestDeep,

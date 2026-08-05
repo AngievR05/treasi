@@ -8,15 +8,12 @@ import {
   useWindowDimensions,
   Easing,
 } from 'react-native';
-
-// Standard SVG import (requires react-native-svg & react-native-svg-transformer)
 import Logo from '../../assets/Logo.svg';
 
 interface Props {
   onFinish?: () => void;
 }
 
-// Tactical field instrument diagnostic sequence
 const BOOT_DIAGNOSTICS = [
   'INIT HARDWARE BUS.......... OK',
   'GPS SATELLITE LOCK......... OK [12 SATS]',
@@ -76,7 +73,7 @@ export const SplashScreen: React.FC<Props> = ({ onFinish }) => {
   useEffect(() => {
     const animation = Animated.timing(progressAnim, {
       toValue: 100,
-      duration: 9600, // Slowed down to ~1.2s per telemetry entry
+      duration: 9600, 
       easing: Easing.linear,
       useNativeDriver: false, // Required for progress bar width interpolation
     });
@@ -119,7 +116,6 @@ export const SplashScreen: React.FC<Props> = ({ onFinish }) => {
 
   return (
     <Animated.View style={[styles.container, { width, height, opacity: fadeAnim }]}>
-      {/* ================= LEFT PANEL: Branding & Dynamic Odometer (60%) ================= */}
       <View style={styles.leftPanel}>
         {/* Animated Pulsing SVG Logo */}
         <Animated.View style={[styles.logoWrapper, { transform: [{ scale: pulseAnim }] }]}>
@@ -149,7 +145,6 @@ export const SplashScreen: React.FC<Props> = ({ onFinish }) => {
         </View>
       </View>
 
-      {/* ================= RIGHT PANEL: Tactical Terminal Console (40%) ================= */}
       <View style={styles.rightPanel}>
         <View style={styles.terminalHeader}>
           <Text style={styles.terminalStar}>★ </Text>
@@ -193,7 +188,6 @@ export const SplashScreen: React.FC<Props> = ({ onFinish }) => {
   );
 };
 
-// ================= THEME COLOR TOKENS =================
 const COLORS = {
   forestDeep: '#1E2B20',
   panelBg: '#131D14',
@@ -211,8 +205,6 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.forestDeep,
     padding: 16,
   },
-
-  /* Left Panel Layout */
   leftPanel: {
     flex: 0.58,
     justifyContent: 'center',
@@ -269,8 +261,6 @@ const styles = StyleSheet.create({
     letterSpacing: 1.5,
     fontWeight: '600',
   },
-
-  /* Right Panel Terminal */
   rightPanel: {
     flex: 0.42,
     backgroundColor: COLORS.panelBg,

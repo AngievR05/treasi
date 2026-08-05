@@ -3,7 +3,6 @@ import { StatusBar } from 'expo-status-bar';
 import { StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import { SafeAreaProvider, useSafeAreaInsets, initialWindowMetrics } from 'react-native-safe-area-context';
 
-// Screen Imports
 const SplashScreen = React.lazy(() => import('./src/screens/SplashScreen').then((module) => ({ default: module.SplashScreen })));
 const OnboardingScreen = React.lazy(() => import('./src/screens/OnboardingScreen').then((module) => ({ default: module.OnboardingScreen })));
 const LoginScreen = React.lazy(() => import('./src/screens/Auth/LoginScreen').then((module) => ({ default: module.default })));
@@ -35,7 +34,7 @@ function MainNavigator() {
   // Active Navigation State
   const [currentScreen, setCurrentScreen] = useState<ScreenState>('SPLASH');
 
-  // Flow controls - Toggles are OFF by default per specification.
+  // Flow controls - Toggles are OFF by default
   // Enforces Onboarding and Auth on launch.
   const [skipOnboardingToggle] = useState<boolean>(false);
   const [bypassAuthToggle] = useState<boolean>(false);

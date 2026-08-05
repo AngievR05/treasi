@@ -21,11 +21,8 @@ import Animated, {
   withSpring,
 } from 'react-native-reanimated';
 import Svg, { Path, Circle, Polyline } from 'react-native-svg';
-
-// --- FIELD NAVBAR INTEGRATION ---
 import { FieldNavBar, NavigationTab } from '../components/FieldNavBar';
 
-// --- INLINE SVG ICONS (NO EMOJIS ALLOWED) ---
 const StarIcon = ({ color = '#A64B2A', size = 12 }: { color?: string; size?: number }) => (
   <Svg width={size} height={size} viewBox="0 0 24 24" fill={color}>
     <Path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" />
@@ -58,7 +55,6 @@ const CloseIcon = ({ color = '#B08D57', size = 18 }: { color?: string; size?: nu
   </Svg>
 );
 
-// --- TYPES ---
 interface ExplorerEntry {
   rank: string;
   name: string;
@@ -87,7 +83,7 @@ export const LeaderboardScreen: React.FC<Props> = ({ onNavigate }) => {
   // Active Navigation State
   const currentTab: NavigationTab = 'LEADERBOARD';
 
-  // Modal State for Dispatching Telegram / Adding Friends
+  // Adding Friends
   const [telegramModalVisible, setTelegramModalVisible] = useState(false);
   const [friendModalVisible, setFriendModalVisible] = useState(false);
   const [telegramText, setTelegramText] = useState('');
@@ -111,7 +107,7 @@ export const LeaderboardScreen: React.FC<Props> = ({ onNavigate }) => {
     { id: '3', name: 'PINE_MARTEN', initial: 'P', distance: '600 m', isOnline: true, friendStatus: 'pending' },
   ]);
 
-  // Dynamic Friend Request Toggle
+  // Friend Request Toggle
   const handleToggleFriend = (id: string) => {
     setNearbyExplorers((prev) =>
       prev.map((item) => {
@@ -149,7 +145,6 @@ export const LeaderboardScreen: React.FC<Props> = ({ onNavigate }) => {
         },
       ]}
     >
-      {/* ================= LEFT VIEWPORT (60%): FIELD MANIFEST LEDGER ================= */}
       <Animated.View entering={FadeInLeft.duration(600)} style={styles.leftViewport}>
         <View style={styles.ledgerHeader}>
           <StarIcon color="#A64B2A" size={14} />
@@ -191,7 +186,6 @@ export const LeaderboardScreen: React.FC<Props> = ({ onNavigate }) => {
         </ScrollView>
       </Animated.View>
 
-      {/* ================= RIGHT VIEWPORT (40%): NEARBY EXPLORERS & ACTIONS ================= */}
       <Animated.View entering={FadeInRight.duration(600)} style={styles.rightViewport}>
         <View style={styles.rightHeaderRow}>
           <View>
@@ -239,7 +233,6 @@ export const LeaderboardScreen: React.FC<Props> = ({ onNavigate }) => {
           ))}
         </ScrollView>
 
-        {/* Primary CTA: Dispatch Telegram */}
         <Animated.View style={[animatedButtonStyle, { marginBottom: 10 }]}>
           <TouchableOpacity
             activeOpacity={0.9}
@@ -252,11 +245,9 @@ export const LeaderboardScreen: React.FC<Props> = ({ onNavigate }) => {
           </TouchableOpacity>
         </Animated.View>
 
-        {/* Integrated Bottom Navigation Bar */}
         <FieldNavBar currentTab={currentTab} onNavigate={onNavigate} />
       </Animated.View>
 
-      {/* ================= MODAL 1: DISPATCH TELEGRAM ================= */}
       <Modal visible={telegramModalVisible} transparent animationType="fade">
         <Pressable style={styles.modalOverlay} onPress={() => setTelegramModalVisible(false)}>
           <View style={styles.modalCard}>
@@ -291,7 +282,6 @@ export const LeaderboardScreen: React.FC<Props> = ({ onNavigate }) => {
         </Pressable>
       </Modal>
 
-      {/* ================= MODAL 2: ADD EXPLORER BY AGENT TAG ================= */}
       <Modal visible={friendModalVisible} transparent animationType="fade">
         <Pressable style={styles.modalOverlay} onPress={() => setFriendModalVisible(false)}>
           <View style={styles.modalCard}>
@@ -329,15 +319,12 @@ export const LeaderboardScreen: React.FC<Props> = ({ onNavigate }) => {
   );
 };
 
-// --- STYLES ---
 const styles = StyleSheet.create({
   splitWrapper: {
     flex: 1,
     flexDirection: 'row',
     backgroundColor: '#1C281E',
   },
-
-  // LEFT VIEWPORT (60%)
   leftViewport: {
     flex: 0.6,
     backgroundColor: '#E8DCC0',
@@ -414,8 +401,6 @@ const styles = StyleSheet.create({
     fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
     fontSize: 10,
   },
-
-  // RIGHT VIEWPORT (40%)
   rightViewport: {
     flex: 0.4,
     backgroundColor: '#2C3B2E',
@@ -517,8 +502,6 @@ const styles = StyleSheet.create({
     fontSize: 8,
     fontWeight: 'bold',
   },
-
-  // CTA BUTTONS
   dispatchButton: {
     backgroundColor: '#A64B2A',
     borderWidth: 1,
@@ -534,8 +517,6 @@ const styles = StyleSheet.create({
     fontSize: 11,
     letterSpacing: 1.5,
   },
-
-  // MODAL STYLES
   modalOverlay: {
     flex: 1,
     backgroundColor: 'rgba(10, 16, 11, 0.82)',

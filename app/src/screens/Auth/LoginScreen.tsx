@@ -1,7 +1,6 @@
 import React from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, useWindowDimensions } from 'react-native';
 
-// 1. Define and export the Screen Props interface
 export interface LoginScreenProps {
   onNavigateSignUp: () => void;
   onLoginSuccess: () => void;
@@ -36,7 +35,7 @@ export default LoginScreen;
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#2C3B2E', // Forest Deep
+    backgroundColor: '#2C3B2E', 
     justifyContent: 'center',
     alignItems: 'center',
     padding: 16,
@@ -44,22 +43,22 @@ const styles = StyleSheet.create({
   formPanel: {
     width: '80%',
     maxWidth: 500,
-    backgroundColor: '#E8DCC0', // Parchment
+    backgroundColor: '#E8DCC0', 
     padding: 24,
     borderRadius: 8,
     borderWidth: 2,
-    borderColor: '#B08D57', // Brass Trim
+    borderColor: '#B08D57', 
   },
   title: {
     fontSize: 20,
     fontWeight: 'bold',
-    color: '#2A2420', // Ink Black
+    color: '#2A2420', 
     textAlign: 'center',
     letterSpacing: 1.5,
   },
   subtitle: {
     fontSize: 12,
-    color: '#A64B2A', // Sienna Accent
+    color: '#A64B2A', 
     textAlign: 'center',
     marginBottom: 20,
   },

@@ -67,7 +67,6 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
     { id: '3', title: 'PINE RIDGE', latitude: -25.7440, longitude: 28.2310, code: 'C' },
   ]);
 
-  // Reanimated Shared Values for Tactile Tweens
   const buttonScale = useSharedValue(1);
   const pulseOpacity = useSharedValue(1);
 
@@ -200,7 +199,7 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
           ))}
         </MapView>
 
-        {/* Vintage Compass Indicator */}
+        {/* Compass Indicator */}
         <View style={styles.compassOverlay}>
           <Ionicons name="compass-outline" size={16} color="#2A2420" />
           <Text style={styles.compassText}>N</Text>

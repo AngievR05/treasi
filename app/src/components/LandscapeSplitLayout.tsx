@@ -26,7 +26,6 @@ export const LandscapeSplitLayout: React.FC<LandscapeSplitLayoutProps> = ({
         style={[
           styles.wrapper, 
           { flexDirection: dynamicDirection },
-          // Prevents hardware Dynamic Island / camera notch overlap in landscape
           { paddingLeft: insets.left, paddingRight: insets.right }
         ]}
       >

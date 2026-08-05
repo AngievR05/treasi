@@ -75,7 +75,6 @@ export const ProfileSettingsScreen: React.FC<Props> = ({
       ]}
     >
       <View style={styles.splitWrapper}>
-        {/* LEFT VIEWPORT: FIELD IDENTITY CARD (60%) */}
         <View style={styles.leftViewport}>
           <View style={styles.cardInnerBorder}>
             <View style={styles.cardHeader}>
@@ -170,8 +169,6 @@ export const ProfileSettingsScreen: React.FC<Props> = ({
             </TouchableOpacity>
           </View>
         </View>
-
-        {/* RIGHT VIEWPORT: CALIBRATION ARRAY & SYSTEM CONTROLS (40%) */}
         <View style={styles.rightViewport}>
           <ScrollView
             showsVerticalScrollIndicator={false}
@@ -260,8 +257,6 @@ export const ProfileSettingsScreen: React.FC<Props> = ({
               </TouchableOpacity>
             )}
           </ScrollView>
-
-          {/* EMBEDDED FIELD NAVIGATION BAR */}
           <View style={styles.navBarContainer}>
             <FieldNavBar
               currentTab="PROFILE"
