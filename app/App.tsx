@@ -152,13 +152,13 @@ export default function App() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#2C3B2E', // Forest Deep Chassis
+    backgroundColor: '#1E281F', // Forest Deep Chassis
   },
   orientationWarning: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: '#2C3B2E',
+    backgroundColor: '#1E281F',
     padding: 32,
   },
   warningTitle: {
