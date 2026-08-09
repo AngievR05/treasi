@@ -7,24 +7,28 @@ import {
   Animated,
   useWindowDimensions,
   Platform,
+  AccessibilityInfo,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Svg, { Path, Circle, Line, Polygon } from 'react-native-svg';
 
 const PALETTE = {
-  forestDeep: '#2C3B2E',     
-  parchment: '#E8DCC0',    
+  forestDeep: '#2C3B2E',
+  parchment: '#E8DCC0',
   parchmentLight: '#F3ECD8',
-  sienna: '#A64B2A',         
-  brass: '#B08D57',          
-  inkBlack: '#2A2420',       
-  mutedGreen: '#3D5040',   
-  signalGreen: '#4CAF50',   
+  sienna: '#A64B2A',
+  brass: '#B08D57',
+  inkBlack: '#2A2420',
+  mutedGreen: '#3D5040',
+  signalGreen: '#4CAF50',
+  alertRed: '#8B0000',
 };
 
-const CompassIcon: React.FC<{ color?: string; size?: number }> = ({ 
-  color = PALETTE.sienna, 
-  size = 24 
+// --- SVG INSTRUMENT ICONS ---
+
+const CompassIcon: React.FC<{ color?: string; size?: number }> = ({
+  color = PALETTE.sienna,
+  size = 24,
 }) => (
   <Svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
     <Circle cx="12" cy="12" r="10" />
@@ -33,9 +37,9 @@ const CompassIcon: React.FC<{ color?: string; size?: number }> = ({
   </Svg>
 );
 
-const TelemetryIcon: React.FC<{ color?: string; size?: number }> = ({ 
-  color = PALETTE.sienna, 
-  size = 24 
+const TelemetryIcon: React.FC<{ color?: string; size?: number }> = ({
+  color = PALETTE.sienna,
+  size = 24,
 }) => (
   <Svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
     <Circle cx="12" cy="12" r="9" />
@@ -46,12 +50,23 @@ const TelemetryIcon: React.FC<{ color?: string; size?: number }> = ({
   </Svg>
 );
 
-const ExcavationIcon: React.FC<{ color?: string; size?: number }> = ({ 
-  color = PALETTE.sienna, 
-  size = 24 
+const ExcavationIcon: React.FC<{ color?: string; size?: number }> = ({
+  color = PALETTE.sienna,
+  size = 24,
 }) => (
   <Svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
     <Path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
+  </Svg>
+);
+
+const RotateDeviceIcon: React.FC<{ color?: string; size?: number }> = ({
+  color = PALETTE.parchment,
+  size = 32,
+}) => (
+  <Svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <Path d="M1 4v6h6" />
+    <Path d="M23 20v-6h-6" />
+    <Path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 0 1 3.51 15" />
   </Svg>
 );
 
@@ -103,12 +118,17 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
   const { width, height } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const [index, setIndex] = useState(0);
+
+  // Animation Refs
   const fadeAnim = useRef(new Animated.Value(1)).current;
   const slideAnim = useRef(new Animated.Value(0)).current;
   const progressAnim = useRef(new Animated.Value(1 / STEPS.length)).current;
   const pulseAnim = useRef(new Animated.Value(1)).current;
+  const btnScaleAnim = useRef(new Animated.Value(1)).current;
 
-  // Pulsing Live Telemetry LED animation loop
+  const isLandscape = width > height;
+
+  // Pulsing Status Indicator Loop
   useEffect(() => {
     const pulseLoop = Animated.loop(
       Animated.sequence([
@@ -137,7 +157,17 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
     }).start();
   }, [index, progressAnim]);
 
+  // Announce step transitions to Screen Readers
+  const announceStepToScreenReader = (stepIndex: number) => {
+    const currentStep = STEPS[stepIndex];
+    AccessibilityInfo.announceForAccessibility(
+      `Protocol step ${stepIndex + 1} of ${STEPS.length}: ${currentStep.title}. ${currentStep.desc}`
+    );
+  };
+
   const handleStepTransition = (nextIndex: number) => {
+    if (nextIndex === index) return;
+
     Animated.parallel([
       Animated.timing(fadeAnim, {
         toValue: 0,
@@ -151,6 +181,7 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
       }),
     ]).start(() => {
       setIndex(nextIndex);
+      announceStepToScreenReader(nextIndex);
       slideAnim.setValue(15);
 
       Animated.parallel([
@@ -169,6 +200,21 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
     });
   };
 
+  const handlePressIn = () => {
+    Animated.spring(btnScaleAnim, {
+      toValue: 0.95,
+      useNativeDriver: true,
+    }).start();
+  };
+
+  const handlePressOut = () => {
+    Animated.spring(btnScaleAnim, {
+      toValue: 1,
+      friction: 4,
+      useNativeDriver: true,
+    }).start();
+  };
+
   const handleNext = () => {
     if (index < STEPS.length - 1) {
       handleStepTransition(index + 1);
@@ -180,137 +226,179 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
   const current = STEPS[index];
   const isFinalStep = index === STEPS.length - 1;
   const StepIcon = current.IconComponent;
-  const isLandscape = width > height;
 
   return (
-    <View style={[
-      styles.mainWrapper,
-      {
-        paddingLeft: Math.max(insets.left, 16),
-        paddingRight: Math.max(insets.right, 16),
-        paddingTop: Math.max(insets.top, 12),
-        paddingBottom: Math.max(insets.bottom, 12),
-      }
-    ]}>
-      <View style={[styles.container, !isLandscape && styles.portraitWarningContainer]}>
-        <View style={styles.leftViewport}>
-          {/* Rivet Hardware Accents */}
-          <View style={[styles.rivet, styles.rivetTopLeft]} />
-          <View style={[styles.rivet, styles.rivetTopRight]} />
-          <View style={[styles.rivet, styles.rivetBottomLeft]} />
-          <View style={[styles.rivet, styles.rivetBottomRight]} />
-
-          <View style={styles.headerMetaRow}>
-            <Text style={styles.metaDocCode}>FIELD_MANUAL // REV_1962</Text>
-            <Text style={styles.metaStepBadge}>{current.step}</Text>
-          </View>
-
-          <Animated.View
-            style={[
-              styles.contentContainer,
-              {
-                opacity: fadeAnim,
-                transform: [{ translateY: slideAnim }],
-              },
-            ]}
-          >
-            <View style={styles.iconWrapper}>
-              <StepIcon color={PALETTE.sienna} size={24} />
-            </View>
-
-            <Text style={styles.protocolCodeText}>{current.protocolCode}</Text>
-            <Text style={styles.titleText}>{current.title}</Text>
-            <Text style={styles.subtitleText}>[ {current.subtitle} ]</Text>
-
-            <View style={styles.dividerLine} />
-
-            <Text style={styles.descText}>{current.desc}</Text>
-          </Animated.View>
-
-          <View style={styles.footerNoteRow}>
-            <Text style={styles.footerNote}>TREASI FIELD PROTOCOL</Text>
-            <Text style={styles.footerNote}>SECURE SPECIFICATION</Text>
-          </View>
+    <View
+      style={[
+        styles.mainWrapper,
+        {
+          paddingLeft: Math.max(insets.left, 16),
+          paddingRight: Math.max(insets.right, 16),
+          paddingTop: Math.max(insets.top, 12),
+          paddingBottom: Math.max(insets.bottom, 12),
+        },
+      ]}
+    >
+      {/* PORTRAIT OVERRIDE WARNING BANNER */}
+      {!isLandscape ? (
+        <View style={styles.portraitWarningOverlay} accessibilityRole="header">
+          <RotateDeviceIcon color={PALETTE.parchment} size={40} />
+          <Text style={styles.portraitWarningTitle}>ORIENTATION LOCK REQUIRED</Text>
+          <Text style={styles.portraitWarningDesc}>
+            ROTATE DEVICE HORIZONTALLY TO ENGAGE TREASI FIELD TELEMETRY
+          </Text>
         </View>
+      ) : (
+        <View style={styles.container}>
+          {/* LEFT OPERATIONAL VIEWPORT (60%) */}
+          <View style={styles.leftViewport} importantForAccessibility="no-hide-descendants">
+            {/* Rivet Accents */}
+            <View style={[styles.rivet, styles.rivetTopLeft]} />
+            <View style={[styles.rivet, styles.rivetTopRight]} />
+            <View style={[styles.rivet, styles.rivetBottomLeft]} />
+            <View style={[styles.rivet, styles.rivetBottomRight]} />
 
-        <View style={styles.rightViewport}>
-          <View style={styles.consoleCard}>
-            <Text style={styles.consoleHeader}>SYSTEM TELEMETRY</Text>
-            
-            {/* Pulsing Status LED Indicator */}
-            <View style={styles.telemetryStatusBox}>
-              <Animated.View style={[styles.statusDot, { opacity: pulseAnim }]} />
-              <Text style={styles.telemetryStatusText}>
-                {current.telemetryStatus}
+            <View style={styles.headerMetaRow}>
+              <Text style={styles.metaDocCode}>FIELD_MANUAL // REV_1962</Text>
+              <Text style={styles.metaStepBadge} accessibilityLabel={`Step ${current.step}`}>
+                {current.step}
               </Text>
             </View>
 
-            {/* Step Progress Tracker Bar */}
-            <View style={styles.progressTrackerContainer}>
-              <Text style={styles.progressLabel}>PROTOCOL PROGRESS</Text>
-              <View style={styles.progressBarTrack}>
-                <Animated.View
-                  style={[
-                    styles.progressBarFill,
-                    {
-                      width: progressAnim.interpolate({
-                        inputRange: [0, 1],
-                        outputRange: ['0%', '100%'],
-                      }),
-                    },
-                  ]}
-                />
+            <Animated.View
+              style={[
+                styles.contentContainer,
+                {
+                  opacity: fadeAnim,
+                  transform: [{ translateY: slideAnim }],
+                },
+              ]}
+              accessible={true}
+              accessibilityRole="text"
+              accessibilityLabel={`${current.title}. ${current.subtitle}. ${current.desc}`}
+            >
+              <View style={styles.iconWrapper}>
+                <StepIcon color={PALETTE.sienna} size={24} />
               </View>
-            </View>
 
-            {/* Interactive Step Nodes */}
-            <View style={styles.nodeRow}>
-              {STEPS.map((_, i) => (
-                <TouchableOpacity
-                  key={i}
-                  activeOpacity={0.7}
-                  onPress={() => handleStepTransition(i)}
-                  style={[
-                    styles.stepNode,
-                    i === index && styles.stepNodeActive,
-                    i < index && styles.stepNodeCompleted,
-                  ]}
-                  accessibilityLabel={`Jump to protocol step ${i + 1}`}
-                />
-              ))}
-            </View>
+              <Text style={styles.protocolCodeText}>{current.protocolCode}</Text>
+              <Text style={styles.titleText}>{current.title}</Text>
+              <Text style={styles.subtitleText}>[ {current.subtitle} ]</Text>
 
-            {/* Action Buttons */}
-            <View style={styles.actionSection}>
-              <TouchableOpacity
-                style={[
-                  styles.primaryButton,
-                  isFinalStep && styles.primaryButtonComplete,
-                ]}
-                activeOpacity={0.8}
-                onPress={handleNext}
-                accessibilityRole="button"
-                accessibilityLabel={isFinalStep ? 'Enter Field' : 'Next Protocol'}
+              <View style={styles.dividerLine} />
+
+              <Text style={styles.descText}>{current.desc}</Text>
+            </Animated.View>
+
+            <View style={styles.footerNoteRow}>
+              <Text style={styles.footerNote}>TREASI FIELD PROTOCOL</Text>
+              <Text style={styles.footerNote}>SECURE SPECIFICATION</Text>
+            </View>
+          </View>
+
+          {/* RIGHT CONTROL CONSOLE (40%) */}
+          <View style={styles.rightViewport}>
+            <View style={styles.consoleCard}>
+              <Text style={styles.consoleHeader} accessibilityRole="header">
+                SYSTEM TELEMETRY
+              </Text>
+
+              {/* Live Status Indicator */}
+              <View
+                style={styles.telemetryStatusBox}
+                accessible={true}
+                accessibilityLabel={`System Status: ${current.telemetryStatus}`}
               >
-                <Text style={styles.buttonText}>
-                  {isFinalStep ? 'ENTER FIELD ›' : 'NEXT PROTOCOL ›'}
-                </Text>
-              </TouchableOpacity>
+                <Animated.View style={[styles.statusDot, { opacity: pulseAnim }]} />
+                <Text style={styles.telemetryStatusText}>{current.telemetryStatus}</Text>
+              </View>
 
-              {!isFinalStep && (
-                <TouchableOpacity
-                  style={styles.skipButton}
-                  onPress={onComplete}
-                  hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
-                >
-                  <Text style={styles.skipButtonText}>ABORT TUTORIAL [SKIP]</Text>
-                </TouchableOpacity>
-              )}
+              {/* Progress Tracker */}
+              <View
+                style={styles.progressTrackerContainer}
+                accessible={true}
+                accessibilityLabel={`Onboarding Progress: Step ${index + 1} of ${STEPS.length}`}
+              >
+                <Text style={styles.progressLabel}>PROTOCOL PROGRESS</Text>
+                <View style={styles.progressBarTrack}>
+                  <Animated.View
+                    style={[
+                      styles.progressBarFill,
+                      {
+                        width: progressAnim.interpolate({
+                          inputRange: [0, 1],
+                          outputRange: ['0%', '100%'],
+                        }),
+                      },
+                    ]}
+                  />
+                </View>
+              </View>
+
+              {/* Step Navigation Nodes */}
+              <View style={styles.nodeRow}>
+                {STEPS.map((_, i) => (
+                  <TouchableOpacity
+                    key={i}
+                    activeOpacity={0.7}
+                    onPress={() => handleStepTransition(i)}
+                    style={[
+                      styles.stepNode,
+                      i === index && styles.stepNodeActive,
+                      i < index && styles.stepNodeCompleted,
+                    ]}
+                    accessible={true}
+                    accessibilityRole="button"
+                    accessibilityState={{ selected: i === index }}
+                    accessibilityLabel={`Navigate to step ${i + 1}`}
+                  />
+                ))}
+              </View>
+
+              {/* Interactive Actions */}
+              <View style={styles.actionSection}>
+                <Animated.View style={{ transform: [{ scale: btnScaleAnim }] }}>
+                  <TouchableOpacity
+                    style={[
+                      styles.primaryButton,
+                      isFinalStep && styles.primaryButtonComplete,
+                    ]}
+                    activeOpacity={0.9}
+                    onPressIn={handlePressIn}
+                    onPressOut={handlePressOut}
+                    onPress={handleNext}
+                    accessible={true}
+                    accessibilityRole="button"
+                    accessibilityLabel={isFinalStep ? 'Enter Field' : 'Next Protocol Step'}
+                    accessibilityHint={
+                      isFinalStep
+                        ? 'Completes onboarding and opens authentication screen.'
+                        : 'Advances to the next onboarding instruction.'
+                    }
+                  >
+                    <Text style={styles.buttonText}>
+                      {isFinalStep ? 'ENTER FIELD ›' : 'NEXT PROTOCOL ›'}
+                    </Text>
+                  </TouchableOpacity>
+                </Animated.View>
+
+                {!isFinalStep && (
+                  <TouchableOpacity
+                    style={styles.skipButton}
+                    onPress={onComplete}
+                    hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+                    accessible={true}
+                    accessibilityRole="button"
+                    accessibilityLabel="Abort Tutorial and Skip"
+                  >
+                    <Text style={styles.skipButtonText}>ABORT TUTORIAL [SKIP]</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
             </View>
           </View>
         </View>
-
-      </View>
+      )}
     </View>
   );
 };
@@ -322,10 +410,35 @@ const styles = StyleSheet.create({
   },
   container: {
     flex: 1,
-    flexDirection: 'row', 
+    flexDirection: 'row',
   },
-  portraitWarningContainer: {
-    opacity: 0.95,
+  portraitWarningOverlay: {
+    flex: 1,
+    backgroundColor: PALETTE.forestDeep,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 24,
+    borderWidth: 2,
+    borderColor: PALETTE.brass,
+    borderRadius: 8,
+  },
+  portraitWarningTitle: {
+    color: PALETTE.parchment,
+    fontSize: 16,
+    fontWeight: '900',
+    letterSpacing: 2,
+    marginTop: 16,
+    textAlign: 'center',
+    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+  },
+  portraitWarningDesc: {
+    color: PALETTE.brass,
+    fontSize: 12,
+    textAlign: 'center',
+    marginTop: 8,
+    letterSpacing: 1,
+    lineHeight: 18,
+    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
   },
   leftViewport: {
     flex: 0.6,

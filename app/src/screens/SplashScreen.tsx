@@ -7,7 +7,9 @@ import {
   Platform,
   useWindowDimensions,
   Easing,
+  TouchableOpacity,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Logo from '../../assets/Logo.svg';
 
 interface Props {
@@ -25,9 +27,20 @@ const BOOT_DIAGNOSTICS = [
   'TREASI FIELD PROTOCOL...... READY',
 ];
 
+const COLORS = {
+  forestDeep: '#1E2B20',
+  panelBg: '#131D14',
+  parchment: '#E8DCC0',
+  siennaAccent: '#A64B2A',
+  brassTrim: '#B08D57',
+  mutedGreen: '#7C9082',
+  borderColor: '#2F4032',
+};
+
 export const SplashScreen: React.FC<Props> = ({ onFinish }) => {
   const { width, height } = useWindowDimensions();
-  
+  const insets = useSafeAreaInsets();
+
   // Animation References
   const progressAnim = useRef(new Animated.Value(0)).current;
   const pulseAnim = useRef(new Animated.Value(1)).current;
@@ -37,6 +50,8 @@ export const SplashScreen: React.FC<Props> = ({ onFinish }) => {
   const [percent, setPercent] = useState<number>(0);
   const [visibleLogIndex, setVisibleLogIndex] = useState<number>(0);
   const [cursorVisible, setCursorVisible] = useState<boolean>(true);
+
+  const fontMonospace = Platform.OS === 'ios' ? 'Courier' : 'monospace';
 
   // 1. Blinking terminal cursor micro-interaction (500ms cycle)
   useEffect(() => {
@@ -69,11 +84,13 @@ export const SplashScreen: React.FC<Props> = ({ onFinish }) => {
     return () => pulseLoop.stop();
   }, [pulseAnim]);
 
-  // 3. Extended diagnostic boot sequence (~9.6s timeline)
+  // 3. Extended diagnostic boot sequence timeline
   useEffect(() => {
+    let timeoutId: ReturnType<typeof setTimeout>;
+
     const animation = Animated.timing(progressAnim, {
       toValue: 100,
-      duration: 9600, 
+      duration: 8000,
       easing: Easing.linear,
       useNativeDriver: false, // Required for progress bar width interpolation
     });
@@ -88,8 +105,8 @@ export const SplashScreen: React.FC<Props> = ({ onFinish }) => {
     });
 
     animation.start(() => {
-      // 1.2s atmospheric pause after reaching 100% so user can inspect final status
-      setTimeout(() => {
+      // Atmospheric pause after reaching 100% so user can inspect final status
+      timeoutId = setTimeout(() => {
         Animated.timing(fadeAnim, {
           toValue: 0,
           duration: 800,
@@ -98,13 +115,26 @@ export const SplashScreen: React.FC<Props> = ({ onFinish }) => {
         }).start(() => {
           if (onFinish) onFinish();
         });
-      }, 1200);
+      }, 1000);
     });
 
     return () => {
       progressAnim.removeListener(listenerId);
+      if (timeoutId) clearTimeout(timeoutId);
     };
   }, [fadeAnim, onFinish, progressAnim]);
+
+  // Manual skip function for accessibility or quick developer testing
+  const handleSkip = () => {
+    progressAnim.stopAnimation();
+    Animated.timing(fadeAnim, {
+      toValue: 0,
+      duration: 300,
+      useNativeDriver: true,
+    }).start(() => {
+      if (onFinish) onFinish();
+    });
+  };
 
   // Interpolate numerical progress into percentage string for flex width
   const progressWidth = progressAnim.interpolate({
@@ -112,24 +142,51 @@ export const SplashScreen: React.FC<Props> = ({ onFinish }) => {
     outputRange: ['0%', '100%'],
   });
 
-  const fontMonospace = Platform.OS === 'ios' ? 'Courier' : 'monospace';
-
   return (
-    <Animated.View style={[styles.container, { width, height, opacity: fadeAnim }]}>
+    <Animated.View
+      style={[
+        styles.container,
+        {
+          width,
+          height,
+          opacity: fadeAnim,
+          paddingLeft: Math.max(insets.left, 16),
+          paddingRight: Math.max(insets.right, 16),
+          paddingTop: Math.max(insets.top, 12),
+          paddingBottom: Math.max(insets.bottom, 12),
+        },
+      ]}
+      accessible={true}
+      accessibilityLabel="Treasi initialization screen"
+    >
+      {/* LEFT PANEL: Branding & Visual Telemetry */}
       <View style={styles.leftPanel}>
-        {/* Animated Pulsing SVG Logo */}
-        <Animated.View style={[styles.logoWrapper, { transform: [{ scale: pulseAnim }] }]}>
-          <Logo width={120} height={120} />
+        {/* Animated SVG Logo */}
+        <Animated.View
+          style={[styles.logoWrapper, { transform: [{ scale: pulseAnim }] }]}
+          accessible={true}
+          accessibilityRole="image"
+          accessibilityLabel="Treasi mountain emblem logo"
+        >
+          <Logo width={110} height={110} />
         </Animated.View>
 
         {/* Brand Identity & Tagline */}
-        <Text style={styles.title}>T R E A S I</Text>
+        <Text style={styles.title} accessibilityRole="header">
+          T R E A S I
+        </Text>
         <Text style={[styles.tagline, { fontFamily: fontMonospace }]}>
           HIDE. EXPLORE. STAY CONNECTED.
         </Text>
 
         {/* Telemetry Progress Bar Container */}
-        <View style={styles.progressSection}>
+        <View
+          style={styles.progressSection}
+          accessible={true}
+          accessibilityRole="progressbar"
+          accessibilityLabel="System boot progress"
+          accessibilityValue={{ min: 0, max: 100, now: percent }}
+        >
           <View style={styles.progressBarTrack}>
             <Animated.View style={[styles.progressBarFill, { width: progressWidth }]} />
           </View>
@@ -145,16 +202,24 @@ export const SplashScreen: React.FC<Props> = ({ onFinish }) => {
         </View>
       </View>
 
+      {/* RIGHT PANEL: Tactical Terminal Readout */}
       <View style={styles.rightPanel}>
         <View style={styles.terminalHeader}>
-          <Text style={styles.terminalStar}>★ </Text>
+          <Text style={styles.terminalStar} accessible={false} importantForAccessibility="no">
+            ★{' '}
+          </Text>
           <Text style={[styles.terminalTitle, { fontFamily: fontMonospace }]}>
             FIELD DIAGNOSTICS
           </Text>
           <View style={styles.headerDivider} />
         </View>
 
-        <View style={styles.terminalBody}>
+        <View
+          style={styles.terminalBody}
+          accessible={true}
+          accessibilityLiveRegion="polite"
+          accessibilityLabel={`Diagnostic Status: ${BOOT_DIAGNOSTICS[visibleLogIndex] || ''}`}
+        >
           {BOOT_DIAGNOSTICS.map((log, idx) => {
             if (idx > visibleLogIndex) return null;
             const isCompleted = idx < visibleLogIndex || percent === 100;
@@ -176,26 +241,29 @@ export const SplashScreen: React.FC<Props> = ({ onFinish }) => {
 
           {/* Active Terminal Blinking Prompt */}
           {percent < 100 && (
-            <View style={styles.cursorRow}>
+            <View style={styles.cursorRow} accessible={false} importantForAccessibility="no">
               <Text style={[styles.logText, styles.cursorText, { fontFamily: fontMonospace }]}>
                 {cursorVisible ? '> POLLING_SENSORS...' : '> '}
               </Text>
             </View>
           )}
         </View>
+
+        {/* Accessibility Fast Bypass Trigger */}
+        <TouchableOpacity
+          style={styles.skipButton}
+          onPress={handleSkip}
+          accessibilityRole="button"
+          accessibilityLabel="Skip initialization sequence"
+          accessibilityHint="Bypasses the diagnostic boot sequence and proceeds immediately"
+        >
+          <Text style={[styles.skipText, { fontFamily: fontMonospace }]}>
+            [ SKIP DIAGNOSTICS ]
+          </Text>
+        </TouchableOpacity>
       </View>
     </Animated.View>
   );
-};
-
-const COLORS = {
-  forestDeep: '#1E2B20',
-  panelBg: '#131D14',
-  parchment: '#E8DCC0',
-  siennaAccent: '#A64B2A',
-  brassTrim: '#B08D57',
-  mutedGreen: '#7C9082',
-  borderColor: '#2F4032',
 };
 
 const styles = StyleSheet.create({
@@ -203,38 +271,37 @@ const styles = StyleSheet.create({
     flex: 1,
     flexDirection: 'row',
     backgroundColor: COLORS.forestDeep,
-    padding: 16,
   },
   leftPanel: {
     flex: 0.58,
     justifyContent: 'center',
     alignItems: 'center',
-    paddingHorizontal: 20,
+    paddingHorizontal: 16,
   },
   logoWrapper: {
-    width: 130,
-    height: 130,
+    width: 120,
+    height: 120,
     justifyContent: 'center',
     alignItems: 'center',
-    marginBottom: 10,
+    marginBottom: 8,
   },
   title: {
     color: COLORS.parchment,
-    fontSize: 30,
+    fontSize: 28,
     fontWeight: 'bold',
-    letterSpacing: 9,
+    letterSpacing: 8,
     marginBottom: 4,
   },
   tagline: {
     color: COLORS.brassTrim,
     fontSize: 9,
     letterSpacing: 2,
-    marginBottom: 24,
+    marginBottom: 20,
     opacity: 0.9,
   },
   progressSection: {
     width: '85%',
-    maxWidth: 320,
+    maxWidth: 300,
   },
   progressBarTrack: {
     height: 12,
@@ -253,12 +320,12 @@ const styles = StyleSheet.create({
   progressLabels: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    marginTop: 8,
+    marginTop: 6,
   },
   progressText: {
     color: COLORS.mutedGreen,
-    fontSize: 10,
-    letterSpacing: 1.5,
+    fontSize: 9.5,
+    letterSpacing: 1.2,
     fontWeight: '600',
   },
   rightPanel: {
@@ -267,13 +334,14 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     borderWidth: 1,
     borderColor: COLORS.borderColor,
-    padding: 16,
+    padding: 14,
     marginVertical: 4,
+    justifyContent: 'space-between',
   },
   terminalHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 14,
+    marginBottom: 10,
   },
   terminalStar: {
     color: COLORS.siennaAccent,
@@ -281,7 +349,7 @@ const styles = StyleSheet.create({
   },
   terminalTitle: {
     color: COLORS.brassTrim,
-    fontSize: 11,
+    fontSize: 10.5,
     letterSpacing: 2,
     fontWeight: 'bold',
   },
@@ -289,18 +357,18 @@ const styles = StyleSheet.create({
     flex: 1,
     height: 1,
     backgroundColor: COLORS.borderColor,
-    marginLeft: 10,
+    marginLeft: 8,
   },
   terminalBody: {
     flex: 1,
     justifyContent: 'flex-start',
   },
   logRow: {
-    marginVertical: 2.5,
+    marginVertical: 2,
   },
   logText: {
-    fontSize: 9.5,
-    letterSpacing: 0.8,
+    fontSize: 9,
+    letterSpacing: 0.7,
   },
   logDone: {
     color: COLORS.mutedGreen,
@@ -314,5 +382,17 @@ const styles = StyleSheet.create({
   },
   cursorText: {
     color: COLORS.siennaAccent,
+  },
+  skipButton: {
+    alignSelf: 'flex-end',
+    paddingVertical: 4,
+    paddingHorizontal: 6,
+    marginTop: 6,
+  },
+  skipText: {
+    color: COLORS.brassTrim,
+    fontSize: 8.5,
+    letterSpacing: 1,
+    opacity: 0.6,
   },
 });
