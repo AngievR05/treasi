@@ -19,14 +19,32 @@ import Animated, {
   withRepeat,
   withSequence,
   withTiming,
+  FadeInDown,
 } from 'react-native-reanimated';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
+import {
+  doc,
+  collection,
+  query,
+  where,
+  orderBy,
+  limit,
+  onSnapshot,
+} from 'firebase/firestore';
+
+import { auth, db } from '../config/firebase';
 import { FieldNavBar } from '../components/FieldNavBar';
+import {
+  UserDocument,
+  TreasureDocument,
+  ActivityFeedDocument,
+} from '../types/firestore';
 
 interface Props {
   onNavigate?: (screen: string) => void;
 }
 
+// Custom Vintage Map Styling Matrix (Sepia & Forest Palette)
 const VINTAGE_MAP_STYLE = [
   { elementType: 'geometry', stylers: [{ color: '#E8DCC0' }] },
   { elementType: 'labels.text.fill', stylers: [{ color: '#2A2420' }] },
@@ -47,12 +65,18 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
   const insets = useSafeAreaInsets();
   const mapRef = useRef<MapView | null>(null);
 
-  // Sensor state for live coordinates
-  const [userLocation, setUserLocation] = useState<Location.LocationObject | null>(null);
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [isInitializingLocation, setIsInitializingLocation] = useState(true);
+  // Firebase singleton instances
+  const currentUser = auth.currentUser;
 
-  // Initial region (Defaulting to Pretoria campus baseline until live GPS fix)
+  // Real-time Firestore State
+  const [userData, setUserData] = useState<UserDocument | null>(null);
+  const [activeTreasures, setActiveTreasures] = useState<TreasureDocument[]>([]);
+  const [activityFeed, setActivityFeed] = useState<ActivityFeedDocument[]>([]);
+  const [isLoadingFeed, setIsLoadingFeed] = useState(true);
+
+  // Location & Hardware Telemetry State
+  const [userLocation, setUserLocation] = useState<Location.LocationObject | null>(null);
+  const [isInitializingLocation, setIsInitializingLocation] = useState(true);
   const [region, setRegion] = useState<Region>({
     latitude: -25.7479,
     longitude: 28.2293,
@@ -60,21 +84,73 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
     longitudeDelta: 0.008,
   });
 
-  // Mock field cache markers
-  const [caches] = useState([
-    { id: '1', title: 'OLD PROSPECT', latitude: -25.7465, longitude: 28.2280, code: 'A' },
-    { id: '2', title: 'BEAR CREEK', latitude: -25.7490, longitude: 28.2250, code: 'B' },
-    { id: '3', title: 'PINE RIDGE', latitude: -25.7440, longitude: 28.2310, code: 'C' },
-  ]);
-
+  // Reanimated Shared Values
   const buttonScale = useSharedValue(1);
   const pulseOpacity = useSharedValue(1);
 
+  // 1. Dynamic Rank Calculation Helper
+  const getRankTitle = (points: number = 0): string => {
+    if (points >= 3000) return 'RANK: MASTER EXPLORER';
+    if (points >= 1500) return 'RANK: TRAILBLAZER III';
+    if (points >= 500) return 'RANK: PATHFINDER II';
+    return 'RANK: NOVICE SCOUT I';
+  };
+
+  // 2. Real-time Firestore Subscriptions
   useEffect(() => {
-    // Continuous opacity pulse effect for the radar badge
+    if (!currentUser) return;
+
+    // A. User Profile Subscription (Score & Rank)
+    const userDocRef = doc(db, 'users', currentUser.uid);
+    const unsubscribeUser = onSnapshot(userDocRef, (snapshot) => {
+      if (snapshot.exists()) {
+        setUserData(snapshot.data() as UserDocument);
+      }
+    });
+
+    // B. Active Field Treasures Subscription (Non-archived)
+    const treasuresQuery = query(
+      collection(db, 'treasures'),
+      where('isArchived', '==', false)
+    );
+    const unsubscribeTreasures = onSnapshot(treasuresQuery, (snapshot) => {
+      const treasures: TreasureDocument[] = [];
+      snapshot.forEach((docSnap) => {
+        treasures.push(docSnap.data() as TreasureDocument);
+      });
+      setActiveTreasures(treasures);
+    });
+
+    // C. Activity Feed Subscription (Recent 10 Field Signals)
+    const activityQuery = query(
+      collection(db, 'activity_feed'),
+      orderBy('createdAt', 'desc'),
+      limit(10)
+    );
+    const unsubscribeActivity = onSnapshot(activityQuery, (snapshot) => {
+      const activities: ActivityFeedDocument[] = [];
+      snapshot.forEach((docSnap) => {
+        activities.push(docSnap.data() as ActivityFeedDocument);
+      });
+      setActivityFeed(activities);
+      setIsLoadingFeed(false);
+    }, () => {
+      setIsLoadingFeed(false);
+    });
+
+    return () => {
+      unsubscribeUser();
+      unsubscribeTreasures();
+      unsubscribeActivity();
+    };
+  }, [currentUser, db]);
+
+  // 3. Location Telemetry Lifecycle
+  useEffect(() => {
+    // Pulse animation for radar status badge
     pulseOpacity.value = withRepeat(
       withSequence(
-        withTiming(0.4, { duration: 1000 }),
+        withTiming(0.3, { duration: 1000 }),
         withTiming(1.0, { duration: 1000 })
       ),
       -1,
@@ -87,7 +163,10 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
       try {
         const { status } = await Location.requestForegroundPermissionsAsync();
         if (status !== 'granted') {
-          setErrorMsg('Location permissions denied. Reverting to manual positioning.');
+          Alert.alert(
+            'GPS PERMISSION REQUIRED',
+            'Treasi requires GPS telemetry to map caches near your vicinity.'
+          );
           setIsInitializingLocation(false);
           return;
         }
@@ -95,7 +174,7 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
         const initialPosition = await Location.getCurrentPositionAsync({
           accuracy: Location.Accuracy.High,
         });
-        
+
         setUserLocation(initialPosition);
         const newRegion = {
           latitude: initialPosition.coords.latitude,
@@ -107,11 +186,11 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
         mapRef.current?.animateToRegion(newRegion, 1200);
         setIsInitializingLocation(false);
 
-        // Subscribe to live position stream
+        // Continuous GPS Position Stream
         locationSubscription = await Location.watchPositionAsync(
           {
             accuracy: Location.Accuracy.Balanced,
-            timeInterval: 3000,
+            timeInterval: 4000,
             distanceInterval: 5,
           },
           (newLocation) => {
@@ -119,7 +198,6 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
           }
         );
       } catch (err) {
-        setErrorMsg('Error initializing GPS stream.');
         setIsInitializingLocation(false);
       }
     })();
@@ -131,6 +209,7 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
     };
   }, []);
 
+  // Animated Component Styles
   const animatedButtonStyle = useAnimatedStyle(() => ({
     transform: [{ scale: buttonScale.value }],
   }));
@@ -140,7 +219,7 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
   }));
 
   const handlePressIn = () => {
-    buttonScale.value = withSpring(0.95);
+    buttonScale.value = withSpring(0.94);
   };
 
   const handlePressOut = () => {
@@ -148,13 +227,15 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
   };
 
   const handleStampLocation = () => {
-    const coordsText = userLocation
-      ? `Lat: ${userLocation.coords.latitude.toFixed(4)}, Long: ${userLocation.coords.longitude.toFixed(4)}`
-      : 'Current GPS telemetry logged.';
+    if (!userLocation) {
+      Alert.alert('TELEMETRY OFFLINE', 'Acquiring satellite fix. Standby...');
+      return;
+    }
 
+    const { latitude, longitude } = userLocation.coords;
     Alert.alert(
       'LOCATION STAMPED',
-      `${coordsText}\n\nReady to bury a new field cache here?`,
+      `LAT: ${latitude.toFixed(4)}\nLONG: ${longitude.toFixed(4)}\n\nBury a new treasure cache at these coordinates?`,
       [
         { text: 'CANCEL', style: 'cancel' },
         { text: 'BURY CACHE', onPress: () => onNavigate?.('HUNT') },
@@ -168,15 +249,16 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
         styles.container,
         {
           flexDirection: isLandscape ? 'row' : 'column',
-          // Account for iPhone Dynamic Island and landscape notch padding dynamically
+          // Edge-to-edge landscape support handling for iPhone Dynamic Island & notch
           paddingLeft: isLandscape ? Math.max(insets.left, 12) : 0,
           paddingRight: isLandscape ? Math.max(insets.right, 12) : 0,
           paddingTop: isLandscape ? 0 : Math.max(insets.top, 12),
+          paddingBottom: isLandscape ? 0 : Math.max(insets.bottom, 6),
         },
       ]}
     >
       {/* LEFT VIEWPORT: Operational Parchment Canvas (60% Width in Landscape) */}
-      <View style={styles.leftViewport}>
+      <View style={isLandscape ? styles.leftViewportLandscape : styles.leftViewportPortrait}>
         <MapView
           ref={mapRef}
           provider={PROVIDER_DEFAULT}
@@ -185,35 +267,45 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
           customMapStyle={VINTAGE_MAP_STYLE}
           showsUserLocation={true}
           showsCompass={false}
+          accessibilityLabel="Scavenger Hunt Map Canvas"
+          accessibilityHint="Displays your real-time position and nearby hidden field treasures"
         >
-          {caches.map((cache) => (
+          {activeTreasures.map((treasure) => (
             <Marker
-              key={cache.id}
-              coordinate={{ latitude: cache.latitude, longitude: cache.longitude }}
-              title={cache.title}
+              key={treasure.treasureId}
+              coordinate={{
+                latitude: treasure.location.latitude,
+                longitude: treasure.location.longitude,
+              }}
+              title={treasure.title}
+              description={`Hidden by ${treasure.creatorName}`}
             >
-              <View style={styles.customMarker}>
-                <Text style={styles.markerText}>{cache.code}</Text>
+              <View
+                style={styles.customMarker}
+                accessible={true}
+                accessibilityLabel={`Treasure marker: ${treasure.title}`}
+              >
+                <MaterialCommunityIcons name="treasure-chest" size={14} color="#F3ECD8" />
               </View>
             </Marker>
           ))}
         </MapView>
 
-        {/* Compass Indicator */}
-        <View style={styles.compassOverlay}>
+        {/* Compass Dial Indicator Overlay */}
+        <View style={styles.compassOverlay} aria-hidden={true}>
           <Ionicons name="compass-outline" size={16} color="#2A2420" />
           <Text style={styles.compassText}>N</Text>
         </View>
 
-        {/* Live GPS Status Indicator Header */}
+        {/* Live Satellite Lock Badge */}
         <Animated.View style={[styles.locationBadge, animatedBadgeStyle]}>
-          <Ionicons name="location-sharp" size={12} color="#A64B2A" style={{ marginRight: 4 }} />
+          <Ionicons name="radio-sharp" size={12} color="#A64B2A" style={{ marginRight: 4 }} />
           <Text style={styles.locationBadgeText}>
             {isInitializingLocation
               ? 'ACQUIRING SATELLITE FIX...'
               : userLocation
               ? 'GPS SIGNAL LOCK'
-              : 'STATIC SIGNAL'}
+              : 'TELEMETRY OFFLINE'}
           </Text>
         </Animated.View>
 
@@ -225,9 +317,15 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
       </View>
 
       {/* RIGHT VIEWPORT: Command Console (40% Width in Landscape) */}
-      <View style={styles.rightViewport}>
-        {/* Field Status & User Score Card */}
-        <View style={styles.statusCard}>
+      <View style={isLandscape ? styles.rightViewportLandscape : styles.rightViewportPortrait}>
+        {/* User Stats & Score Card */}
+        <View
+          style={styles.statusCard}
+          accessible={true}
+          accessibilityRole="header"
+          accessibilityLabel={`Field Status: Total score ${userData?.totalPoints ?? 0} points, Rank ${getRankTitle(userData?.totalPoints)}`}
+        >
+          {/* Decorative Brass Rivets */}
           <View style={styles.rivetTL} />
           <View style={styles.rivetTR} />
           <View style={styles.rivetBL} />
@@ -240,65 +338,72 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
           </View>
 
           <View style={styles.scoreRow}>
-            <Text style={styles.scoreText}>2,340</Text>
+            <Text style={styles.scoreText}>
+              {(userData?.totalPoints ?? 0).toLocaleString()}
+            </Text>
             <Text style={styles.ptsText}>PTS</Text>
           </View>
-          <Text style={styles.rankText}>RANK: TRAILBLAZER III</Text>
+          <Text style={styles.rankText}>{getRankTitle(userData?.totalPoints)}</Text>
         </View>
 
-        {/* Recent Signals Feed */}
+        {/* Real-time Field Signals Stream */}
         <View style={styles.signalsContainer}>
           <View style={styles.sectionHeaderRow}>
             <MaterialCommunityIcons name="radio-handheld" size={14} color="#B08D57" />
             <Text style={styles.sectionTitle}>RECENT SIGNALS</Text>
           </View>
 
-          <ScrollView
-            style={styles.signalsScroll}
-            showsVerticalScrollIndicator={false}
-            contentContainerStyle={{ gap: 8 }}
-          >
-            <View style={styles.signalCard}>
-              <View style={styles.signalHeader}>
-                <View style={styles.authorRow}>
-                  <Ionicons name="radio-outline" size={12} color="#A64B2A" style={{ marginRight: 4 }} />
-                  <Text style={styles.signalAuthor}>RANGER_JACK</Text>
-                </View>
-                <Text style={styles.signalTime}>10:26 AM</Text>
-              </View>
-              <Text style={styles.signalBody}>
-                Found something interesting near Old Prospect. Meet you there?
-              </Text>
+          {isLoadingFeed ? (
+            <ActivityIndicator size="small" color="#B08D57" style={{ marginTop: 12 }} />
+          ) : activityFeed.length === 0 ? (
+            <View style={styles.emptyFeedBox}>
+              <Text style={styles.emptyFeedText}>NO FIELD SIGNALS DETECTED</Text>
             </View>
-
-            <View style={styles.signalCard}>
-              <View style={styles.signalHeader}>
-                <View style={styles.authorRow}>
-                  <Ionicons name="radio-outline" size={12} color="#A64B2A" style={{ marginRight: 4 }} />
-                  <Text style={styles.signalAuthor}>WILDER_WREN</Text>
-                </View>
-                <Text style={styles.signalTime}>YESTERDAY</Text>
-              </View>
-              <Text style={styles.signalBody}>
-                Dropped a supply cache near Bear Creek. Stay sharp out there.
-              </Text>
-            </View>
-          </ScrollView>
+          ) : (
+            <ScrollView
+              style={styles.signalsScroll}
+              showsVerticalScrollIndicator={false}
+              contentContainerStyle={{ gap: 8 }}
+            >
+              {activityFeed.map((item, index) => (
+                <Animated.View
+                  key={item.activityId || index.toString()}
+                  entering={FadeInDown.delay(index * 100).duration(400)}
+                  style={styles.signalCard}
+                  accessible={true}
+                  accessibilityLabel={`Signal from ${item.username}: ${item.message}`}
+                >
+                  <View style={styles.signalHeader}>
+                    <View style={styles.authorRow}>
+                      <Ionicons name="radio-outline" size={12} color="#A64B2A" style={{ marginRight: 4 }} />
+                      <Text style={styles.signalAuthor}>{item.username.toUpperCase()}</Text>
+                    </View>
+                    <Text style={styles.signalTypeTag}>{item.type.replace('_', ' ')}</Text>
+                  </View>
+                  <Text style={styles.signalBody}>{item.message}</Text>
+                </Animated.View>
+              ))}
+            </ScrollView>
+          )}
         </View>
 
-        {/* Primary Animated Stamp Action Button */}
+        {/* Primary Action Button: Stamp Location */}
         <AnimatedTouchableOpacity
           style={[styles.stampButton, animatedButtonStyle]}
           activeOpacity={0.85}
           onPressIn={handlePressIn}
           onPressOut={handlePressOut}
           onPress={handleStampLocation}
+          accessible={true}
+          accessibilityRole="button"
+          accessibilityLabel="Stamp Current Location"
+          accessibilityHint="Triggers GPS coordinate logging to plant or record a field cache"
         >
           <Ionicons name="print-outline" size={16} color="#F3ECD8" style={{ marginRight: 6 }} />
           <Text style={styles.stampButtonText}>STAMP LOCATION</Text>
         </AnimatedTouchableOpacity>
 
-        {/* Decoupled Navigation Component */}
+        {/* Navigation Bar */}
         <FieldNavBar currentTab="MAP" onNavigate={onNavigate} />
       </View>
     </View>
@@ -310,15 +415,28 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#2C3B2E',
   },
-  leftViewport: {
+  leftViewportLandscape: {
     flex: 0.60,
     position: 'relative',
     backgroundColor: '#E8DCC0',
     borderRightWidth: 3,
     borderColor: '#B08D57',
   },
-  rightViewport: {
+  leftViewportPortrait: {
+    height: '45%',
+    position: 'relative',
+    backgroundColor: '#E8DCC0',
+    borderBottomWidth: 3,
+    borderColor: '#B08D57',
+  },
+  rightViewportLandscape: {
     flex: 0.40,
+    backgroundColor: '#2C3B2E',
+    padding: 12,
+    justifyContent: 'space-between',
+  },
+  rightViewportPortrait: {
+    flex: 1,
     backgroundColor: '#2C3B2E',
     padding: 12,
     justifyContent: 'space-between',
@@ -386,11 +504,7 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.3,
   },
-  markerText: {
-    color: '#F3ECD8',
-    fontSize: 12,
-    fontWeight: 'bold',
-  },
+
   /* Field Status Card */
   statusCard: {
     backgroundColor: '#E8DCC0',
@@ -436,12 +550,12 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     letterSpacing: 1,
   },
-  /* Brass Rivet Detailing */
+  /* Brass Rivets */
   rivetTL: { position: 'absolute', top: 3, left: 3, width: 4, height: 4, borderRadius: 2, backgroundColor: '#B08D57' },
   rivetTR: { position: 'absolute', top: 3, right: 3, width: 4, height: 4, borderRadius: 2, backgroundColor: '#B08D57' },
   rivetBL: { position: 'absolute', bottom: 3, left: 3, width: 4, height: 4, borderRadius: 2, backgroundColor: '#B08D57' },
   rivetBR: { position: 'absolute', bottom: 3, right: 3, width: 4, height: 4, borderRadius: 2, backgroundColor: '#B08D57' },
-  
+
   /* Signals Feed */
   signalsContainer: {
     flex: 1,
@@ -462,6 +576,20 @@ const styles = StyleSheet.create({
   signalsScroll: {
     flex: 1,
   },
+  emptyFeedBox: {
+    padding: 12,
+    borderWidth: 1,
+    borderColor: '#B08D57',
+    borderStyle: 'dashed',
+    borderRadius: 4,
+    alignItems: 'center',
+    marginTop: 6,
+  },
+  emptyFeedText: {
+    color: '#E8DCC0',
+    fontSize: 9,
+    letterSpacing: 1,
+  },
   signalCard: {
     backgroundColor: '#F3ECD8',
     borderRadius: 4,
@@ -472,6 +600,7 @@ const styles = StyleSheet.create({
   signalHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
+    alignItems: 'center',
     marginBottom: 4,
   },
   authorRow: {
@@ -483,9 +612,11 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     fontSize: 10,
   },
-  signalTime: {
+  signalTypeTag: {
     color: '#8C8275',
-    fontSize: 9,
+    fontSize: 8,
+    fontWeight: 'bold',
+    letterSpacing: 0.5,
   },
   signalBody: {
     color: '#2A2420',
@@ -493,7 +624,7 @@ const styles = StyleSheet.create({
     lineHeight: 13,
   },
 
-  /* Primary Button */
+  /* Stamp Button */
   stampButton: {
     backgroundColor: '#A64B2A',
     paddingVertical: 10,
@@ -504,6 +635,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     marginBottom: 8,
+    minHeight: 48, // Standard touch-target size requirement
   },
   stampButtonText: {
     color: '#F3ECD8',
