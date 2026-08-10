@@ -28,7 +28,7 @@ const BOOT_DIAGNOSTICS = [
 ];
 
 const COLORS = {
-  forestDeep: '#1E2B20',
+  forestDeep: '#1E281F',
   panelBg: '#131D14',
   parchment: '#E8DCC0',
   siennaAccent: '#A64B2A',
@@ -90,12 +90,13 @@ export const SplashScreen: React.FC<Props> = ({ onFinish }) => {
 
     const animation = Animated.timing(progressAnim, {
       toValue: 100,
-      duration: 8000,
+      duration: 7500,
       easing: Easing.linear,
-      useNativeDriver: false, // Required for progress bar width interpolation
+      useNativeDriver: false, // Required for width percentage interpolation
     });
 
-    const listenerId = progressAnim.addListener(({ value }) => {
+    progressAnim.removeAllListeners();
+    progressAnim.addListener(({ value }) => {
       const currentPercent = Math.min(100, Math.floor(value));
       setPercent(currentPercent);
 
@@ -109,17 +110,17 @@ export const SplashScreen: React.FC<Props> = ({ onFinish }) => {
       timeoutId = setTimeout(() => {
         Animated.timing(fadeAnim, {
           toValue: 0,
-          duration: 800,
+          duration: 600,
           easing: Easing.out(Easing.quad),
           useNativeDriver: true,
         }).start(() => {
           if (onFinish) onFinish();
         });
-      }, 1000);
+      }, 800);
     });
 
     return () => {
-      progressAnim.removeListener(listenerId);
+      progressAnim.removeAllListeners();
       if (timeoutId) clearTimeout(timeoutId);
     };
   }, [fadeAnim, onFinish, progressAnim]);
@@ -159,14 +160,14 @@ export const SplashScreen: React.FC<Props> = ({ onFinish }) => {
       accessible={true}
       accessibilityLabel="Treasi initialization screen"
     >
-      {/* LEFT PANEL: Branding & Visual Telemetry */}
+      {/* LEFT PANEL (60%): Branding & Visual Telemetry */}
       <View style={styles.leftPanel}>
         {/* Animated SVG Logo */}
         <Animated.View
           style={[styles.logoWrapper, { transform: [{ scale: pulseAnim }] }]}
           accessible={true}
           accessibilityRole="image"
-          accessibilityLabel="Treasi mountain emblem logo"
+          accessibilityLabel="Treasi emblem logo"
         >
           <Logo width={110} height={110} />
         </Animated.View>
@@ -202,7 +203,7 @@ export const SplashScreen: React.FC<Props> = ({ onFinish }) => {
         </View>
       </View>
 
-      {/* RIGHT PANEL: Tactical Terminal Readout */}
+      {/* RIGHT PANEL (40%): Tactical Terminal Readout */}
       <View style={styles.rightPanel}>
         <View style={styles.terminalHeader}>
           <Text style={styles.terminalStar} accessible={false} importantForAccessibility="no">
@@ -249,7 +250,7 @@ export const SplashScreen: React.FC<Props> = ({ onFinish }) => {
           )}
         </View>
 
-        {/* Accessibility Fast Bypass Trigger */}
+        {/* Accessibility Fast Bypass Trigger (Minimum 48x48 Touch Target) */}
         <TouchableOpacity
           style={styles.skipButton}
           onPress={handleSkip}
@@ -385,14 +386,17 @@ const styles = StyleSheet.create({
   },
   skipButton: {
     alignSelf: 'flex-end',
-    paddingVertical: 4,
-    paddingHorizontal: 6,
-    marginTop: 6,
+    justifyContent: 'center',
+    alignItems: 'center',
+    minHeight: 48,
+    minWidth: 48,
+    paddingVertical: 6,
+    paddingHorizontal: 8,
   },
   skipText: {
     color: COLORS.brassTrim,
     fontSize: 8.5,
     letterSpacing: 1,
-    opacity: 0.6,
+    opacity: 0.7,
   },
 });

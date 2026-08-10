@@ -32,7 +32,7 @@ import {
   ShieldAlert 
 } from 'lucide-react-native';
 
-// Firebase Engine Integration
+// Firebase Engine & Firestore Imports
 import { signInWithEmailAndPassword } from 'firebase/auth';
 import { doc, updateDoc, Timestamp } from 'firebase/firestore';
 import { auth, db } from '../../config/firebase';
@@ -42,7 +42,10 @@ export interface LoginScreenProps {
   onLoginSuccess: () => void;
 }
 
-const LoginScreen: React.FC<LoginScreenProps> = ({ onNavigateSignUp, onLoginSuccess }) => {
+export const LoginScreen: React.FC<LoginScreenProps> = ({ 
+  onNavigateSignUp, 
+  onLoginSuccess 
+}) => {
   const { width, height } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const isLandscape = width > height;
@@ -54,12 +57,12 @@ const LoginScreen: React.FC<LoginScreenProps> = ({ onNavigateSignUp, onLoginSucc
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  // System & Calibration Toggles (Strictly OFF / false by default per specifications)
+  // Pre-flight Sensor Toggles (Strictly OFF / false by default per specifications)
   const [gpsEnabled, setGpsEnabled] = useState<boolean>(false);
   const [compassEnabled, setCompassEnabled] = useState<boolean>(false);
   const [motionEnabled, setMotionEnabled] = useState<boolean>(false);
 
-  // Button Spring Animation Scale
+  // Micro-interaction: Tactile Button Press Spring Scale
   const buttonScale = useSharedValue(1);
 
   const animatedButtonStyle = useAnimatedStyle(() => ({
@@ -67,14 +70,14 @@ const LoginScreen: React.FC<LoginScreenProps> = ({ onNavigateSignUp, onLoginSucc
   }));
 
   const handlePressIn = () => {
-    buttonScale.value = withSpring(0.96);
+    buttonScale.value = withSpring(0.96, { damping: 12, stiffness: 200 });
   };
 
   const handlePressOut = () => {
-    buttonScale.value = withSpring(1);
+    buttonScale.value = withSpring(1, { damping: 12, stiffness: 200 });
   };
 
-  // Firebase Auth Login Handler
+  // Firebase Auth Login & Telemetry Sync Pipeline
   const handleLogin = async () => {
     if (!email.trim() || !password) {
       setErrorMessage('Field protocol requires both Explorer ID and Passcode.');
@@ -85,11 +88,11 @@ const LoginScreen: React.FC<LoginScreenProps> = ({ onNavigateSignUp, onLoginSucc
     setErrorMessage(null);
 
     try {
-      // 1. Authenticate with Firebase Auth
+      // 1. Authenticate credentials via Firebase Auth
       const userCredential = await signInWithEmailAndPassword(auth, email.trim(), password);
       const user = userCredential.user;
 
-      // 2. Telemetry Sync with Firestore users collection
+      // 2. Persist sensor telemetry configuration to Firestore user document
       if (user) {
         const userDocRef = doc(db, 'users', user.uid);
         await updateDoc(userDocRef, {
@@ -97,13 +100,13 @@ const LoginScreen: React.FC<LoginScreenProps> = ({ onNavigateSignUp, onLoginSucc
           motionSensitivityEnabled: motionEnabled,
           updatedAt: Timestamp.now(),
         }).catch(() => {
-          // Soft-fail non-blocking telemetry sync error
+          // Non-blocking catch: Proceed to dashboard even if telemetry write fails
         });
       }
 
       onLoginSuccess();
     } catch (error: any) {
-      let msg = 'Authentication failed. Please check credentials.';
+      let msg = 'Authentication failed. Please check field credentials.';
       if (error.code === 'auth/invalid-email') {
         msg = 'Invalid Explorer ID format.';
       } else if (
@@ -123,58 +126,68 @@ const LoginScreen: React.FC<LoginScreenProps> = ({ onNavigateSignUp, onLoginSucc
 
   return (
     <KeyboardAvoidingView
-      style={styles.keyboardContainer}
+      style={styles.fullScreenChassis}
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
     >
       <ScrollView
         contentContainerStyle={[
-          styles.container,
+          styles.scrollContainer,
           {
             paddingLeft: Math.max(insets.left, 16),
             paddingRight: Math.max(insets.right, 16),
-            paddingTop: Math.max(insets.top, 16),
-            paddingBottom: Math.max(insets.bottom, 16),
+            paddingTop: Math.max(insets.top, 12),
+            paddingBottom: Math.max(insets.bottom, 12),
           },
         ]}
         bounces={false}
         showsVerticalScrollIndicator={false}
       >
-        <View style={[styles.layoutWrapper, { flexDirection: isLandscape ? 'row' : 'column' }]}>
+        <View 
+          style={[
+            styles.layoutSplitWrapper, 
+            { flexDirection: isLandscape ? 'row' : 'column' }
+          ]}
+        >
           
-          {/* LEFT 60% PANEL: TACTILE VINTAGE ADMIT PERMIT TICKET */}
+          {/* LEFT PANEL (60% Width in Landscape): VINTAGE ADMIT PERMIT TICKET */}
           <Animated.View
-            entering={FadeInDown.duration(600)}
-            style={[styles.parchmentCard, { flex: isLandscape ? 0.6 : 1 }]}
+            entering={FadeInDown.duration(500)}
+            style={[
+              styles.parchmentCard, 
+              { flex: isLandscape ? 0.6 : 1 }
+            ]}
           >
-            <View style={styles.dashedBorder}>
-              {/* Ticket Header Metadata */}
+            <View style={styles.dashedBorderFrame}>
+              
+              {/* Header Metadata */}
               <View style={styles.ticketHeader}>
                 <Text style={styles.ticketHeaderLabel}>ADMIT ONE · 1951</Text>
                 <Text style={styles.ticketHeaderLabel}>FIELD PERMIT ★★★</Text>
               </View>
 
-              {/* Title & Tagline */}
+              {/* Branding Titles */}
               <View style={styles.brandHeader}>
                 <Text style={styles.brandTitle}>TREASI</Text>
                 <Text style={styles.brandSubtitle}>Hide. Explore. Stay connected.</Text>
               </View>
 
-              {/* Error Banner */}
+              {/* Error Diagnostic Banner */}
               {errorMessage && (
                 <View
                   style={styles.errorBox}
                   accessible={true}
                   accessibilityRole="alert"
-                  accessibilityLabel={errorMessage}
+                  accessibilityLabel={`Error: ${errorMessage}`}
                 >
                   <ShieldAlert size={16} color="#A64B2A" />
                   <Text style={styles.errorText}>{errorMessage}</Text>
                 </View>
               )}
 
-              {/* Credentials Form Inputs */}
+              {/* Form Input Stack */}
               <View style={styles.inputStack}>
-                {/* Email / Explorer ID Input */}
+                
+                {/* Username / Email Input */}
                 <View style={styles.inputContainer}>
                   <User size={18} color="#2A2420" style={styles.inputIcon} />
                   <TextInput
@@ -188,11 +201,11 @@ const LoginScreen: React.FC<LoginScreenProps> = ({ onNavigateSignUp, onLoginSucc
                     autoCorrect={false}
                     accessible={true}
                     accessibilityLabel="Explorer Email Input"
-                    accessibilityHint="Enter registered email address"
+                    accessibilityHint="Enter your registered email address"
                   />
                 </View>
 
-                {/* Passcode Input */}
+                {/* Password Input */}
                 <View style={styles.inputContainer}>
                   <Lock size={18} color="#2A2420" style={styles.inputIcon} />
                   <TextInput
@@ -205,7 +218,7 @@ const LoginScreen: React.FC<LoginScreenProps> = ({ onNavigateSignUp, onLoginSucc
                     autoCapitalize="none"
                     accessible={true}
                     accessibilityLabel="Passcode Input"
-                    accessibilityHint="Enter field authorization code"
+                    accessibilityHint="Enter your secret security code"
                   />
                   <TouchableOpacity
                     onPress={() => setShowPassword(!showPassword)}
@@ -221,10 +234,11 @@ const LoginScreen: React.FC<LoginScreenProps> = ({ onNavigateSignUp, onLoginSucc
                     )}
                   </TouchableOpacity>
                 </View>
+
               </View>
 
               {/* Primary Action Button */}
-              <Animated.View style={[animatedButtonStyle, { width: '100%' }]}>
+              <Animated.View style={[animatedButtonStyle, styles.fullWidthContainer]}>
                 <TouchableOpacity
                   style={[styles.primaryButton, isLoading && styles.buttonDisabled]}
                   onPress={handleLogin}
@@ -234,7 +248,7 @@ const LoginScreen: React.FC<LoginScreenProps> = ({ onNavigateSignUp, onLoginSucc
                   accessible={true}
                   accessibilityRole="button"
                   accessibilityLabel="Enter the field button"
-                  accessibilityHint="Submits login credentials to authorize access"
+                  accessibilityHint="Submits login credentials to authenticate session"
                 >
                   {isLoading ? (
                     <ActivityIndicator color="#E8DCC0" />
@@ -244,38 +258,42 @@ const LoginScreen: React.FC<LoginScreenProps> = ({ onNavigateSignUp, onLoginSucc
                 </TouchableOpacity>
               </Animated.View>
 
-              {/* Switch to Register */}
+              {/* Link to Registration Flow */}
               <TouchableOpacity
                 onPress={onNavigateSignUp}
                 style={styles.linkContainer}
                 accessible={true}
                 accessibilityRole="button"
                 accessibilityLabel="Register New Explorer"
-                accessibilityHint="Navigates to the signup screen"
+                accessibilityHint="Navigates to the sign up screen"
               >
                 <Text style={styles.linkText}>NEW EXPEDITION? SIGN UP HERE</Text>
               </TouchableOpacity>
+
             </View>
           </Animated.View>
 
-          {/* RIGHT 40% PANEL: TACTICAL CONTROL & SENSOR CONSOLE */}
+          {/* RIGHT PANEL (40% Width in Landscape): TACTICAL CONTROL & SENSOR CONSOLE */}
           <Animated.View
-            entering={FadeInRight.duration(600).delay(150)}
-            style={[styles.consoleCard, { flex: isLandscape ? 0.4 : 1 }]}
+            entering={FadeInRight.duration(500).delay(100)}
+            style={[
+              styles.consoleCard, 
+              { flex: isLandscape ? 0.4 : 1 }
+            ]}
           >
-            {/* Console Section 1 */}
+            {/* Guidance Section */}
             <Text style={styles.consoleSectionTitle}>★ BEFORE YOU HEAD OUT</Text>
             
             <View style={styles.widgetBox}>
               <RotateCw size={22} color="#B08D57" style={styles.widgetIcon} />
-              <View>
+              <View style={styles.flexShrinkContainer}>
                 <Text style={styles.widgetTitle}>ROTATE DEVICE</Text>
                 <Text style={styles.widgetSubtitle}>TO BEGIN</Text>
               </View>
             </View>
 
-            {/* Console Section 2: Sensor Pre-flight Toggles */}
-            <Text style={[styles.consoleSectionTitle, { marginTop: 16 }]}>
+            {/* Pre-flight Sensor Toggles Section */}
+            <Text style={[styles.consoleSectionTitle, styles.topMarginSection]}>
               ★ ENABLE SENSORS
             </Text>
 
@@ -293,7 +311,7 @@ const LoginScreen: React.FC<LoginScreenProps> = ({ onNavigateSignUp, onLoginSucc
                   thumbColor={gpsEnabled ? '#E8DCC0' : '#B08D57'}
                   accessible={true}
                   accessibilityRole="switch"
-                  accessibilityLabel="Enable GPS telemetry"
+                  accessibilityLabel="Enable GPS Telemetry"
                   style={styles.switchTarget}
                 />
               </View>
@@ -311,12 +329,12 @@ const LoginScreen: React.FC<LoginScreenProps> = ({ onNavigateSignUp, onLoginSucc
                   thumbColor={compassEnabled ? '#E8DCC0' : '#B08D57'}
                   accessible={true}
                   accessibilityRole="switch"
-                  accessibilityLabel="Enable Compass sensor"
+                  accessibilityLabel="Enable Compass Sensor"
                   style={styles.switchTarget}
                 />
               </View>
 
-              {/* Motion Sensor Toggle */}
+              {/* Motion Sense Toggle */}
               <View style={styles.toggleRow}>
                 <View style={styles.toggleLabelGroup}>
                   <Activity size={16} color="#B08D57" />
@@ -329,7 +347,7 @@ const LoginScreen: React.FC<LoginScreenProps> = ({ onNavigateSignUp, onLoginSucc
                   thumbColor={motionEnabled ? '#E8DCC0' : '#B08D57'}
                   accessible={true}
                   accessibilityRole="switch"
-                  accessibilityLabel="Enable Motion sensor"
+                  accessibilityLabel="Enable Motion Sense Accelerometer"
                   style={styles.switchTarget}
                 />
               </View>
@@ -345,42 +363,52 @@ const LoginScreen: React.FC<LoginScreenProps> = ({ onNavigateSignUp, onLoginSucc
 export default LoginScreen;
 
 const styles = StyleSheet.create({
-  keyboardContainer: {
+  fullScreenChassis: {
     flex: 1,
-    backgroundColor: '#1C261D', // Dark Forest Green Chassis
+    width: '100%',
+    height: '100%',
+    backgroundColor: '#1C261D', // Forest Green Chassis
   },
-  container: {
+  scrollContainer: {
     flexGrow: 1,
+    width: '100%',
     justifyContent: 'center',
     alignItems: 'center',
-    padding: 12,
   },
-  layoutWrapper: {
+  layoutSplitWrapper: {
     width: '100%',
-    maxWidth: 900,
+    height: '100%',
     gap: 12,
     alignItems: 'stretch',
+    justifyContent: 'center',
+  },
+  fullWidthContainer: {
+    width: '100%',
+  },
+  flexShrinkContainer: {
+    flex: 1,
   },
 
-  /* Parchment Left Panel Styles */
+  /* LEFT PANEL: PARCHMENT PERMIT CARD */
   parchmentCard: {
     backgroundColor: '#E8DCC0',
     borderRadius: 8,
     borderWidth: 2,
     borderColor: '#B08D57',
-    padding: 10,
+    padding: 8,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
+    shadowOpacity: 0.35,
     shadowRadius: 6,
-    elevation: 5,
+    elevation: 6,
+    justifyContent: 'center',
   },
-  dashedBorder: {
+  dashedBorderFrame: {
     borderWidth: 1.5,
     borderColor: '#A64B2A',
     borderStyle: 'dashed',
     borderRadius: 6,
-    padding: 16,
+    padding: 14,
     alignItems: 'center',
     justifyContent: 'space-between',
     flex: 1,
@@ -389,7 +417,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     width: '100%',
-    marginBottom: 12,
+    marginBottom: 8,
   },
   ticketHeaderLabel: {
     fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
@@ -400,7 +428,7 @@ const styles = StyleSheet.create({
   },
   brandHeader: {
     alignItems: 'center',
-    marginBottom: 16,
+    marginBottom: 12,
   },
   brandTitle: {
     fontFamily: Platform.OS === 'ios' ? 'Courier-Bold' : 'monospace',
@@ -411,13 +439,13 @@ const styles = StyleSheet.create({
   },
   brandSubtitle: {
     fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-    fontSize: 12,
+    fontSize: 11,
     color: '#2A2420',
-    marginTop: 4,
+    marginTop: 2,
     fontStyle: 'italic',
   },
 
-  /* Error Banner */
+  /* DIAGNOSTIC ERROR BANNER */
   errorBox: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -427,7 +455,7 @@ const styles = StyleSheet.create({
     borderRadius: 4,
     paddingHorizontal: 10,
     paddingVertical: 6,
-    marginBottom: 12,
+    marginBottom: 10,
     gap: 8,
     width: '100%',
   },
@@ -438,11 +466,11 @@ const styles = StyleSheet.create({
     flex: 1,
   },
 
-  /* Form Inputs */
+  /* INPUT FIELDS */
   inputStack: {
     width: '100%',
-    gap: 10,
-    marginBottom: 16,
+    gap: 8,
+    marginBottom: 12,
   },
   inputContainer: {
     flexDirection: 'row',
@@ -451,11 +479,11 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#B08D57',
     borderRadius: 4,
-    paddingHorizontal: 12,
+    paddingHorizontal: 10,
     height: 44,
   },
   inputIcon: {
-    marginRight: 10,
+    marginRight: 8,
   },
   textInput: {
     flex: 1,
@@ -466,13 +494,13 @@ const styles = StyleSheet.create({
   },
   eyeButton: {
     padding: 6,
-    minWidth: 48,
-    minHeight: 48,
+    minWidth: 44,
+    minHeight: 44,
     justifyContent: 'center',
     alignItems: 'center',
   },
 
-  /* Buttons */
+  /* ACTION BUTTONS */
   primaryButton: {
     backgroundColor: '#A64B2A',
     borderWidth: 1,
@@ -481,7 +509,7 @@ const styles = StyleSheet.create({
     borderRadius: 4,
     alignItems: 'center',
     justifyContent: 'center',
-    minHeight: 48, // Ensures WCAG compliant target size
+    minHeight: 48, // Minimum WCAG touch target
   },
   buttonDisabled: {
     opacity: 0.6,
@@ -489,15 +517,16 @@ const styles = StyleSheet.create({
   buttonText: {
     fontFamily: Platform.OS === 'ios' ? 'Courier-Bold' : 'monospace',
     color: '#E8DCC0',
-    fontSize: 13,
+    fontSize: 12,
     fontWeight: 'bold',
     letterSpacing: 1.5,
   },
   linkContainer: {
-    marginTop: 12,
-    padding: 8,
-    minHeight: 48, // Minimum touch target size
+    marginTop: 8,
+    padding: 6,
+    minHeight: 44,
     justifyContent: 'center',
+    alignItems: 'center',
   },
   linkText: {
     fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
@@ -508,21 +537,24 @@ const styles = StyleSheet.create({
     textDecorationLine: 'underline',
   },
 
-  /* Right Console Panel Styles */
+  /* RIGHT PANEL: CONTROL CONSOLE */
   consoleCard: {
     backgroundColor: '#2C3B2E',
     borderRadius: 8,
     borderWidth: 2,
     borderColor: '#B08D57',
-    padding: 16,
+    padding: 14,
     justifyContent: 'center',
   },
   consoleSectionTitle: {
     fontFamily: Platform.OS === 'ios' ? 'Courier-Bold' : 'monospace',
     fontSize: 10,
     color: '#B08D57',
-    letterSpacing: 1.5,
-    marginBottom: 8,
+    letterSpacing: 1.2,
+    marginBottom: 6,
+  },
+  topMarginSection: {
+    marginTop: 12,
   },
   widgetBox: {
     flexDirection: 'row',
@@ -531,11 +563,11 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#B08D57',
     borderRadius: 4,
-    padding: 12,
-    gap: 12,
+    padding: 10,
+    gap: 10,
   },
   widgetIcon: {
-    marginRight: 4,
+    marginRight: 2,
   },
   widgetTitle: {
     fontFamily: Platform.OS === 'ios' ? 'Courier-Bold' : 'monospace',
@@ -550,9 +582,9 @@ const styles = StyleSheet.create({
     letterSpacing: 1,
   },
 
-  /* Toggles */
+  /* TOGGLES */
   toggleList: {
-    gap: 8,
+    gap: 6,
   },
   toggleRow: {
     flexDirection: 'row',
@@ -562,18 +594,18 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#3D503F',
     borderRadius: 4,
-    paddingHorizontal: 12,
-    paddingVertical: 4,
-    minHeight: 48,
+    paddingHorizontal: 10,
+    paddingVertical: 2,
+    minHeight: 44,
   },
   toggleLabelGroup: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
+    gap: 8,
   },
   toggleText: {
     fontFamily: Platform.OS === 'ios' ? 'Courier-Bold' : 'monospace',
-    fontSize: 11,
+    fontSize: 10,
     color: '#E8DCC0',
     letterSpacing: 1,
   },

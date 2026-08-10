@@ -30,7 +30,7 @@ export const SignUpScreen: React.FC<Props> = ({ onNavigateLogin, onSignUpSuccess
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
-  
+
   // UI & Feedback State
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -39,7 +39,7 @@ export const SignUpScreen: React.FC<Props> = ({ onNavigateLogin, onSignUpSuccess
   const scaleAnim = useRef(new Animated.Value(1)).current;
   const fadeErrorAnim = useRef(new Animated.Value(0)).current;
 
-  // Trigger feedback animations
+  // Micro-interaction: Button Press Spring Tween
   const animateButtonPress = (toValue: number) => {
     Animated.spring(scaleAnim, {
       toValue,
@@ -48,6 +48,7 @@ export const SignUpScreen: React.FC<Props> = ({ onNavigateLogin, onSignUpSuccess
     }).start();
   };
 
+  // Micro-interaction: Smooth Error Banner Fade
   const displayError = (msg: string) => {
     setErrorMessage(msg);
     Animated.timing(fadeErrorAnim, {
@@ -119,7 +120,7 @@ export const SignUpScreen: React.FC<Props> = ({ onNavigateLogin, onSignUpSuccess
     } catch (error: any) {
       setLoading(false);
       let friendlyError = 'FIELD REGISTRATION FAILED. CHECK SIGNAL.';
-      
+
       if (error.code === 'auth/email-already-in-use') {
         friendlyError = 'EMAIL COORDINATE IS ALREADY ENROLLED';
       } else if (error.code === 'auth/invalid-email') {
@@ -149,7 +150,7 @@ export const SignUpScreen: React.FC<Props> = ({ onNavigateLogin, onSignUpSuccess
             keyboardShouldPersistTaps="handled"
           >
             <View style={styles.headerBlock}>
-              <Text style={styles.permitHeader}>ADMIT ONE · FIELD PERMIT ★★★</Text>
+              <Text style={styles.permitHeader}>ADMIT ONE · FIELD PERMIT</Text>
               <Text style={styles.title}>FIELD ENROLLMENT</Text>
               <Text style={styles.subtitle}>ESTABLISH YOUR EXPLORER IDENTITY</Text>
             </View>
@@ -268,7 +269,6 @@ export const SignUpScreen: React.FC<Props> = ({ onNavigateLogin, onSignUpSuccess
             </TouchableOpacity>
           </View>
 
-          {/* Dynamic Island / Notch Safety Padding */}
           <View style={styles.footerNoteContainer}>
             <Text style={styles.footerNote}>TREASI FIELD INSTRUMENT v1.0</Text>
           </View>
@@ -291,7 +291,7 @@ const styles = StyleSheet.create({
     flex: 0.60,
     backgroundColor: '#E8DCC0',
     paddingHorizontal: 24,
-    paddingVertical: 16,
+    paddingVertical: 12,
     justifyContent: 'center',
   },
   scrollContent: {
@@ -312,7 +312,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   headerBlock: {
-    marginBottom: 12,
+    marginBottom: 10,
   },
   permitHeader: {
     color: '#8C8275',
@@ -356,7 +356,7 @@ const styles = StyleSheet.create({
     borderRadius: 4,
     color: '#2A2420',
     fontSize: 13,
-    minHeight: 44, // Target size for accessibility
+    minHeight: 44,
     fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
   },
   submitButton: {
