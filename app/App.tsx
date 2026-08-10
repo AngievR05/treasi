@@ -1,19 +1,38 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { StatusBar } from 'expo-status-bar';
-import { StyleSheet, Text, View, useWindowDimensions } from 'react-native';
+import { StyleSheet, Text, View, useWindowDimensions, Animated, Easing } from 'react-native';
 import { SafeAreaProvider, useSafeAreaInsets, initialWindowMetrics } from 'react-native-safe-area-context';
 
-const SplashScreen = React.lazy(() => import('./src/screens/SplashScreen').then((module) => ({ default: module.SplashScreen })));
-const OnboardingScreen = React.lazy(() => import('./src/screens/OnboardingScreen').then((module) => ({ default: module.OnboardingScreen })));
-const LoginScreen = React.lazy(() => import('./src/screens/Auth/LoginScreen').then((module) => ({ default: module.default })));
-const SignUpScreen = React.lazy(() => import('./src/screens/Auth/SignUpScreen').then((module) => ({ default: module.SignUpScreen })));
-const DashboardScreen = React.lazy(() => import('./src/screens/DashboardScreen').then((module) => ({ default: module.DashboardScreen })));
-const HuntScreen = React.lazy(() => import('./src/screens/HuntScreen').then((module) => ({ default: module.HuntScreen })));
-const LeaderboardScreen = React.lazy(() => import('./src/screens/LeaderboardScreen').then((module) => ({ default: module.LeaderboardScreen })));
-const InventoryScreen = React.lazy(() => import('./src/screens/InventoryScreen').then((module) => ({ default: module.InventoryScreen })));
-const ProfileSettingsScreen = React.lazy(() => import('./src/screens/ProfileSettingsScreen').then((module) => ({ default: module.ProfileSettingsScreen })));
+// Lazy-loaded screen components for optimized performance
+const SplashScreen = React.lazy(() => 
+  import('./src/screens/SplashScreen').then((module) => ({ default: module.SplashScreen }))
+);
+const OnboardingScreen = React.lazy(() => 
+  import('./src/screens/OnboardingScreen').then((module) => ({ default: module.OnboardingScreen }))
+);
+const LoginScreen = React.lazy(() => 
+  import('./src/screens/Auth/LoginScreen').then((module) => ({ default: module.default }))
+);
+const SignUpScreen = React.lazy(() => 
+  import('./src/screens/Auth/SignUpScreen').then((module) => ({ default: module.SignUpScreen }))
+);
+const DashboardScreen = React.lazy(() => 
+  import('./src/screens/DashboardScreen').then((module) => ({ default: module.DashboardScreen }))
+);
+const HuntScreen = React.lazy(() => 
+  import('./src/screens/HuntScreen').then((module) => ({ default: module.HuntScreen }))
+);
+const LeaderboardScreen = React.lazy(() => 
+  import('./src/screens/LeaderboardScreen').then((module) => ({ default: module.LeaderboardScreen }))
+);
+const InventoryScreen = React.lazy(() => 
+  import('./src/screens/InventoryScreen').then((module) => ({ default: module.InventoryScreen }))
+);
+const ProfileSettingsScreen = React.lazy(() => 
+  import('./src/screens/ProfileSettingsScreen').then((module) => ({ default: module.ProfileSettingsScreen }))
+);
 
-type ScreenState = 
+export type ScreenState = 
   | 'SPLASH' 
   | 'ONBOARDING' 
   | 'LOGIN' 
@@ -24,22 +43,69 @@ type ScreenState =
   | 'INVENTORY' 
   | 'PROFILE';
 
+/**
+ * AnimatedScreenWrapper
+ * Provides micro-interaction screen transitions (fade + subtle tactile scale)
+ */
+interface AnimatedScreenWrapperProps {
+  children: React.ReactNode;
+  screenKey: string;
+}
+
+function AnimatedScreenWrapper({ children, screenKey }: AnimatedScreenWrapperProps) {
+  const fadeAnim = useRef(new Animated.Value(0)).current;
+  const scaleAnim = useRef(new Animated.Value(0.97)).current;
+
+  useEffect(() => {
+    fadeAnim.setValue(0);
+    scaleAnim.setValue(0.97);
+
+    Animated.parallel([
+      Animated.timing(fadeAnim, {
+        toValue: 1,
+        duration: 350,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: true,
+      }),
+      Animated.timing(scaleAnim, {
+        toValue: 1,
+        duration: 350,
+        easing: Easing.out(Easing.back(1.2)),
+        useNativeDriver: true,
+      }),
+    ]).start();
+  }, [screenKey, fadeAnim, scaleAnim]);
+
+  return (
+    <Animated.View 
+      style={[
+        styles.animatedWrapper, 
+        { opacity: fadeAnim, transform: [{ scale: scaleAnim }] }
+      ]}
+    >
+      {children}
+    </Animated.View>
+  );
+}
+
 function MainNavigator() {
   const { width, height } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const isLandscape = width > height;
-  const horizontalEdgePadding = Math.min(insets.left, 6);
-  const horizontalEdgePaddingRight = Math.min(insets.right, 6);
+
+  // Dynamic Island & Notch horizontal protection
+  const horizontalPaddingLeft = Math.max(insets.left, 12);
+  const horizontalPaddingRight = Math.max(insets.right, 12);
 
   // Active Navigation State
   const [currentScreen, setCurrentScreen] = useState<ScreenState>('SPLASH');
 
-  // Flow controls - Toggles are OFF by default
-  // Enforces Onboarding and Auth on launch.
+  // System Flow Controls - Toggles default to FALSE (OFF)
+  // Ensures user always navigates through Onboarding & Auth on cold boots
   const [skipOnboardingToggle] = useState<boolean>(false);
   const [bypassAuthToggle] = useState<boolean>(false);
 
-  // Splash Screen Timeout Logic
+  // Splash Screen Telemetry Initializer
   useEffect(() => {
     if (currentScreen === 'SPLASH') {
       const timer = setTimeout(() => {
@@ -50,23 +116,36 @@ function MainNavigator() {
         } else {
           setCurrentScreen('DASHBOARD');
         }
-      }, 2000);
+      }, 2400);
       return () => clearTimeout(timer);
     }
   }, [currentScreen, skipOnboardingToggle, bypassAuthToggle]);
 
   const renderActiveScreen = () => {
     const renderWithSuspense = (element: React.ReactNode) => (
-      <React.Suspense fallback={<View style={styles.loadingState}><Text style={styles.loadingText}>LOADING...</Text></View>}>
-        {element}
+      <React.Suspense 
+        fallback={
+          <View style={styles.loadingState}>
+            <Text style={styles.loadingPrefix}>[ INSTRUMENT CALIBRATING ]</Text>
+            <Text style={styles.loadingText}>INITIALIZING INSTRUMENT MODULE...</Text>
+          </View>
+        }
+      >
+        <AnimatedScreenWrapper screenKey={currentScreen}>
+          {element}
+        </AnimatedScreenWrapper>
       </React.Suspense>
     );
 
     switch (currentScreen) {
       case 'SPLASH':
         return renderWithSuspense(<SplashScreen />);
+
       case 'ONBOARDING':
-        return renderWithSuspense(<OnboardingScreen onComplete={() => setCurrentScreen('LOGIN')} />);
+        return renderWithSuspense(
+          <OnboardingScreen onComplete={() => setCurrentScreen('LOGIN')} />
+        );
+
       case 'LOGIN':
         return renderWithSuspense(
           <LoginScreen 
@@ -74,6 +153,7 @@ function MainNavigator() {
             onLoginSuccess={() => setCurrentScreen('DASHBOARD')} 
           />
         );
+
       case 'SIGNUP':
         return renderWithSuspense(
           <SignUpScreen 
@@ -81,10 +161,17 @@ function MainNavigator() {
             onSignUpSuccess={() => setCurrentScreen('DASHBOARD')} 
           />
         );
+
       case 'DASHBOARD':
-        return renderWithSuspense(<DashboardScreen onNavigate={(target) => setCurrentScreen(target as ScreenState)} />);
+        return renderWithSuspense(
+          <DashboardScreen onNavigate={(target) => setCurrentScreen(target as ScreenState)} />
+        );
+
       case 'HUNT':
-        return renderWithSuspense(<HuntScreen onBack={() => setCurrentScreen('DASHBOARD')} />);
+        return renderWithSuspense(
+          <HuntScreen onBack={() => setCurrentScreen('DASHBOARD')} />
+        );
+
       case 'LEADERBOARD':
         return renderWithSuspense(
           <LeaderboardScreen
@@ -92,6 +179,7 @@ function MainNavigator() {
             onNavigate={(target) => setCurrentScreen(target as ScreenState)}
           />
         );
+
       case 'INVENTORY':
         return renderWithSuspense(
           <InventoryScreen
@@ -99,6 +187,7 @@ function MainNavigator() {
             onNavigate={(target) => setCurrentScreen(target as ScreenState)}
           />
         );
+
       case 'PROFILE':
         return renderWithSuspense(
           <ProfileSettingsScreen 
@@ -106,8 +195,11 @@ function MainNavigator() {
             onSignOut={() => setCurrentScreen('LOGIN')} 
           />
         );
+
       default:
-        return renderWithSuspense(<DashboardScreen onNavigate={(target) => setCurrentScreen(target as ScreenState)} />);
+        return renderWithSuspense(
+          <DashboardScreen onNavigate={(target) => setCurrentScreen(target as ScreenState)} />
+        );
     }
   };
 
@@ -116,9 +208,8 @@ function MainNavigator() {
       style={[
         styles.container, 
         { 
-          // Keep a minimal edge buffer while letting content fill the screen
-          paddingLeft: horizontalEdgePadding,
-          paddingRight: horizontalEdgePaddingRight,
+          paddingLeft: horizontalPaddingLeft,
+          paddingRight: horizontalPaddingRight,
           paddingTop: 0,
           paddingBottom: 0,
         }
@@ -129,11 +220,12 @@ function MainNavigator() {
       {isLandscape ? (
         renderActiveScreen()
       ) : (
-        /* Accessibility safety net for landscape constraint */
+        /* Orientation Safety Net for Landscape Constraint */
         <View style={styles.orientationWarning}>
+          <Text style={styles.warningIcon}>[ ! ]</Text>
           <Text style={styles.warningTitle}>TILT INSTRUMENT HORIZONTALLY</Text>
           <Text style={styles.warningSubText}>
-            Treasi requires landscape alignment to calibrate sensor array.
+            Treasi requires landscape alignment to calibrate hardware sensor telemetry array.
           </Text>
         </View>
       )}
@@ -154,6 +246,11 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#1E281F', // Forest Deep Chassis
   },
+  animatedWrapper: {
+    flex: 1,
+    width: '100%',
+    height: '100%',
+  },
   orientationWarning: {
     flex: 1,
     justifyContent: 'center',
@@ -161,28 +258,44 @@ const styles = StyleSheet.create({
     backgroundColor: '#1E281F',
     padding: 32,
   },
+  warningIcon: {
+    color: '#A64B2A', // Sienna Accent
+    fontSize: 24,
+    fontWeight: 'bold',
+    marginBottom: 12,
+    letterSpacing: 2,
+  },
   warningTitle: {
     color: '#E8DCC0', // Parchment
     fontSize: 18,
     fontWeight: 'bold',
-    letterSpacing: 1.2,
+    letterSpacing: 1.5,
     textAlign: 'center',
     marginBottom: 8,
   },
   warningSubText: {
     color: '#B08D57', // Brass Trim
-    fontSize: 12,
+    fontSize: 13,
     textAlign: 'center',
+    maxWidth: 320,
+    lineHeight: 18,
   },
   loadingState: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: '#2C3B2E',
+    backgroundColor: '#1E281F',
+  },
+  loadingPrefix: {
+    color: '#B08D57',
+    fontSize: 12,
+    fontWeight: 'bold',
+    letterSpacing: 1.5,
+    marginBottom: 6,
   },
   loadingText: {
     color: '#E8DCC0',
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: '600',
     letterSpacing: 1.2,
   },
