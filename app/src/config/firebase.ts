@@ -6,7 +6,6 @@ import {
   getReactNativePersistence 
 } from "firebase/auth";
 import { 
-  initializeFirestore, 
   getFirestore, 
   Firestore 
 } from "firebase/firestore";
@@ -38,15 +37,8 @@ try {
   auth = getAuth(app);
 }
 
-// 3. Defensive Firestore Setup
-let db: Firestore;
-try {
-  db = initializeFirestore(app, {
-    experimentalAutoDetectLongPolling: true,
-  });
-} catch (error) {
-  db = getFirestore(app);
-}
+// 3. Failsafe Firestore Singleton
+const db: Firestore = getFirestore(app);
 
 // 4. Storage Reference
 const storage: FirebaseStorage = getStorage(app);

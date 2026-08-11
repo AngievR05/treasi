@@ -1,34 +1,34 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, Suspense, lazy } from 'react';
 import { StatusBar } from 'expo-status-bar';
 import { StyleSheet, Text, View, useWindowDimensions, Animated, Easing } from 'react-native';
-import { SafeAreaProvider, useSafeAreaInsets, initialWindowMetrics } from 'react-native-safe-area-context';
+import { SafeAreaProvider, initialWindowMetrics } from 'react-native-safe-area-context';
 
 // Lazy-loaded screen components for optimized performance
-const SplashScreen = React.lazy(() => 
+const SplashScreen = lazy(() => 
   import('./src/screens/SplashScreen').then((module) => ({ default: module.SplashScreen }))
 );
-const OnboardingScreen = React.lazy(() => 
+const OnboardingScreen = lazy(() => 
   import('./src/screens/OnboardingScreen').then((module) => ({ default: module.OnboardingScreen }))
 );
-const LoginScreen = React.lazy(() => 
+const LoginScreen = lazy(() => 
   import('./src/screens/Auth/LoginScreen').then((module) => ({ default: module.default }))
 );
-const SignUpScreen = React.lazy(() => 
+const SignUpScreen = lazy(() => 
   import('./src/screens/Auth/SignUpScreen').then((module) => ({ default: module.SignUpScreen }))
 );
-const DashboardScreen = React.lazy(() => 
+const DashboardScreen = lazy(() => 
   import('./src/screens/DashboardScreen').then((module) => ({ default: module.DashboardScreen }))
 );
-const HuntScreen = React.lazy(() => 
+const HuntScreen = lazy(() => 
   import('./src/screens/HuntScreen').then((module) => ({ default: module.HuntScreen }))
 );
-const LeaderboardScreen = React.lazy(() => 
+const LeaderboardScreen = lazy(() => 
   import('./src/screens/LeaderboardScreen').then((module) => ({ default: module.LeaderboardScreen }))
 );
-const InventoryScreen = React.lazy(() => 
+const InventoryScreen = lazy(() => 
   import('./src/screens/InventoryScreen').then((module) => ({ default: module.InventoryScreen }))
 );
-const ProfileSettingsScreen = React.lazy(() => 
+const ProfileSettingsScreen = lazy(() => 
   import('./src/screens/ProfileSettingsScreen').then((module) => ({ default: module.ProfileSettingsScreen }))
 );
 
@@ -45,7 +45,7 @@ export type ScreenState =
 
 /**
  * AnimatedScreenWrapper
- * Provides micro-interaction screen transitions (fade + subtle tactile scale)
+ * Micro-interaction screen transitions (fade + tactile scale)
  */
 interface AnimatedScreenWrapperProps {
   children: React.ReactNode;
@@ -90,18 +90,13 @@ function AnimatedScreenWrapper({ children, screenKey }: AnimatedScreenWrapperPro
 
 function MainNavigator() {
   const { width, height } = useWindowDimensions();
-  const insets = useSafeAreaInsets();
   const isLandscape = width > height;
-
-  // Dynamic Island & Notch horizontal protection
-  const horizontalPaddingLeft = Math.max(insets.left, 12);
-  const horizontalPaddingRight = Math.max(insets.right, 12);
 
   // Active Navigation State
   const [currentScreen, setCurrentScreen] = useState<ScreenState>('SPLASH');
 
-  // System Flow Controls - Toggles default to FALSE (OFF)
-  // Ensures user always navigates through Onboarding & Auth on cold boots
+  // Flow Controls (Defaults strictly set to false / OFF)
+  // Guarantees mandatory traversal: Splash -> Onboarding -> Auth -> Dashboard
   const [skipOnboardingToggle] = useState<boolean>(false);
   const [bypassAuthToggle] = useState<boolean>(false);
 
@@ -123,7 +118,7 @@ function MainNavigator() {
 
   const renderActiveScreen = () => {
     const renderWithSuspense = (element: React.ReactNode) => (
-      <React.Suspense 
+      <Suspense 
         fallback={
           <View style={styles.loadingState}>
             <Text style={styles.loadingPrefix}>[ INSTRUMENT CALIBRATING ]</Text>
@@ -134,7 +129,7 @@ function MainNavigator() {
         <AnimatedScreenWrapper screenKey={currentScreen}>
           {element}
         </AnimatedScreenWrapper>
-      </React.Suspense>
+      </Suspense>
     );
 
     switch (currentScreen) {
@@ -204,17 +199,7 @@ function MainNavigator() {
   };
 
   return (
-    <View 
-      style={[
-        styles.container, 
-        { 
-          paddingLeft: horizontalPaddingLeft,
-          paddingRight: horizontalPaddingRight,
-          paddingTop: 0,
-          paddingBottom: 0,
-        }
-      ]}
-    >
+    <View style={styles.container}>
       <StatusBar style="light" hidden />
       
       {isLandscape ? (
@@ -245,6 +230,10 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#1E281F', // Forest Deep Chassis
+    paddingLeft: 0,
+    paddingRight: 0,
+    paddingTop: 0,
+    paddingBottom: 0,
   },
   animatedWrapper: {
     flex: 1,

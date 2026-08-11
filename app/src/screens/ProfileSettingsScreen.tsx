@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -8,58 +8,140 @@ import {
   Switch,
   ScrollView,
   Platform,
+  Animated,
+  Easing,
+  useWindowDimensions,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { FieldNavBar, NavigationTab } from '../components/FieldNavBar';
+import { UserDocument } from '../types/firestore';
 
-interface ProfileData {
-  agentName: string;
-  handle: string;
-  badge: string;
-  memberSince: string;
-  permitStatus: string;
-  cachesFound: number;
-  sector: string;
-}
-
-interface Props {
+interface ProfileSettingsScreenProps {
   onBack?: () => void;
   onSignOut: () => void;
   onNavigate?: (tab: NavigationTab) => void;
-  profileData?: ProfileData;
+  userData?: UserDocument | null;
+  onUpdateUserSettings?: (updatedFields: Partial<UserDocument>) => Promise<void>;
 }
 
-export const ProfileSettingsScreen: React.FC<Props> = ({
+export const ProfileSettingsScreen: React.FC<ProfileSettingsScreenProps> = ({
   onBack,
   onSignOut,
   onNavigate,
-  profileData = {
-    agentName: 'A. FINCH',
-    handle: '@ranger_finch',
-    badge: 'TRAILBLAZER III',
-    memberSince: 'MAR 1951',
-    permitStatus: 'ACTIVE',
-    cachesFound: 128,
-    sector: 'SHASTA NF',
-  },
+  userData,
+  onUpdateUserSettings,
 }) => {
   const insets = useSafeAreaInsets();
+  const { width, height } = useWindowDimensions();
 
-  // Calibration Array Toggles - Strictly Default OFF (false)
-  const [hapticTriggers, setHapticTriggers] = useState(false);
-  const [sensorSensitivity, setSensorSensitivity] = useState(false);
-  const [batteryOptimize, setBatteryOptimize] = useState(false);
-  const [nightFieldMode, setNightFieldMode] = useState(false);
+  // Calibration Array Toggles - Strictly Default OFF (false) if missing
+  const [hapticTriggers, setHapticTriggers] = useState<boolean>(false);
+  const [sensorSensitivity, setSensorSensitivity] = useState<boolean>(false);
+  const [batteryOptimize, setBatteryOptimize] = useState<boolean>(false);
+  const [nightFieldMode, setNightFieldMode] = useState<boolean>(false);
+  const [telemetryEnabled, setTelemetryEnabled] = useState<boolean>(false);
+  const [skipOnboardingAuthFlow, setSkipOnboardingAuthFlow] = useState<boolean>(false);
 
-  // Profile Editing State
+  // Identity Editing State
   const [isEditing, setIsEditing] = useState(false);
-  const [agentName, setAgentName] = useState(profileData.agentName);
-  const [handle, setHandle] = useState(profileData.handle);
+  const [agentName, setAgentName] = useState<string>('');
+  const [handle, setHandle] = useState<string>('');
+
+  // Sync state dynamically when live userData document resolves from Firestore
+  useEffect(() => {
+    if (userData) {
+      setHapticTriggers(userData.hapticFeedbackEnabled ?? false);
+      setSensorSensitivity(userData.motionSensitivityEnabled ?? false);
+      setBatteryOptimize(userData.batteryOptimizerEnabled ?? false);
+      setNightFieldMode(userData.nightModeEnabled ?? false);
+      setTelemetryEnabled(userData.telemetryEnabled ?? false);
+      setSkipOnboardingAuthFlow(userData.skipOnboardingAuthFlow ?? false);
+
+      setAgentName(userData.username || 'EXPLORER UNKNOWN');
+      setHandle(`@${(userData.username || 'explorer').toLowerCase().replace(/\s+/g, '_')}`);
+    }
+  }, [userData]);
+
+  // Micro-interaction Tactile Animations
+  const editBtnScale = useRef(new Animated.Value(1)).current;
+  const signOutBtnScale = useRef(new Animated.Value(1)).current;
+
+  const triggerPressAnimation = (animValue: Animated.Value, callback?: () => void) => {
+    Animated.sequence([
+      Animated.timing(animValue, {
+        toValue: 0.94,
+        duration: 80,
+        easing: Easing.out(Easing.ease),
+        useNativeDriver: true,
+      }),
+      Animated.spring(animValue, {
+        toValue: 1,
+        friction: 4,
+        tension: 40,
+        useNativeDriver: true,
+      }),
+    ]).start(() => {
+      if (callback) callback();
+    });
+  };
+
+  const handleToggleChange = (
+    key: keyof UserDocument,
+    value: boolean,
+    setter: (val: boolean) => void
+  ) => {
+    setter(value);
+    if (onUpdateUserSettings) {
+      onUpdateUserSettings({ [key]: value }).catch((err) => {
+        console.error(`[FIELD TELEMETRY ERROR] Failed to persist toggle ${key}:`, err);
+      });
+    }
+  };
 
   const handleSaveProfile = () => {
-    setIsEditing(false);
-    // TODO: Write updated agentName and handle to Firebase Firestore 'users' collection
+    triggerPressAnimation(editBtnScale, () => {
+      setIsEditing(false);
+      if (onUpdateUserSettings && agentName.trim().length > 0) {
+        onUpdateUserSettings({
+          username: agentName.trim(),
+        }).catch((err) => {
+          console.error('[FIELD IDENTITY ERROR] Failed to persist agent callsing:', err);
+        });
+      }
+    });
+  };
+
+  const handleStartEditing = () => {
+    triggerPressAnimation(editBtnScale, () => {
+      setIsEditing(true);
+    });
+  };
+
+  const handleSignOutPress = () => {
+    triggerPressAnimation(signOutBtnScale, () => {
+      onSignOut();
+    });
+  };
+
+  // Dynamic formatting derived from live Firestore User Document
+  const formatMemberSince = (): string => {
+    if (!userData?.createdAt) return 'NOV 2025';
+    try {
+      const date = userData.createdAt.toDate ? userData.createdAt.toDate() : new Date();
+      const month = date.toLocaleString('default', { month: 'short' }).toUpperCase();
+      const year = date.getFullYear();
+      return `${month} ${year}`;
+    } catch {
+      return 'NOV 2025';
+    }
+  };
+
+  const calculateBadgeRank = (points: number = 0): string => {
+    if (points >= 500) return 'COMMANDER I';
+    if (points >= 250) return 'PATHFINDER II';
+    if (points >= 100) return 'TRAILBLAZER III';
+    return 'RECON SCOUT';
   };
 
   return (
@@ -67,22 +149,31 @@ export const ProfileSettingsScreen: React.FC<Props> = ({
       style={[
         styles.safeAreaContainer,
         {
-          paddingLeft: Math.max(insets.left, 16),
-          paddingRight: Math.max(insets.right, 16),
-          paddingTop: Math.max(insets.top, 12),
-          paddingBottom: Math.max(insets.bottom, 12),
+          paddingLeft: Math.max(insets.left, 12),
+          paddingRight: Math.max(insets.right, 12),
+          paddingTop: Math.max(insets.top, 8),
+          paddingBottom: Math.max(insets.bottom, 8),
         },
       ]}
     >
       <View style={styles.splitWrapper}>
+        {/* ============================================================ */}
+        {/* LEFT VIEWPORT: FIELD IDENTITY LOG CARD (PARCHMENT - 58%)     */}
+        {/* ============================================================ */}
         <View style={styles.leftViewport}>
           <View style={styles.cardInnerBorder}>
+            {/* Header Identity Bar */}
             <View style={styles.cardHeader}>
-              <Text style={styles.headerTitle}>FIELD IDENTITY LOG</Text>
-              <Text style={styles.headerTag}>T-51</Text>
+              <View style={styles.headerTitleGroup}>
+                <Ionicons name="document-text-outline" size={13} color="#2A2420" />
+                <Text style={styles.headerTitle}> FIELD IDENTITY LOG</Text>
+              </View>
+              <Text style={styles.headerTag}>
+                UID: {userData?.uid ? `${userData.uid.substring(0, 5)}` : 'T-51'}
+              </Text>
             </View>
 
-            {/* IDENTITY MAIN ROW */}
+            {/* Main Agent Details */}
             <View style={styles.identityRow}>
               <View style={styles.avatarBox}>
                 <Ionicons name="person" size={36} color="#E8DCC0" />
@@ -98,6 +189,9 @@ export const ProfileSettingsScreen: React.FC<Props> = ({
                       placeholder="AGENT CALLSIGN"
                       placeholderTextColor="#8C7A6B"
                       autoCapitalize="characters"
+                      accessible={true}
+                      accessibilityLabel="Agent Callsign Input"
+                      accessibilityHint="Enter your custom field callsign"
                     />
                     <TextInput
                       style={[styles.textInput, styles.handleInput]}
@@ -106,28 +200,38 @@ export const ProfileSettingsScreen: React.FC<Props> = ({
                       placeholder="@handle"
                       placeholderTextColor="#8C7A6B"
                       autoCapitalize="none"
+                      accessible={true}
+                      accessibilityLabel="Agent Handle Input"
+                      accessibilityHint="Enter your handle starting with at symbol"
                     />
                   </View>
                 ) : (
                   <>
-                    <Text style={styles.agentName}>{agentName}</Text>
-                    <Text style={styles.handleText}>{handle}</Text>
+                    <Text style={styles.agentName} numberOfLines={1}>
+                      {agentName || 'A. FINCH'}
+                    </Text>
+                    <Text style={styles.handleText} numberOfLines={1}>
+                      {handle || '@ranger_finch'}
+                    </Text>
                   </>
                 )}
 
                 <View style={styles.badgeContainer}>
-                  <Text style={styles.badgeText}>{profileData.badge}</Text>
+                  <Ionicons name="shield-checkmark" size={10} color="#F3ECD8" style={styles.badgeIcon} />
+                  <Text style={styles.badgeText}>
+                    {calculateBadgeRank(userData?.totalPoints)}
+                  </Text>
                 </View>
               </View>
             </View>
 
             <View style={styles.dashedDivider} />
 
-            {/* METADATA FIELD LOG */}
+            {/* Live Firestore Metadata Grid */}
             <View style={styles.metaGrid}>
               <View style={styles.metaRow}>
                 <Text style={styles.metaKey}>MEMBER SINCE</Text>
-                <Text style={styles.metaVal}>{profileData.memberSince}</Text>
+                <Text style={styles.metaVal}>{formatMemberSince()}</Text>
               </View>
 
               <View style={styles.metaRow}>
@@ -136,47 +240,60 @@ export const ProfileSettingsScreen: React.FC<Props> = ({
                   <Ionicons name="star" size={9} color="#2A2420" />
                   <Ionicons name="star" size={9} color="#2A2420" />
                   <Ionicons name="star" size={9} color="#2A2420" />
-                  <Text style={styles.metaVal}> {profileData.permitStatus}</Text>
+                  <Text style={styles.metaVal}>
+                    {' '}
+                    {userData?.hasCompletedOnboarding ? 'ACTIVE' : 'PENDING'}
+                  </Text>
                 </View>
               </View>
 
               <View style={styles.metaRow}>
-                <Text style={styles.metaKey}>CACHES FOUND</Text>
-                <Text style={styles.metaVal}>{profileData.cachesFound}</Text>
+                <Text style={styles.metaKey}>EXP POINTS</Text>
+                <Text style={styles.metaVal}>{userData?.totalPoints ?? 0} PTS</Text>
               </View>
 
               <View style={styles.metaRow}>
                 <Text style={styles.metaKey}>SECTOR</Text>
-                <Text style={styles.metaVal}>{profileData.sector}</Text>
+                <Text style={styles.metaVal}>OPEN WINDOW HQ</Text>
               </View>
             </View>
 
-            {/* EDIT PROFILE ACTION BUTTON */}
-            <TouchableOpacity
-              style={styles.editProfileButton}
-              activeOpacity={0.8}
-              onPress={isEditing ? handleSaveProfile : () => setIsEditing(true)}
-            >
-              <Ionicons
-                name={isEditing ? 'checkmark-sharp' : 'create-outline'}
-                size={12}
-                color="#2A2420"
-                style={styles.btnIcon}
-              />
-              <Text style={styles.editProfileText}>
-                {isEditing ? 'SAVE IDENTITY RECORD' : 'EDIT IDENTITY DETAILS'}
-              </Text>
-            </TouchableOpacity>
+            {/* Action Trigger: Edit/Save Profile Button */}
+            <Animated.View style={{ transform: [{ scale: editBtnScale }] }}>
+              <TouchableOpacity
+                style={styles.editProfileButton}
+                activeOpacity={0.8}
+                onPress={isEditing ? handleSaveProfile : handleStartEditing}
+                accessible={true}
+                accessibilityRole="button"
+                accessibilityLabel={isEditing ? 'Save identity record' : 'Edit identity details'}
+                accessibilityHint="Toggles input mode to edit agent callsign"
+              >
+                <Ionicons
+                  name={isEditing ? 'checkmark-sharp' : 'create-outline'}
+                  size={13}
+                  color="#2A2420"
+                  style={styles.btnIcon}
+                />
+                <Text style={styles.editProfileText}>
+                  {isEditing ? 'SAVE IDENTITY RECORD' : 'EDIT IDENTITY DETAILS'}
+                </Text>
+              </TouchableOpacity>
+            </Animated.View>
           </View>
         </View>
+
+        {/* ============================================================ */}
+        {/* RIGHT VIEWPORT: SYSTEM CALIBRATION CONSOLE (DARK - 42%)     */}
+        {/* ============================================================ */}
         <View style={styles.rightViewport}>
           <ScrollView
             showsVerticalScrollIndicator={false}
             contentContainerStyle={styles.scrollContent}
           >
-            {/* PANEL HEADER */}
+            {/* Console Header */}
             <View style={styles.panelHeaderRow}>
-              <Ionicons name="star" size={10} color="#A64B2A" />
+              <Ionicons name="hardware-chip-outline" size={11} color="#A64B2A" />
               <Text style={styles.panelTitle}> CALIBRATION ARRAY</Text>
             </View>
             <View style={styles.panelDivider} />
@@ -184,79 +301,160 @@ export const ProfileSettingsScreen: React.FC<Props> = ({
             {/* TOGGLE 1: HAPTIC TRIGGERS */}
             <View style={styles.toggleCard}>
               <View style={styles.toggleLabelGroup}>
-                <Ionicons name="hardware-chip-outline" size={14} color="#B08D57" />
+                <Ionicons name="radio-outline" size={12} color="#B08D57" />
                 <Text style={styles.toggleText}>HAPTIC TRIGGERS</Text>
               </View>
               <Switch
                 trackColor={{ false: '#161E17', true: '#A64B2A' }}
                 thumbColor={hapticTriggers ? '#F3ECD8' : '#7A6B58'}
                 ios_backgroundColor="#161E17"
-                onValueChange={setHapticTriggers}
+                onValueChange={(val) =>
+                  handleToggleChange('hapticFeedbackEnabled', val, setHapticTriggers)
+                }
                 value={hapticTriggers}
+                accessible={true}
+                accessibilityRole="switch"
+                accessibilityLabel="Haptic Triggers Toggle"
+                accessibilityState={{ checked: hapticTriggers }}
               />
             </View>
 
             {/* TOGGLE 2: SENSOR SENSITIVITY */}
             <View style={styles.toggleCard}>
               <View style={styles.toggleLabelGroup}>
-                <Ionicons name="flash-outline" size={14} color="#B08D57" />
+                <Ionicons name="flash-outline" size={12} color="#B08D57" />
                 <Text style={styles.toggleText}>SENSOR SENSITIVITY</Text>
               </View>
               <Switch
                 trackColor={{ false: '#161E17', true: '#A64B2A' }}
                 thumbColor={sensorSensitivity ? '#F3ECD8' : '#7A6B58'}
                 ios_backgroundColor="#161E17"
-                onValueChange={setSensorSensitivity}
+                onValueChange={(val) =>
+                  handleToggleChange('motionSensitivityEnabled', val, setSensorSensitivity)
+                }
                 value={sensorSensitivity}
+                accessible={true}
+                accessibilityRole="switch"
+                accessibilityLabel="Sensor Sensitivity Toggle"
+                accessibilityState={{ checked: sensorSensitivity }}
               />
             </View>
 
             {/* TOGGLE 3: BATTERY OPTIMIZE */}
             <View style={styles.toggleCard}>
               <View style={styles.toggleLabelGroup}>
-                <Ionicons name="battery-charging-outline" size={14} color="#B08D57" />
+                <Ionicons name="battery-charging-outline" size={12} color="#B08D57" />
                 <Text style={styles.toggleText}>BATTERY OPTIMIZE</Text>
               </View>
               <Switch
                 trackColor={{ false: '#161E17', true: '#A64B2A' }}
                 thumbColor={batteryOptimize ? '#F3ECD8' : '#7A6B58'}
                 ios_backgroundColor="#161E17"
-                onValueChange={setBatteryOptimize}
+                onValueChange={(val) =>
+                  handleToggleChange('batteryOptimizerEnabled', val, setBatteryOptimize)
+                }
                 value={batteryOptimize}
+                accessible={true}
+                accessibilityRole="switch"
+                accessibilityLabel="Battery Optimize Toggle"
+                accessibilityState={{ checked: batteryOptimize }}
               />
             </View>
 
             {/* TOGGLE 4: NIGHT FIELD MODE */}
             <View style={styles.toggleCard}>
               <View style={styles.toggleLabelGroup}>
-                <Ionicons name="moon-outline" size={14} color="#B08D57" />
+                <Ionicons name="moon-outline" size={12} color="#B08D57" />
                 <Text style={styles.toggleText}>NIGHT FIELD MODE</Text>
               </View>
               <Switch
                 trackColor={{ false: '#161E17', true: '#A64B2A' }}
                 thumbColor={nightFieldMode ? '#F3ECD8' : '#7A6B58'}
                 ios_backgroundColor="#161E17"
-                onValueChange={setNightFieldMode}
+                onValueChange={(val) =>
+                  handleToggleChange('nightModeEnabled', val, setNightFieldMode)
+                }
                 value={nightFieldMode}
+                accessible={true}
+                accessibilityRole="switch"
+                accessibilityLabel="Night Field Mode Toggle"
+                accessibilityState={{ checked: nightFieldMode }}
+              />
+            </View>
+
+            {/* TOGGLE 5: TELEMETRY LOGGING */}
+            <View style={styles.toggleCard}>
+              <View style={styles.toggleLabelGroup}>
+                <Ionicons name="stats-chart-outline" size={12} color="#B08D57" />
+                <Text style={styles.toggleText}>TELEMETRY LOGS</Text>
+              </View>
+              <Switch
+                trackColor={{ false: '#161E17', true: '#A64B2A' }}
+                thumbColor={telemetryEnabled ? '#F3ECD8' : '#7A6B58'}
+                ios_backgroundColor="#161E17"
+                onValueChange={(val) =>
+                  handleToggleChange('telemetryEnabled', val, setTelemetryEnabled)
+                }
+                value={telemetryEnabled}
+                accessible={true}
+                accessibilityRole="switch"
+                accessibilityLabel="Telemetry Logging Toggle"
+                accessibilityState={{ checked: telemetryEnabled }}
+              />
+            </View>
+
+            {/* TOGGLE 6: BYPASS ONBOARDING FLOW */}
+            <View style={styles.toggleCard}>
+              <View style={styles.toggleLabelGroup}>
+                <Ionicons name="caret-forward-outline" size={12} color="#B08D57" />
+                <Text style={styles.toggleText}>BYPASS ONBOARDING</Text>
+              </View>
+              <Switch
+                trackColor={{ false: '#161E17', true: '#A64B2A' }}
+                thumbColor={skipOnboardingAuthFlow ? '#F3ECD8' : '#7A6B58'}
+                ios_backgroundColor="#161E17"
+                onValueChange={(val) =>
+                  handleToggleChange('skipOnboardingAuthFlow', val, setSkipOnboardingAuthFlow)
+                }
+                value={skipOnboardingAuthFlow}
+                accessible={true}
+                accessibilityRole="switch"
+                accessibilityLabel="Bypass Onboarding Flow Toggle"
+                accessibilityState={{ checked: skipOnboardingAuthFlow }}
               />
             </View>
 
             {/* LOGOUT SESSION BUTTON */}
-            <TouchableOpacity
-              style={styles.signOutButton}
-              activeOpacity={0.8}
-              onPress={onSignOut}
-            >
-              <Ionicons name="log-out-outline" size={14} color="#F3ECD8" />
-              <Text style={styles.signOutText}>LOGOUT SESSION</Text>
-            </TouchableOpacity>
+            <Animated.View style={{ transform: [{ scale: signOutBtnScale }] }}>
+              <TouchableOpacity
+                style={styles.signOutButton}
+                activeOpacity={0.8}
+                onPress={handleSignOutPress}
+                accessible={true}
+                accessibilityRole="button"
+                accessibilityLabel="Logout Session"
+                accessibilityHint="Logs out of the current explorer field session"
+              >
+                <Ionicons name="log-out-outline" size={13} color="#F3ECD8" />
+                <Text style={styles.signOutText}>LOGOUT SESSION</Text>
+              </TouchableOpacity>
+            </Animated.View>
 
             {onBack && (
-              <TouchableOpacity style={styles.backButton} onPress={onBack}>
-                <Text style={styles.backText}>‹ BACK TO DASHBOARD</Text>
+              <TouchableOpacity
+                style={styles.backButton}
+                onPress={onBack}
+                accessible={true}
+                accessibilityRole="button"
+                accessibilityLabel="Back to Dashboard"
+              >
+                <Ionicons name="chevron-back-sharp" size={11} color="#B08D57" />
+                <Text style={styles.backText}> DASHBOARD</Text>
               </TouchableOpacity>
             )}
           </ScrollView>
+
+          {/* Integrated Field Navigation Bar */}
           <View style={styles.navBarContainer}>
             <FieldNavBar
               currentTab="PROFILE"
@@ -274,7 +472,7 @@ const fontMonospace = Platform.OS === 'ios' ? 'Courier' : 'monospace';
 const styles = StyleSheet.create({
   safeAreaContainer: {
     flex: 1,
-    backgroundColor: '#1E281F',
+    backgroundColor: '#1E281F', // Forest Deep Chassis
   },
   splitWrapper: {
     flex: 1,
@@ -282,19 +480,22 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     overflow: 'hidden',
     borderWidth: 2,
-    borderColor: '#B08D57',
+    borderColor: '#B08D57', // Brass Trim
   },
-  /* LEFT VIEWPORT (PARCHMENT CARD) */
+
+  /* ============================================================ */
+  /* LEFT VIEWPORT (PARCHMENT CARD - 58%)                         */
+  /* ============================================================ */
   leftViewport: {
     flex: 0.58,
-    backgroundColor: '#E8DCC0',
-    padding: 12,
+    backgroundColor: '#E8DCC0', // Vintage Parchment
+    padding: 8,
   },
   cardInnerBorder: {
     flex: 1,
     borderWidth: 1,
-    borderColor: '#2A2420',
-    padding: 12,
+    borderColor: '#2A2420', // Ink Black
+    padding: 8,
     justifyContent: 'space-between',
   },
   cardHeader: {
@@ -302,53 +503,57 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
   },
+  headerTitleGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
   headerTitle: {
     fontFamily: fontMonospace,
     color: '#2A2420',
     fontWeight: 'bold',
-    fontSize: 13,
-    letterSpacing: 1.5,
+    fontSize: 11,
+    letterSpacing: 1.1,
   },
   headerTag: {
     fontFamily: fontMonospace,
     color: '#2A2420',
-    fontSize: 11,
-    fontWeight: '600',
+    fontSize: 9.5,
+    fontWeight: '700',
   },
   identityRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginVertical: 8,
+    marginVertical: 4,
   },
   avatarBox: {
-    width: 58,
-    height: 58,
+    width: 48,
+    height: 48,
     backgroundColor: '#2C3B2E',
     borderWidth: 2,
     borderColor: '#B08D57',
     borderRadius: 4,
     justifyContent: 'center',
     alignItems: 'center',
-    marginRight: 12,
+    marginRight: 8,
   },
   identityDetails: {
     flex: 1,
   },
   agentName: {
     fontFamily: fontMonospace,
-    fontSize: 18,
+    fontSize: 15,
     fontWeight: 'bold',
     color: '#2A2420',
-    letterSpacing: 1,
+    letterSpacing: 0.8,
   },
   handleText: {
     fontFamily: fontMonospace,
-    fontSize: 11,
+    fontSize: 10,
     color: '#5C5248',
-    marginBottom: 6,
+    marginBottom: 3,
   },
   editInputGroup: {
-    marginBottom: 4,
+    marginBottom: 2,
   },
   textInput: {
     fontFamily: fontMonospace,
@@ -356,56 +561,61 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#2A2420',
     borderRadius: 3,
-    paddingHorizontal: 6,
+    paddingHorizontal: 5,
     paddingVertical: 2,
-    fontSize: 12,
+    fontSize: 10.5,
     color: '#2A2420',
-    marginBottom: 4,
+    marginBottom: 2,
   },
   handleInput: {
-    fontSize: 10,
+    fontSize: 9,
   },
   badgeContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
     alignSelf: 'flex-start',
-    backgroundColor: '#A64B2A',
+    backgroundColor: '#A64B2A', // Sienna Accent
     paddingVertical: 2,
-    paddingHorizontal: 8,
-    borderRadius: 10,
+    paddingHorizontal: 5,
+    borderRadius: 6,
+  },
+  badgeIcon: {
+    marginRight: 3,
   },
   badgeText: {
     fontFamily: fontMonospace,
     color: '#F3ECD8',
-    fontSize: 9,
+    fontSize: 8,
     fontWeight: 'bold',
-    letterSpacing: 1,
+    letterSpacing: 0.7,
   },
   dashedDivider: {
     borderStyle: 'dashed',
     borderBottomWidth: 1,
     borderColor: '#2A2420',
-    marginVertical: 6,
-    opacity: 0.6,
+    marginVertical: 4,
+    opacity: 0.4,
   },
   metaGrid: {
-    marginVertical: 4,
+    marginVertical: 2,
   },
   metaRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 4,
+    marginBottom: 2.5,
   },
   metaKey: {
     fontFamily: fontMonospace,
     color: '#2A2420',
-    fontSize: 10,
+    fontSize: 9,
     fontWeight: '600',
     letterSpacing: 0.5,
   },
   metaVal: {
     fontFamily: fontMonospace,
     color: '#2A2420',
-    fontSize: 10,
+    fontSize: 9,
     fontWeight: 'bold',
   },
   permitStarRow: {
@@ -419,32 +629,35 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#2A2420',
     backgroundColor: '#F3ECD8',
-    paddingVertical: 6,
+    paddingVertical: 5,
     borderRadius: 3,
-    marginTop: 4,
+    marginTop: 2,
+    minHeight: 30,
   },
   btnIcon: {
     marginRight: 4,
   },
   editProfileText: {
     fontFamily: fontMonospace,
-    fontSize: 9,
+    fontSize: 8,
     fontWeight: 'bold',
     color: '#2A2420',
-    letterSpacing: 1,
+    letterSpacing: 0.8,
   },
 
-  /* RIGHT VIEWPORT (DARK CONSOLE) */
+  /* ============================================================ */
+  /* RIGHT VIEWPORT (DARK CONSOLE - 42%)                          */
+  /* ============================================================ */
   rightViewport: {
     flex: 0.42,
-    backgroundColor: '#2C3B2E',
+    backgroundColor: '#2C3B2E', // Forest Chassis Deep
     borderLeftWidth: 2,
     borderColor: '#B08D57',
-    padding: 10,
+    padding: 6,
     justifyContent: 'space-between',
   },
   scrollContent: {
-    paddingBottom: 8,
+    paddingBottom: 4,
   },
   panelHeaderRow: {
     flexDirection: 'row',
@@ -454,14 +667,14 @@ const styles = StyleSheet.create({
     fontFamily: fontMonospace,
     color: '#E8DCC0',
     fontWeight: 'bold',
-    fontSize: 12,
-    letterSpacing: 1,
+    fontSize: 10.5,
+    letterSpacing: 0.8,
   },
   panelDivider: {
     height: 1,
     backgroundColor: '#B08D57',
     opacity: 0.4,
-    marginVertical: 6,
+    marginVertical: 4,
   },
   toggleCard: {
     flexDirection: 'row',
@@ -471,9 +684,10 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#B08D57',
     borderRadius: 4,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    marginBottom: 6,
+    paddingHorizontal: 5,
+    paddingVertical: 2,
+    marginBottom: 4,
+    minHeight: 28,
   },
   toggleLabelGroup: {
     flexDirection: 'row',
@@ -482,10 +696,10 @@ const styles = StyleSheet.create({
   toggleText: {
     fontFamily: fontMonospace,
     color: '#E8DCC0',
-    fontSize: 8.5,
+    fontSize: 7.8,
     fontWeight: 'bold',
-    letterSpacing: 0.8,
-    marginLeft: 6,
+    letterSpacing: 0.5,
+    marginLeft: 4,
   },
   signOutButton: {
     flexDirection: 'row',
@@ -494,33 +708,37 @@ const styles = StyleSheet.create({
     backgroundColor: '#A64B2A',
     borderWidth: 1,
     borderColor: '#B08D57',
-    paddingVertical: 8,
+    paddingVertical: 6,
     borderRadius: 4,
-    marginTop: 6,
+    marginTop: 3,
+    minHeight: 32,
   },
   signOutText: {
     fontFamily: fontMonospace,
     color: '#F3ECD8',
     fontWeight: 'bold',
-    fontSize: 10,
-    letterSpacing: 1,
-    marginLeft: 6,
+    fontSize: 9,
+    letterSpacing: 0.8,
+    marginLeft: 4,
   },
   backButton: {
+    flexDirection: 'row',
     borderWidth: 1,
     borderColor: '#B08D57',
-    paddingVertical: 6,
+    paddingVertical: 4,
     borderRadius: 4,
     alignItems: 'center',
-    marginTop: 6,
+    justifyContent: 'center',
+    marginTop: 3,
+    minHeight: 26,
   },
   backText: {
     fontFamily: fontMonospace,
     color: '#B08D57',
-    fontSize: 9,
+    fontSize: 8,
     fontWeight: 'bold',
   },
   navBarContainer: {
-    marginTop: 6,
+    marginTop: 3,
   },
 });
