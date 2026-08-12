@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -11,6 +11,7 @@ import {
   useWindowDimensions,
   Platform,
   ActivityIndicator,
+  Alert,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Animated, {
@@ -31,15 +32,18 @@ import {
   doc, 
   setDoc, 
   addDoc, 
+  deleteDoc,
+  updateDoc,
   where, 
   getDocs, 
-  Timestamp 
+  Timestamp,
+  GeoPoint
 } from 'firebase/firestore';
 import { auth, db } from '../config/firebase';
 import { UserDocument, FriendshipDocument } from '../types/firestore';
 import { FieldNavBar, NavigationTab } from '../components/FieldNavBar';
 
-// Custom SVG Vector Icons (No Emojis)
+// Custom SVG Vector Icons (Strictly NO Emojis)
 const StarIcon = ({ color = '#A64B2A', size = 12 }: { color?: string; size?: number }) => (
   <Svg width={size} height={size} viewBox="0 0 24 24" fill={color}>
     <Path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" />
@@ -54,9 +58,19 @@ const UserPlusIcon = ({ color = '#E8DCC0', size = 16 }: { color?: string; size?:
   </Svg>
 );
 
-const CheckIcon = ({ color = '#4CAF50', size = 16 }: { color?: string; size?: number }) => (
-  <Svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-    <Polyline points="20 6 9 17 4 12" />
+const UserCheckIcon = ({ color = '#4CAF50', size = 16 }: { color?: string; size?: number }) => (
+  <Svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <Path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+    <Circle cx="8.5" cy="7" r="4" />
+    <Polyline points="17 11 19 13 23 9" />
+  </Svg>
+);
+
+const UserXIcon = ({ color = '#A64B2A', size = 16 }: { color?: string; size?: number }) => (
+  <Svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <Path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+    <Circle cx="8.5" cy="7" r="4" />
+    <Path d="M18 8l5 5M23 8l-5 5" />
   </Svg>
 );
 
@@ -80,21 +94,51 @@ interface ExplorerEntry {
   isUser: boolean;
 }
 
+interface FriendshipMeta {
+  docId: string;
+  status: 'pending' | 'accepted' | 'declined' | 'blocked';
+  isRequester: boolean;
+}
+
 interface NearbyExplorer {
   uid: string;
   name: string;
   initial: string;
-  distance: string;
-  isOnline: boolean;
-  friendStatus: 'none' | 'pending' | 'accepted';
+  distanceKm: number;
+  distanceFormatted: string;
+  friendMeta?: FriendshipMeta;
 }
 
 interface Props {
   onBack?: () => void;
   onNavigate?: (tab: string) => void;
+  userCoordinates?: { latitude: number; longitude: number };
 }
 
-export const LeaderboardScreen: React.FC<Props> = ({ onNavigate }) => {
+// 20km Haversine Distance Calculator
+const calculateHaversineDistanceKm = (
+  lat1: number,
+  lon1: number,
+  lat2: number,
+  lon2: number
+): number => {
+  const R = 6371; // Earth radius in kilometers
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+};
+
+export const LeaderboardScreen: React.FC<Props> = ({ 
+  onNavigate,
+  userCoordinates = { latitude: -25.7479, longitude: 28.2293 } // Default campus base
+}) => {
   const insets = useSafeAreaInsets();
   const { width, height } = useWindowDimensions();
   const currentTab: NavigationTab = 'LEADERBOARD';
@@ -102,22 +146,22 @@ export const LeaderboardScreen: React.FC<Props> = ({ onNavigate }) => {
   const currentUser = auth?.currentUser;
   const currentUserId = currentUser?.uid || '';
 
-  // UI State
+  // Modal & Input State
   const [telegramModalVisible, setTelegramModalVisible] = useState(false);
   const [friendModalVisible, setFriendModalVisible] = useState(false);
   const [telegramText, setTelegramText] = useState('');
   const [searchAgentTag, setSearchAgentTag] = useState('');
   const [searchError, setSearchError] = useState('');
 
-  // Firestore Live State
+  // Firestore Realtime Collections State
   const [manifest, setManifest] = useState<ExplorerEntry[]>([]);
   const [nearbyExplorers, setNearbyExplorers] = useState<NearbyExplorer[]>([]);
-  const [friendshipsMap, setFriendshipsMap] = useState<Record<string, 'pending' | 'accepted'>>({});
+  const [friendshipsMap, setFriendshipsMap] = useState<Record<string, FriendshipMeta>>({});
   const [loadingManifest, setLoadingManifest] = useState(true);
   const [loadingExplorers, setLoadingExplorers] = useState(true);
   const [isTransmitting, setIsTransmitting] = useState(false);
 
-  // Reanimated CTA Button Physics
+  // Motion Springs
   const buttonScale = useSharedValue(1);
   const animatedButtonStyle = useAnimatedStyle(() => ({
     transform: [{ scale: buttonScale.value }],
@@ -127,11 +171,10 @@ export const LeaderboardScreen: React.FC<Props> = ({ onNavigate }) => {
   const handlePressOut = () => { buttonScale.value = withSpring(1); };
 
   /**
-   * 1. LISTEN TO GLOBAL LEADERBOARD (Collection: users)
+   * 1. READ: LISTEN TO GLOBAL LEADERBOARD MANIFEST
    */
   useEffect(() => {
     if (!db) {
-      console.error("Firestore DB instance missing.");
       setLoadingManifest(false);
       return;
     }
@@ -139,10 +182,10 @@ export const LeaderboardScreen: React.FC<Props> = ({ onNavigate }) => {
     const leaderboardQuery = query(
       collection(db, 'users'),
       orderBy('totalPoints', 'desc'),
-      limit(25)
+      limit(50)
     );
 
-    const unsubscribeLeaderboard = onSnapshot(leaderboardQuery, (snapshot) => {
+    const unsubscribe = onSnapshot(leaderboardQuery, (snapshot) => {
       const entries: ExplorerEntry[] = snapshot.docs.map((docSnap, index) => {
         const data = docSnap.data() as UserDocument;
         const isUser = docSnap.id === currentUserId;
@@ -162,88 +205,126 @@ export const LeaderboardScreen: React.FC<Props> = ({ onNavigate }) => {
 
       setManifest(entries);
       setLoadingManifest(false);
-    }, (error) => {
-      console.error("Leaderboard Snapshot Error:", error);
+    }, (err) => {
+      console.error("Leaderboard Snapshot Error:", err);
       setLoadingManifest(false);
     });
 
-    return () => unsubscribeLeaderboard();
+    return () => unsubscribe();
   }, [currentUserId]);
 
   /**
-   * 2. LISTEN TO ACTIVE FRIENDSHIPS (Collection: friendships)
+   * 2. READ: LISTEN TO BIDIRECTIONAL FRIENDSHIPS
    */
   useEffect(() => {
     if (!db || !currentUserId) return;
 
-    const friendshipsQuery = query(
+    // Outgoing Requests
+    const qOutgoing = query(
       collection(db, 'friendships'),
       where('requesterId', '==', currentUserId)
     );
 
-    const unsubscribeFriendships = onSnapshot(friendshipsQuery, (snapshot) => {
-      const map: Record<string, 'pending' | 'accepted'> = {};
-      snapshot.docs.forEach((docSnap) => {
+    // Incoming Requests
+    const qIncoming = query(
+      collection(db, 'friendships'),
+      where('receiverId', '==', currentUserId)
+    );
+
+    const activeMap: Record<string, FriendshipMeta> = {};
+
+    const unsubOutgoing = onSnapshot(qOutgoing, (snap) => {
+      snap.docs.forEach((docSnap) => {
         const data = docSnap.data() as FriendshipDocument;
-        if (data.status === 'pending' || data.status === 'accepted') {
-          map[data.receiverId] = data.status;
-        }
+        activeMap[data.receiverId] = {
+          docId: docSnap.id,
+          status: data.status,
+          isRequester: true,
+        };
       });
-      setFriendshipsMap(map);
-    }, (error) => {
-      console.error("Friendships Snapshot Error:", error);
+      setFriendshipsMap({ ...activeMap });
     });
 
-    return () => unsubscribeFriendships();
+    const unsubIncoming = onSnapshot(qIncoming, (snap) => {
+      snap.docs.forEach((docSnap) => {
+        const data = docSnap.data() as FriendshipDocument;
+        activeMap[data.requesterId] = {
+          docId: docSnap.id,
+          status: data.status,
+          isRequester: false,
+        };
+      });
+      setFriendshipsMap({ ...activeMap });
+    });
+
+    return () => {
+      unsubOutgoing();
+      unsubIncoming();
+    };
   }, [currentUserId]);
 
   /**
-   * 3. LISTEN TO NEARBY FIELD EXPLORERS (Collection: users)
+   * 3. READ & FILTER: NEARBY EXPLORERS (STRICT 20KM RADIUS FILTER)
    */
   useEffect(() => {
-    if (!db) {
+    if (!db || !currentUserId) {
       setLoadingExplorers(false);
       return;
     }
 
-    const explorersQuery = query(
-      collection(db, 'users'),
-      limit(10)
-    );
+    const usersQuery = query(collection(db, 'users'), limit(100));
 
-    const unsubscribeExplorers = onSnapshot(explorersQuery, (snapshot) => {
-      const list: NearbyExplorer[] = [];
+    const unsubscribe = onSnapshot(usersQuery, (snapshot) => {
+      const filteredList: NearbyExplorer[] = [];
 
       snapshot.docs.forEach((docSnap) => {
-        if (docSnap.id === currentUserId) return; // Omit self from nearby list
-        const data = docSnap.data() as UserDocument;
-        const rawName = data.username?.toUpperCase() || 'AGENT';
+        if (docSnap.id === currentUserId) return; // Exclude self
 
-        list.push({
-          uid: docSnap.id,
-          name: rawName,
-          initial: rawName.charAt(0) || 'A',
-          distance: `${Math.floor(Math.random() * 800) + 100} m`,
-          isOnline: true,
-          friendStatus: friendshipsMap[docSnap.id] || 'none',
-        });
+        const data = docSnap.data() as any;
+        const rawName = data.username?.toUpperCase() || 'AGENT';
+        
+        // Extract or fallback location coordinates
+        const targetLat = data.location?.latitude ?? (userCoordinates.latitude + (Math.random() * 0.1 - 0.05));
+        const targetLon = data.location?.longitude ?? (userCoordinates.longitude + (Math.random() * 0.1 - 0.05));
+
+        const distKm = calculateHaversineDistanceKm(
+          userCoordinates.latitude,
+          userCoordinates.longitude,
+          targetLat,
+          targetLon
+        );
+
+        // STRICT 20KM PROXIMITY RULE
+        if (distKm <= 20.0) {
+          filteredList.push({
+            uid: docSnap.id,
+            name: rawName,
+            initial: rawName.charAt(0) || 'A',
+            distanceKm: distKm,
+            distanceFormatted: distKm < 1 ? `${Math.round(distKm * 1000)} m` : `${distKm.toFixed(1)} km`,
+            friendMeta: friendshipsMap[docSnap.id],
+          });
+        }
       });
 
-      setNearbyExplorers(list);
+      // Sort by closest proximity
+      filteredList.sort((a, b) => a.distanceKm - b.distanceKm);
+
+      setNearbyExplorers(filteredList);
       setLoadingExplorers(false);
-    }, (error) => {
-      console.error("Explorers Snapshot Error:", error);
+    }, (err) => {
+      console.error("Explorers Snapshot Error:", err);
       setLoadingExplorers(false);
     });
 
-    return () => unsubscribeExplorers();
-  }, [currentUserId, friendshipsMap]);
+    return () => unsubscribe();
+  }, [currentUserId, userCoordinates, friendshipsMap]);
 
   /**
-   * ACTION: SEND FRIEND LINK REQUEST
+   * CREATE: SEND FRIEND LINK REQUEST
    */
-  const handleToggleFriend = async (targetUid: string, currentStatus: string) => {
-    if (!db || !currentUserId || currentStatus !== 'none') return;
+  const handleSendFriendRequest = async (targetUid: string) => {
+    if (!db || !currentUserId) return;
 
     try {
       const friendshipId = `${currentUserId}_${targetUid}`;
@@ -261,7 +342,48 @@ export const LeaderboardScreen: React.FC<Props> = ({ onNavigate }) => {
   };
 
   /**
-   * ACTION: MANUAL AGENT SEARCH & LINK
+   * UPDATE: ACCEPT FRIEND LINK REQUEST
+   */
+  const handleAcceptFriendRequest = async (docId: string) => {
+    if (!db) return;
+    try {
+      await updateDoc(doc(db, 'friendships', docId), {
+        status: 'accepted',
+        updatedAt: Timestamp.now(),
+      });
+    } catch (err) {
+      console.error("Error accepting friendship:", err);
+    }
+  };
+
+  /**
+   * DELETE: CANCEL OR UNLINK FRIENDSHIP
+   */
+  const handleRemoveFriendship = async (docId: string, agentName: string) => {
+    if (!db) return;
+
+    Alert.alert(
+      "TERMINATE LINK",
+      `Are you sure you want to disconnect telemetry link with ${agentName}?`,
+      [
+        { text: "CANCEL", style: "cancel" },
+        {
+          text: "UNLINK",
+          style: "destructive",
+          onPress: async () => {
+            try {
+              await deleteDoc(doc(db, 'friendships', docId));
+            } catch (err) {
+              console.error("Error deleting friendship:", err);
+            }
+          },
+        },
+      ]
+    );
+  };
+
+  /**
+   * SEARCH & LINK AGENT CALLSIGN
    */
   const handleSearchAndLinkAgent = async () => {
     if (!db || !searchAgentTag.trim() || !currentUserId) return;
@@ -273,7 +395,7 @@ export const LeaderboardScreen: React.FC<Props> = ({ onNavigate }) => {
       const querySnap = await getDocs(q);
 
       if (querySnap.empty) {
-        setSearchError('AGENT CALLSIGN NOT FOUND');
+        setSearchError('AGENT CALLSIGN NOT FOUND IN SECTOR');
         return;
       }
 
@@ -285,16 +407,7 @@ export const LeaderboardScreen: React.FC<Props> = ({ onNavigate }) => {
         return;
       }
 
-      const friendshipId = `${currentUserId}_${targetUid}`;
-      await setDoc(doc(db, 'friendships', friendshipId), {
-        friendshipId,
-        requesterId: currentUserId,
-        receiverId: targetUid,
-        status: 'pending',
-        createdAt: Timestamp.now(),
-        updatedAt: Timestamp.now(),
-      } as FriendshipDocument);
-
+      await handleSendFriendRequest(targetUid);
       setSearchAgentTag('');
       setFriendModalVisible(false);
     } catch (err) {
@@ -304,14 +417,14 @@ export const LeaderboardScreen: React.FC<Props> = ({ onNavigate }) => {
   };
 
   /**
-   * ACTION: BROADCAST TELEGRAM TO FIELD MESSAGES & ACTIVITY FEED
+   * DISPATCH TELEGRAM SIGNAL
    */
   const handleDispatchTelegram = async () => {
     if (!db || !telegramText.trim() || !currentUserId || isTransmitting) return;
     setIsTransmitting(true);
 
     try {
-      const senderName = currentUser?.displayName || 'EXPLORER_UNIT';
+      const senderName = currentUser?.displayName || 'FIELD_EXPLORER';
 
       // 1. Write to Message Collection
       await addDoc(collection(db, 'messages'), {
@@ -326,7 +439,7 @@ export const LeaderboardScreen: React.FC<Props> = ({ onNavigate }) => {
         userId: currentUserId,
         username: senderName,
         type: 'TREASURE_HIDDEN',
-        message: `DISPATCHED TELEGRAM: "${telegramText.trim().substring(0, 32)}..."`,
+        message: `DISPATCHED TELEGRAM: "${telegramText.trim().substring(0, 30)}..."`,
         targetId: 'global',
         createdAt: Timestamp.now(),
       });
@@ -353,7 +466,7 @@ export const LeaderboardScreen: React.FC<Props> = ({ onNavigate }) => {
       ]}
     >
       {/* LEFT VIEWPORT (60%): FIELD MANIFEST */}
-      <Animated.View entering={FadeInLeft.duration(600)} style={styles.leftViewport}>
+      <Animated.View entering={FadeInLeft.duration(500)} style={styles.leftViewport}>
         <View style={styles.ledgerHeader}>
           <StarIcon color="#A64B2A" size={14} />
           <Text style={styles.header}>FIELD MANIFEST</Text>
@@ -370,14 +483,14 @@ export const LeaderboardScreen: React.FC<Props> = ({ onNavigate }) => {
         {loadingManifest ? (
           <View style={styles.loadingBox}>
             <ActivityIndicator size="small" color="#2A2420" />
-            <Text style={styles.loadingText}>SYNCING LEDGER DATA...</Text>
+            <Text style={styles.loadingText}>SYNCING MANIFEST DATA...</Text>
           </View>
         ) : (
           <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.ledgerList}>
             {manifest.map((item, index) => (
               <Animated.View
                 key={item.uid}
-                entering={FadeInDown.delay(index * 40).duration(300)}
+                entering={FadeInDown.delay(index * 30).duration(250)}
                 style={[styles.rowContainer, item.isUser && styles.rowHighlight]}
               >
                 <Text style={[styles.rowText, item.isUser && styles.rowHighlightText, { flex: 0.15 }]}>
@@ -403,20 +516,21 @@ export const LeaderboardScreen: React.FC<Props> = ({ onNavigate }) => {
       </Animated.View>
 
       {/* RIGHT VIEWPORT (40%): NEARBY EXPLORERS & CONTROL CONSOLE */}
-      <Animated.View entering={FadeInRight.duration(600)} style={styles.rightViewport}>
+      <Animated.View entering={FadeInRight.duration(500)} style={styles.rightViewport}>
         <View style={styles.rightHeaderRow}>
           <View>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
               <StarIcon color="#B08D57" size={10} />
-              <Text style={styles.panelTitle}>NEARBY EXPLORERS</Text>
+              <Text style={styles.panelTitle}>NEARBY AGENTS</Text>
             </View>
-            <Text style={styles.subText}>Global & Local Field Units</Text>
+            <Text style={styles.subText}>Active Units Within 20km Radius</Text>
           </View>
 
           <TouchableOpacity 
             style={styles.iconAddButton} 
             onPress={() => setFriendModalVisible(true)}
-            accessibilityLabel="Link New Explorer"
+            accessibilityLabel="Link New Explorer Callsign"
+            accessibilityRole="button"
           >
             <UserPlusIcon color="#B08D57" size={16} />
           </TouchableOpacity>
@@ -427,48 +541,94 @@ export const LeaderboardScreen: React.FC<Props> = ({ onNavigate }) => {
           <View style={styles.loadingBox}>
             <ActivityIndicator size="small" color="#E8DCC0" />
           </View>
+        ) : nearbyExplorers.length === 0 ? (
+          <View style={styles.loadingBox}>
+            <Text style={styles.emptyText}>NO AGENTS DETECTED IN 20KM RADIUS</Text>
+          </View>
         ) : (
           <ScrollView style={styles.cardsContainer} showsVerticalScrollIndicator={false}>
-            {nearbyExplorers.map((item, idx) => (
-              <Animated.View key={item.uid} entering={FadeInRight.delay(idx * 70).duration(300)} style={styles.explorerCard}>
-                <View style={styles.cardLeft}>
-                  <View style={styles.avatarCircle}>
-                    <Text style={styles.avatarText}>{item.initial}</Text>
-                  </View>
-                  <View>
-                    <Text style={styles.explorerName}>{item.name}</Text>
-                    <Text style={styles.explorerMeta}>
-                      {item.distance} · {item.isOnline ? 'ONLINE' : 'OFFLINE'}
-                    </Text>
-                  </View>
-                </View>
+            {nearbyExplorers.map((item, idx) => {
+              const friendMeta = item.friendMeta;
+              const isPending = friendMeta?.status === 'pending';
+              const isAccepted = friendMeta?.status === 'accepted';
+              const isIncomingRequest = isPending && !friendMeta?.isRequester;
 
-                <View style={styles.cardRight}>
-                  {item.isOnline && <View style={styles.onlineDot} />}
+              return (
+                <Animated.View key={item.uid} entering={FadeInRight.delay(idx * 50).duration(250)} style={styles.explorerCard}>
+                  <View style={styles.cardLeft}>
+                    <View style={styles.avatarCircle}>
+                      <Text style={styles.avatarText}>{item.initial}</Text>
+                    </View>
+                    <View>
+                      <Text style={styles.explorerName}>{item.name}</Text>
+                      <Text style={styles.explorerMeta}>RANGE: {item.distanceFormatted}</Text>
+                    </View>
+                  </View>
 
-                  <TouchableOpacity 
-                    style={styles.friendActionButton} 
-                    onPress={() => handleToggleFriend(item.uid, item.friendStatus)}
-                    disabled={item.friendStatus !== 'none'}
-                  >
-                    {item.friendStatus === 'accepted' && <CheckIcon color="#4CAF50" size={14} />}
-                    {item.friendStatus === 'pending' && <Text style={styles.pendingText}>REQ</Text>}
-                    {item.friendStatus === 'none' && <UserPlusIcon color="#2C3B2E" size={14} />}
-                  </TouchableOpacity>
-                </View>
-              </Animated.View>
-            ))}
+                  <View style={styles.cardRight}>
+                    <View style={styles.onlineDot} />
+
+                    {/* Friend Action States */}
+                    {!friendMeta && (
+                      <TouchableOpacity 
+                        style={styles.friendActionButton} 
+                        onPress={() => handleSendFriendRequest(item.uid)}
+                        accessibilityLabel={`Send link request to ${item.name}`}
+                      >
+                        <UserPlusIcon color="#2C3B2E" size={14} />
+                      </TouchableOpacity>
+                    )}
+
+                    {isIncomingRequest && (
+                      <View style={{ flexDirection: 'row', gap: 4 }}>
+                        <TouchableOpacity 
+                          style={[styles.friendActionButton, { backgroundColor: '#4CAF50' }]} 
+                          onPress={() => handleAcceptFriendRequest(friendMeta.docId)}
+                        >
+                          <UserCheckIcon color="#FFFFFF" size={12} />
+                        </TouchableOpacity>
+                        <TouchableOpacity 
+                          style={[styles.friendActionButton, { backgroundColor: '#A64B2A' }]} 
+                          onPress={() => handleRemoveFriendship(friendMeta.docId, item.name)}
+                        >
+                          <UserXIcon color="#FFFFFF" size={12} />
+                        </TouchableOpacity>
+                      </View>
+                    )}
+
+                    {isPending && friendMeta?.isRequester && (
+                      <TouchableOpacity 
+                        style={[styles.friendActionButton, { backgroundColor: '#D9B98A' }]} 
+                        onPress={() => handleRemoveFriendship(friendMeta.docId, item.name)}
+                      >
+                        <Text style={styles.pendingText}>PENDING</Text>
+                      </TouchableOpacity>
+                    )}
+
+                    {isAccepted && (
+                      <TouchableOpacity 
+                        style={[styles.friendActionButton, { backgroundColor: '#CBBBA0' }]} 
+                        onPress={() => handleRemoveFriendship(friendMeta.docId, item.name)}
+                      >
+                        <UserCheckIcon color="#2C3B2E" size={14} />
+                      </TouchableOpacity>
+                    )}
+                  </View>
+                </Animated.View>
+              );
+            })}
           </ScrollView>
         )}
 
-        {/* Telegram Dispatch Button Trigger */}
-        <Animated.View style={[animatedButtonStyle, { marginBottom: 8 }]}>
+        {/* Telegram Dispatch Trigger */}
+        <Animated.View style={[animatedButtonStyle, { marginBottom: 6 }]}>
           <TouchableOpacity
-            activeOpacity={0.9}
+            activeOpacity={0.88}
             onPressIn={handlePressIn}
             onPressOut={handlePressOut}
             style={styles.dispatchButton}
             onPress={() => setTelegramModalVisible(true)}
+            accessibilityLabel="Dispatch Telegram Signal"
           >
             <Text style={styles.dispatchText}>DISPATCH TELEGRAM</Text>
           </TouchableOpacity>
@@ -487,7 +647,7 @@ export const LeaderboardScreen: React.FC<Props> = ({ onNavigate }) => {
                 <CloseIcon color="#B08D57" size={18} />
               </TouchableOpacity>
             </View>
-            <Text style={styles.modalSub}>Send encrypted signal note to active field agents.</Text>
+            <Text style={styles.modalSub}>Send encrypted signal note to active sector agents.</Text>
 
             <TextInput
               style={styles.telegramInput}
@@ -616,6 +776,13 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     letterSpacing: 1,
   },
+  emptyText: {
+    color: '#B08D57',
+    fontSize: 9,
+    fontWeight: 'bold',
+    letterSpacing: 1,
+    textAlign: 'center',
+  },
   rowContainer: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -671,7 +838,7 @@ const styles = StyleSheet.create({
   },
   subText: {
     color: '#B08D57',
-    fontSize: 10,
+    fontSize: 9,
     marginTop: 2,
   },
   iconAddButton: {
@@ -679,6 +846,10 @@ const styles = StyleSheet.create({
     borderColor: '#B08D57',
     padding: 6,
     borderRadius: 4,
+    minWidth: 36,
+    minHeight: 36,
+    alignItems: 'center',
+    justifyContent: 'center',
     backgroundColor: '#202C22',
   },
   cardsContainer: {
@@ -736,14 +907,16 @@ const styles = StyleSheet.create({
   },
   friendActionButton: {
     backgroundColor: '#CBBBA0',
-    paddingVertical: 3,
-    paddingHorizontal: 6,
+    paddingVertical: 4,
+    paddingHorizontal: 8,
+    minWidth: 32,
+    minHeight: 32,
     borderRadius: 4,
     alignItems: 'center',
     justifyContent: 'center',
   },
   pendingText: {
-    color: '#A64B2A',
+    color: '#2A2420',
     fontSize: 8,
     fontWeight: 'bold',
   },
@@ -755,6 +928,8 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     borderRadius: 4,
     alignItems: 'center',
+    minHeight: 40,
+    justifyContent: 'center',
   },
   dispatchText: {
     color: '#F3ECD8',
@@ -832,6 +1007,7 @@ const styles = StyleSheet.create({
     gap: 8,
     paddingVertical: 10,
     borderRadius: 4,
+    minHeight: 44,
   },
   sendButtonText: {
     color: '#F3ECD8',

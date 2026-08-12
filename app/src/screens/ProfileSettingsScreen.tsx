@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View,
   Text,
@@ -11,9 +11,13 @@ import {
   Animated,
   Easing,
   useWindowDimensions,
+  ActivityIndicator,
+  Alert,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
+import { doc, updateDoc, serverTimestamp } from 'firebase/firestore';
+import { db, auth } from '../config/firebase';
 import { FieldNavBar, NavigationTab } from '../components/FieldNavBar';
 import { UserDocument } from '../types/firestore';
 
@@ -35,7 +39,14 @@ export const ProfileSettingsScreen: React.FC<ProfileSettingsScreenProps> = ({
   const insets = useSafeAreaInsets();
   const { width, height } = useWindowDimensions();
 
-  // Calibration Array Toggles - Strictly Default OFF (false) if missing
+  // Screen Orientation Detection for Dynamic Landscape Layouts
+  const isLandscape = width > height;
+
+  // Persistence & Loading States
+  const [isSaving, setIsSaving] = useState<boolean>(false);
+  const [isEditing, setIsEditing] = useState<boolean>(false);
+
+  // Calibration Array Toggles - Strictly Default OFF (false)
   const [hapticTriggers, setHapticTriggers] = useState<boolean>(false);
   const [sensorSensitivity, setSensorSensitivity] = useState<boolean>(false);
   const [batteryOptimize, setBatteryOptimize] = useState<boolean>(false);
@@ -44,9 +55,13 @@ export const ProfileSettingsScreen: React.FC<ProfileSettingsScreenProps> = ({
   const [skipOnboardingAuthFlow, setSkipOnboardingAuthFlow] = useState<boolean>(false);
 
   // Identity Editing State
-  const [isEditing, setIsEditing] = useState(false);
   const [agentName, setAgentName] = useState<string>('');
   const [handle, setHandle] = useState<string>('');
+
+  // Micro-interaction Tactile Animation References
+  const editBtnScale = useRef(new Animated.Value(1)).current;
+  const signOutBtnScale = useRef(new Animated.Value(1)).current;
+  const consolePulse = useRef(new Animated.Value(1)).current;
 
   // Sync state dynamically when live userData document resolves from Firestore
   useEffect(() => {
@@ -58,15 +73,13 @@ export const ProfileSettingsScreen: React.FC<ProfileSettingsScreenProps> = ({
       setTelemetryEnabled(userData.telemetryEnabled ?? false);
       setSkipOnboardingAuthFlow(userData.skipOnboardingAuthFlow ?? false);
 
-      setAgentName(userData.username || 'EXPLORER UNKNOWN');
-      setHandle(`@${(userData.username || 'explorer').toLowerCase().replace(/\s+/g, '_')}`);
+      const resolvedName = userData.username || 'EXPLORER UNKNOWN';
+      setAgentName(resolvedName);
+      setHandle(`@${resolvedName.toLowerCase().replace(/\s+/g, '_')}`);
     }
   }, [userData]);
 
-  // Micro-interaction Tactile Animations
-  const editBtnScale = useRef(new Animated.Value(1)).current;
-  const signOutBtnScale = useRef(new Animated.Value(1)).current;
-
+  // Tactile Spring & Bounce Animation Trigger
   const triggerPressAnimation = (animValue: Animated.Value, callback?: () => void) => {
     Animated.sequence([
       Animated.timing(animValue, {
@@ -86,29 +99,76 @@ export const ProfileSettingsScreen: React.FC<ProfileSettingsScreenProps> = ({
     });
   };
 
-  const handleToggleChange = (
+  /**
+   * Unified Firestore Mutation Fallback
+   * Attempts parent prop persistence first, falling back to direct Firestore updateDoc
+   */
+  const persistUserFields = useCallback(
+    async (fields: Partial<UserDocument>) => {
+      try {
+        setIsSaving(true);
+        if (onUpdateUserSettings) {
+          await onUpdateUserSettings(fields);
+        } else {
+          const currentUid = userData?.uid || auth.currentUser?.uid;
+          if (!currentUid) {
+            throw new Error('No authenticated user session found.');
+          }
+          const userRef = doc(db, 'users', currentUid);
+          await updateDoc(userRef, {
+            ...fields,
+            updatedAt: serverTimestamp(),
+          });
+        }
+      } catch (error: any) {
+        console.error('[FIELD PERSISTENCE ERROR]', error);
+        Alert.alert(
+          'CALIBRATION FAILED',
+          'Failed to synchronize telemetry data with Firestore console.'
+        );
+      } finally {
+        setIsSaving(false);
+      }
+    },
+    [onUpdateUserSettings, userData?.uid]
+  );
+
+  /**
+   * Real-time Switch Toggle Handler with Immediate Persistence & Optimistic UI
+   */
+  const handleToggleChange = async (
     key: keyof UserDocument,
     value: boolean,
     setter: (val: boolean) => void
   ) => {
+    // Optimistic local update
     setter(value);
-    if (onUpdateUserSettings) {
-      onUpdateUserSettings({ [key]: value }).catch((err) => {
-        console.error(`[FIELD TELEMETRY ERROR] Failed to persist toggle ${key}:`, err);
-      });
+
+    try {
+      await persistUserFields({ [key]: value });
+    } catch {
+      // Revert on failure
+      setter(!value);
     }
   };
 
+  /**
+   * Identity Record Persistence Handler
+   */
   const handleSaveProfile = () => {
-    triggerPressAnimation(editBtnScale, () => {
-      setIsEditing(false);
-      if (onUpdateUserSettings && agentName.trim().length > 0) {
-        onUpdateUserSettings({
-          username: agentName.trim(),
-        }).catch((err) => {
-          console.error('[FIELD IDENTITY ERROR] Failed to persist agent callsing:', err);
-        });
+    triggerPressAnimation(editBtnScale, async () => {
+      if (agentName.trim().length === 0) {
+        Alert.alert('INVALID CALLSIGN', 'Agent callsign cannot be empty.');
+        return;
       }
+
+      const cleanUsername = agentName.trim();
+      await persistUserFields({
+        username: cleanUsername,
+      });
+
+      setHandle(`@${cleanUsername.toLowerCase().replace(/\s+/g, '_')}`);
+      setIsEditing(false);
     });
   };
 
@@ -156,7 +216,7 @@ export const ProfileSettingsScreen: React.FC<ProfileSettingsScreenProps> = ({
         },
       ]}
     >
-      <View style={styles.splitWrapper}>
+      <View style={[styles.splitWrapper, !isLandscape && styles.portraitWrapper]}>
         {/* ============================================================ */}
         {/* LEFT VIEWPORT: FIELD IDENTITY LOG CARD (PARCHMENT - 58%)     */}
         {/* ============================================================ */}
@@ -169,14 +229,14 @@ export const ProfileSettingsScreen: React.FC<ProfileSettingsScreenProps> = ({
                 <Text style={styles.headerTitle}> FIELD IDENTITY LOG</Text>
               </View>
               <Text style={styles.headerTag}>
-                UID: {userData?.uid ? `${userData.uid.substring(0, 5)}` : 'T-51'}
+                UID: {userData?.uid ? `${userData.uid.substring(0, 6).toUpperCase()}` : 'T-5100'}
               </Text>
             </View>
 
             {/* Main Agent Details */}
             <View style={styles.identityRow}>
               <View style={styles.avatarBox}>
-                <Ionicons name="person" size={36} color="#E8DCC0" />
+                <Ionicons name="person" size={32} color="#E8DCC0" />
               </View>
 
               <View style={styles.identityDetails}>
@@ -191,7 +251,7 @@ export const ProfileSettingsScreen: React.FC<ProfileSettingsScreenProps> = ({
                       autoCapitalize="characters"
                       accessible={true}
                       accessibilityLabel="Agent Callsign Input"
-                      accessibilityHint="Enter your custom field callsign"
+                      accessibilityHint="Enter custom field callsign"
                     />
                     <TextInput
                       style={[styles.textInput, styles.handleInput]}
@@ -202,16 +262,16 @@ export const ProfileSettingsScreen: React.FC<ProfileSettingsScreenProps> = ({
                       autoCapitalize="none"
                       accessible={true}
                       accessibilityLabel="Agent Handle Input"
-                      accessibilityHint="Enter your handle starting with at symbol"
+                      accessibilityHint="Enter handle starting with at symbol"
                     />
                   </View>
                 ) : (
                   <>
                     <Text style={styles.agentName} numberOfLines={1}>
-                      {agentName || 'A. FINCH'}
+                      {agentName || 'EXPLORER UNKNOWN'}
                     </Text>
                     <Text style={styles.handleText} numberOfLines={1}>
-                      {handle || '@ranger_finch'}
+                      {handle || '@explorer'}
                     </Text>
                   </>
                 )}
@@ -256,6 +316,13 @@ export const ProfileSettingsScreen: React.FC<ProfileSettingsScreenProps> = ({
                 <Text style={styles.metaKey}>SECTOR</Text>
                 <Text style={styles.metaVal}>OPEN WINDOW HQ</Text>
               </View>
+
+              <View style={styles.metaRow}>
+                <Text style={styles.metaKey}>EMAIL</Text>
+                <Text style={styles.metaVal} numberOfLines={1}>
+                  {userData?.email || 'N/A'}
+                </Text>
+              </View>
             </View>
 
             {/* Action Trigger: Edit/Save Profile Button */}
@@ -263,21 +330,28 @@ export const ProfileSettingsScreen: React.FC<ProfileSettingsScreenProps> = ({
               <TouchableOpacity
                 style={styles.editProfileButton}
                 activeOpacity={0.8}
+                disabled={isSaving}
                 onPress={isEditing ? handleSaveProfile : handleStartEditing}
                 accessible={true}
                 accessibilityRole="button"
                 accessibilityLabel={isEditing ? 'Save identity record' : 'Edit identity details'}
                 accessibilityHint="Toggles input mode to edit agent callsign"
               >
-                <Ionicons
-                  name={isEditing ? 'checkmark-sharp' : 'create-outline'}
-                  size={13}
-                  color="#2A2420"
-                  style={styles.btnIcon}
-                />
-                <Text style={styles.editProfileText}>
-                  {isEditing ? 'SAVE IDENTITY RECORD' : 'EDIT IDENTITY DETAILS'}
-                </Text>
+                {isSaving ? (
+                  <ActivityIndicator size="small" color="#2A2420" />
+                ) : (
+                  <>
+                    <Ionicons
+                      name={isEditing ? 'checkmark-sharp' : 'create-outline'}
+                      size={13}
+                      color="#2A2420"
+                      style={styles.btnIcon}
+                    />
+                    <Text style={styles.editProfileText}>
+                      {isEditing ? 'SAVE IDENTITY RECORD' : 'EDIT IDENTITY DETAILS'}
+                    </Text>
+                  </>
+                )}
               </TouchableOpacity>
             </Animated.View>
           </View>
@@ -295,6 +369,7 @@ export const ProfileSettingsScreen: React.FC<ProfileSettingsScreenProps> = ({
             <View style={styles.panelHeaderRow}>
               <Ionicons name="hardware-chip-outline" size={11} color="#A64B2A" />
               <Text style={styles.panelTitle}> CALIBRATION ARRAY</Text>
+              {isSaving && <ActivityIndicator size="small" color="#A64B2A" style={{ marginLeft: 6 }} />}
             </View>
             <View style={styles.panelDivider} />
 
@@ -382,7 +457,7 @@ export const ProfileSettingsScreen: React.FC<ProfileSettingsScreenProps> = ({
               />
             </View>
 
-            {/* TOGGLE 5: TELEMETRY LOGGING */}
+            {/* TOGGLE 5: TELEMETRY LOGS */}
             <View style={styles.toggleCard}>
               <View style={styles.toggleLabelGroup}>
                 <Ionicons name="stats-chart-outline" size={12} color="#B08D57" />
@@ -433,7 +508,7 @@ export const ProfileSettingsScreen: React.FC<ProfileSettingsScreenProps> = ({
                 accessible={true}
                 accessibilityRole="button"
                 accessibilityLabel="Logout Session"
-                accessibilityHint="Logs out of the current explorer field session"
+                accessibilityHint="Logs out of current explorer field session"
               >
                 <Ionicons name="log-out-outline" size={13} color="#F3ECD8" />
                 <Text style={styles.signOutText}>LOGOUT SESSION</Text>
@@ -482,6 +557,9 @@ const styles = StyleSheet.create({
     borderWidth: 2,
     borderColor: '#B08D57', // Brass Trim
   },
+  portraitWrapper: {
+    flexDirection: 'column',
+  },
 
   /* ============================================================ */
   /* LEFT VIEWPORT (PARCHMENT CARD - 58%)                         */
@@ -526,8 +604,8 @@ const styles = StyleSheet.create({
     marginVertical: 4,
   },
   avatarBox: {
-    width: 48,
-    height: 48,
+    width: 44,
+    height: 44,
     backgroundColor: '#2C3B2E',
     borderWidth: 2,
     borderColor: '#B08D57',
@@ -541,14 +619,14 @@ const styles = StyleSheet.create({
   },
   agentName: {
     fontFamily: fontMonospace,
-    fontSize: 15,
+    fontSize: 14,
     fontWeight: 'bold',
     color: '#2A2420',
     letterSpacing: 0.8,
   },
   handleText: {
     fontFamily: fontMonospace,
-    fontSize: 10,
+    fontSize: 9.5,
     color: '#5C5248',
     marginBottom: 3,
   },
@@ -563,12 +641,12 @@ const styles = StyleSheet.create({
     borderRadius: 3,
     paddingHorizontal: 5,
     paddingVertical: 2,
-    fontSize: 10.5,
+    fontSize: 10,
     color: '#2A2420',
     marginBottom: 2,
   },
   handleInput: {
-    fontSize: 9,
+    fontSize: 8.5,
   },
   badgeContainer: {
     flexDirection: 'row',
@@ -608,15 +686,16 @@ const styles = StyleSheet.create({
   metaKey: {
     fontFamily: fontMonospace,
     color: '#2A2420',
-    fontSize: 9,
+    fontSize: 8.5,
     fontWeight: '600',
     letterSpacing: 0.5,
   },
   metaVal: {
     fontFamily: fontMonospace,
     color: '#2A2420',
-    fontSize: 9,
+    fontSize: 8.5,
     fontWeight: 'bold',
+    maxWidth: '55%',
   },
   permitStarRow: {
     flexDirection: 'row',
@@ -632,7 +711,7 @@ const styles = StyleSheet.create({
     paddingVertical: 5,
     borderRadius: 3,
     marginTop: 2,
-    minHeight: 30,
+    minHeight: 28,
   },
   btnIcon: {
     marginRight: 4,
@@ -667,7 +746,7 @@ const styles = StyleSheet.create({
     fontFamily: fontMonospace,
     color: '#E8DCC0',
     fontWeight: 'bold',
-    fontSize: 10.5,
+    fontSize: 10,
     letterSpacing: 0.8,
   },
   panelDivider: {
@@ -696,7 +775,7 @@ const styles = StyleSheet.create({
   toggleText: {
     fontFamily: fontMonospace,
     color: '#E8DCC0',
-    fontSize: 7.8,
+    fontSize: 7.5,
     fontWeight: 'bold',
     letterSpacing: 0.5,
     marginLeft: 4,
@@ -708,16 +787,16 @@ const styles = StyleSheet.create({
     backgroundColor: '#A64B2A',
     borderWidth: 1,
     borderColor: '#B08D57',
-    paddingVertical: 6,
+    paddingVertical: 5,
     borderRadius: 4,
     marginTop: 3,
-    minHeight: 32,
+    minHeight: 30,
   },
   signOutText: {
     fontFamily: fontMonospace,
     color: '#F3ECD8',
     fontWeight: 'bold',
-    fontSize: 9,
+    fontSize: 8.5,
     letterSpacing: 0.8,
     marginLeft: 4,
   },
@@ -730,7 +809,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     marginTop: 3,
-    minHeight: 26,
+    minHeight: 24,
   },
   backText: {
     fontFamily: fontMonospace,

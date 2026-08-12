@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   View,
   Text,
@@ -11,6 +11,7 @@ import {
   KeyboardAvoidingView,
   Platform,
   ScrollView,
+  Switch,
 } from 'react-native';
 import { createUserWithEmailAndPassword } from 'firebase/auth';
 import { doc, setDoc, serverTimestamp } from 'firebase/firestore';
@@ -24,36 +25,57 @@ interface Props {
 
 export const SignUpScreen: React.FC<Props> = ({ onNavigateLogin, onSignUpSuccess }) => {
   const { width, height } = useWindowDimensions();
+  const isLandscape = width > height;
 
-  // Form State
+  // Primary Input States
   const [callsign, setCallsign] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
 
-  // UI & Feedback State
+  // Pre-Configuration Telemetry Toggles (Strictly defaulted to OFF / false)
+  const [telemetryEnabled, setTelemetryEnabled] = useState(false);
+  const [hapticFeedbackEnabled, setHapticFeedbackEnabled] = useState(false);
+  const [motionSensitivityEnabled, setMotionSensitivityEnabled] = useState(false);
+  const [batteryOptimizerEnabled, setBatteryOptimizerEnabled] = useState(false);
+  const [nightModeEnabled, setNightModeEnabled] = useState(false);
+  const [skipOnboardingAuthFlow, setSkipOnboardingAuthFlow] = useState(false);
+
+  // Interface & Processing State
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  // Animation Refs
+  // Animation References
   const scaleAnim = useRef(new Animated.Value(1)).current;
   const fadeErrorAnim = useRef(new Animated.Value(0)).current;
+  const screenFadeAnim = useRef(new Animated.Value(0)).current;
 
-  // Micro-interaction: Button Press Spring Tween
+  // Screen Mount Entrance Tween
+  useEffect(() => {
+    Animated.timing(screenFadeAnim, {
+      toValue: 1,
+      duration: 400,
+      useNativeDriver: true,
+    }).start();
+  }, [screenFadeAnim]);
+
+  // Micro-interaction: Button Spring Tween
   const animateButtonPress = (toValue: number) => {
     Animated.spring(scaleAnim, {
       toValue,
       useNativeDriver: true,
       friction: 4,
+      tension: 40,
     }).start();
   };
 
-  // Micro-interaction: Smooth Error Banner Fade
+  // Error Display Tween
   const displayError = (msg: string) => {
     setErrorMessage(msg);
+    fadeErrorAnim.setValue(0);
     Animated.timing(fadeErrorAnim, {
       toValue: 1,
-      duration: 250,
+      duration: 200,
       useNativeDriver: true,
     }).start();
   };
@@ -63,11 +85,11 @@ export const SignUpScreen: React.FC<Props> = ({ onNavigateLogin, onSignUpSuccess
     fadeErrorAnim.setValue(0);
   };
 
-  // Firebase Registration Pipeline
+  // Firebase Pipeline Operations
   const handleRegister = async () => {
     clearError();
 
-    // Validation checks
+    // Data Validation
     if (!callsign.trim() || !email.trim() || !password || !confirmPassword) {
       displayError('ALL FIELD COORDINATES ARE REQUIRED');
       return;
@@ -87,32 +109,36 @@ export const SignUpScreen: React.FC<Props> = ({ onNavigateLogin, onSignUpSuccess
 
     try {
       // 1. Create Authentication Account
-      const userCredential = await createUserWithEmailAndPassword(auth, email.trim(), password);
+      const userCredential = await createUserWithEmailAndPassword(
+        auth,
+        email.trim(),
+        password
+      );
       const user = userCredential.user;
 
-      // 2. Prepare UserDocument matching src/types/firestore.ts (All toggles default OFF / false)
+      // 2. Prepare Firestore User Document
       const newUserDocument: UserDocument = {
         uid: user.uid,
-        username: callsign.trim(),
+        username: callsign.trim().toUpperCase(),
         email: email.trim().toLowerCase(),
         totalPoints: 0,
         hasCompletedOnboarding: false,
 
-        // System & Calibration Toggles (Default: false / OFF)
-        telemetryEnabled: false,
-        hapticFeedbackEnabled: false,
-        motionSensitivityEnabled: false,
-        batteryOptimizerEnabled: false,
-        nightModeEnabled: false,
+        // System & Calibration Toggles (Saved from user toggles)
+        telemetryEnabled,
+        hapticFeedbackEnabled,
+        motionSensitivityEnabled,
+        batteryOptimizerEnabled,
+        nightModeEnabled,
 
-        // Persistent bypass toggle (Default: false / OFF)
-        skipOnboardingAuthFlow: false,
+        // Persistent bypass toggle
+        skipOnboardingAuthFlow,
 
         createdAt: serverTimestamp() as any,
         updatedAt: serverTimestamp() as any,
       };
 
-      // 3. Write Document to Firestore 'users' collection
+      // 3. Persist to Firestore 'users' collection
       await setDoc(doc(db, 'users', user.uid), newUserDocument);
 
       setLoading(false);
@@ -127,23 +153,28 @@ export const SignUpScreen: React.FC<Props> = ({ onNavigateLogin, onSignUpSuccess
         friendlyError = 'INVALID EMAIL FORMAT DETECTED';
       } else if (error.code === 'auth/weak-password') {
         friendlyError = 'PASSCODE IS TOO WEAK FOR SECURE FIELD TRANSMISSION';
+      } else if (error.code === 'auth/network-request-failed') {
+        friendlyError = 'COMMUNICATION LINK LOST. CHECK NETWORK CONNECTION.';
       }
 
       displayError(friendlyError);
     }
   };
 
-  const isLandscape = width > height;
-
   return (
     <KeyboardAvoidingView
       style={styles.container}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
     >
-      <View style={[styles.splitWrapper, { flexDirection: isLandscape ? 'row' : 'column' }]}>
-        
+      <Animated.View
+        style={[
+          styles.splitWrapper,
+          { opacity: screenFadeAnim },
+          { flexDirection: isLandscape ? 'row' : 'column' },
+        ]}
+      >
         {/* LEFT VIEWPORT (60%): Field Enrollment Form */}
-        <View style={styles.leftViewport}>
+        <View style={[styles.leftViewport, !isLandscape && styles.fullWidthViewport]}>
           <ScrollView
             contentContainerStyle={styles.scrollContent}
             showsVerticalScrollIndicator={false}
@@ -155,14 +186,14 @@ export const SignUpScreen: React.FC<Props> = ({ onNavigateLogin, onSignUpSuccess
               <Text style={styles.subtitle}>ESTABLISH YOUR EXPLORER IDENTITY</Text>
             </View>
 
-            {/* Animated Error Banner */}
+            {/* Error Banner */}
             {errorMessage && (
               <Animated.View style={[styles.errorBox, { opacity: fadeErrorAnim }]}>
                 <Text style={styles.errorText}>[!] {errorMessage}</Text>
               </Animated.View>
             )}
 
-            {/* Input Form Fields */}
+            {/* Inputs */}
             <View style={styles.formGroup}>
               <Text style={styles.inputLabel}>CALLSIGN / USERNAME</Text>
               <TextInput
@@ -222,7 +253,7 @@ export const SignUpScreen: React.FC<Props> = ({ onNavigateLogin, onSignUpSuccess
               />
             </View>
 
-            {/* Submit CTA Button with Scale Tween */}
+            {/* Action CTA Button */}
             <Animated.View style={{ transform: [{ scale: scaleAnim }] }}>
               <TouchableOpacity
                 style={[styles.submitButton, loading && styles.buttonDisabled]}
@@ -245,36 +276,108 @@ export const SignUpScreen: React.FC<Props> = ({ onNavigateLogin, onSignUpSuccess
           </ScrollView>
         </View>
 
-        {/* RIGHT VIEWPORT (40%): Secondary Action & Control Panel */}
-        <View style={styles.rightViewport}>
-          <View style={styles.rightContent}>
+        {/* RIGHT VIEWPORT (40%): Telemetry Controls & Dispatch Navigation */}
+        <View style={[styles.rightViewport, !isLandscape && styles.fullWidthViewport]}>
+          <ScrollView
+            contentContainerStyle={styles.rightScrollContent}
+            showsVerticalScrollIndicator={false}
+          >
             <View style={styles.brassBadge}>
-              <Text style={styles.badgeText}>COMMUNICATION LINK</Text>
+              <Text style={styles.badgeText}>HARDWARE PRE-FLIGHT</Text>
             </View>
 
-            <Text style={styles.panelTitle}>EXISTING AGENT?</Text>
+            <Text style={styles.panelTitle}>SYSTEM CALIBRATION</Text>
             <Text style={styles.panelDescription}>
-              If you already hold active clearance credentials, return to the dispatch desk to authenticate.
+              Default system telemetry states. All sensors are disabled until explicitly toggled.
             </Text>
 
+            {/* Functional Sensor Controls */}
+            <View style={styles.toggleRow}>
+              <Text style={styles.toggleLabel}>TELEMETRY STREAMING</Text>
+              <Switch
+                trackColor={{ false: '#1A241C', true: '#A64B2A' }}
+                thumbColor={telemetryEnabled ? '#B08D57' : '#8C8275'}
+                onValueChange={setTelemetryEnabled}
+                value={telemetryEnabled}
+                accessibilityLabel="Telemetry Toggle"
+              />
+            </View>
+
+            <View style={styles.toggleRow}>
+              <Text style={styles.toggleLabel}>HAPTIC PULSE FEEDBACK</Text>
+              <Switch
+                trackColor={{ false: '#1A241C', true: '#A64B2A' }}
+                thumbColor={hapticFeedbackEnabled ? '#B08D57' : '#8C8275'}
+                onValueChange={setHapticFeedbackEnabled}
+                value={hapticFeedbackEnabled}
+                accessibilityLabel="Haptic Feedback Toggle"
+              />
+            </View>
+
+            <View style={styles.toggleRow}>
+              <Text style={styles.toggleLabel}>KINETIC MOTION SHAKE</Text>
+              <Switch
+                trackColor={{ false: '#1A241C', true: '#A64B2A' }}
+                thumbColor={motionSensitivityEnabled ? '#B08D57' : '#8C8275'}
+                onValueChange={setMotionSensitivityEnabled}
+                value={motionSensitivityEnabled}
+                accessibilityLabel="Motion Sensitivity Toggle"
+              />
+            </View>
+
+            <View style={styles.toggleRow}>
+              <Text style={styles.toggleLabel}>BATTERY OPTIMIZER</Text>
+              <Switch
+                trackColor={{ false: '#1A241C', true: '#A64B2A' }}
+                thumbColor={batteryOptimizerEnabled ? '#B08D57' : '#8C8275'}
+                onValueChange={setBatteryOptimizerEnabled}
+                value={batteryOptimizerEnabled}
+                accessibilityLabel="Battery Optimizer Toggle"
+              />
+            </View>
+
+            <View style={styles.toggleRow}>
+              <Text style={styles.toggleLabel}>NIGHT VISION MODE</Text>
+              <Switch
+                trackColor={{ false: '#1A241C', true: '#A64B2A' }}
+                thumbColor={nightModeEnabled ? '#B08D57' : '#8C8275'}
+                onValueChange={setNightModeEnabled}
+                value={nightModeEnabled}
+                accessibilityLabel="Night Mode Toggle"
+              />
+            </View>
+
+            <View style={styles.toggleRow}>
+              <Text style={styles.toggleLabel}>BYPASS AUTH & ONBOARDING</Text>
+              <Switch
+                trackColor={{ false: '#1A241C', true: '#A64B2A' }}
+                thumbColor={skipOnboardingAuthFlow ? '#B08D57' : '#8C8275'}
+                onValueChange={setSkipOnboardingAuthFlow}
+                value={skipOnboardingAuthFlow}
+                accessibilityLabel="Bypass Onboarding Switch"
+              />
+            </View>
+
+            <View style={styles.divider} />
+
+            <Text style={styles.panelTitle}>EXISTING AGENT?</Text>
             <TouchableOpacity
               style={styles.secondaryButton}
               onPress={onNavigateLogin}
               activeOpacity={0.8}
               accessibilityRole="button"
-              accessibilityLabel="Sign In"
+              accessibilityLabel="Sign In To Dispatch"
               accessibilityHint="Navigates to the sign in screen"
             >
               <Text style={styles.secondaryText}>SIGN IN TO DISPATCH</Text>
             </TouchableOpacity>
-          </View>
 
-          <View style={styles.footerNoteContainer}>
-            <Text style={styles.footerNote}>TREASI FIELD INSTRUMENT v1.0</Text>
-          </View>
+            <View style={styles.footerNoteContainer}>
+              <Text style={styles.footerNote}>TREASI FIELD INSTRUMENT v1.0</Text>
+            </View>
+          </ScrollView>
         </View>
-
-      </View>
+      </Animated.View>
     </KeyboardAvoidingView>
   );
 };
@@ -294,22 +397,26 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     justifyContent: 'center',
   },
+  rightViewport: {
+    flex: 0.40,
+    backgroundColor: '#2C3B2E',
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    borderLeftWidth: 3,
+    borderColor: '#B08D57',
+  },
+  fullWidthViewport: {
+    flex: 1,
+    width: '100%',
+  },
   scrollContent: {
     flexGrow: 1,
     justifyContent: 'center',
     paddingVertical: 12,
   },
-  rightViewport: {
-    flex: 0.40,
-    backgroundColor: '#2C3B2E',
-    padding: 24,
-    justifyContent: 'space-between',
-    borderLeftWidth: 3,
-    borderColor: '#B08D57',
-  },
-  rightContent: {
+  rightScrollContent: {
+    flexGrow: 1,
     justifyContent: 'center',
-    flex: 1,
   },
   headerBlock: {
     marginBottom: 10,
@@ -400,7 +507,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8,
     paddingVertical: 4,
     alignSelf: 'flex-start',
-    marginBottom: 12,
+    marginBottom: 8,
     borderRadius: 2,
     backgroundColor: '#222E24',
   },
@@ -412,28 +519,49 @@ const styles = StyleSheet.create({
   },
   panelTitle: {
     color: '#E8DCC0',
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: 'bold',
-    marginBottom: 8,
+    marginBottom: 4,
     letterSpacing: 1.5,
     fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
   },
   panelDescription: {
     color: '#E8DCC0',
-    fontSize: 11,
-    lineHeight: 16,
+    fontSize: 10,
+    lineHeight: 14,
     opacity: 0.8,
-    marginBottom: 20,
+    marginBottom: 12,
+  },
+  toggleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 6,
+    paddingVertical: 2,
+  },
+  toggleLabel: {
+    color: '#E8DCC0',
+    fontSize: 9,
+    fontWeight: 'bold',
+    letterSpacing: 0.8,
+    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+  },
+  divider: {
+    height: 1,
+    backgroundColor: '#B08D57',
+    opacity: 0.3,
+    marginVertical: 12,
   },
   secondaryButton: {
     borderWidth: 1.5,
     borderColor: '#B08D57',
-    paddingVertical: 12,
+    paddingVertical: 10,
     borderRadius: 4,
     alignItems: 'center',
-    minHeight: 48,
+    minHeight: 44,
     justifyContent: 'center',
     backgroundColor: '#222E24',
+    marginTop: 4,
   },
   secondaryText: {
     color: '#B08D57',
@@ -446,6 +574,7 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     borderTopColor: 'rgba(176, 141, 87, 0.3)',
     paddingTop: 8,
+    marginTop: 12,
   },
   footerNote: {
     color: '#B08D57',

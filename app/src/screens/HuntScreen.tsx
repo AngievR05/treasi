@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -7,28 +7,40 @@ import {
   useWindowDimensions,
   ActivityIndicator,
   Alert,
+  Image,
+  Modal,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Magnetometer, Accelerometer } from 'expo-sensors';
 import * as Location from 'expo-location';
-import Animated, { useSharedValue, useAnimatedStyle, withSpring } from 'react-native-reanimated';
+import * as Haptics from 'expo-haptics';
+import Animated, {
+  useSharedValue,
+  useAnimatedStyle,
+  withSpring,
+} from 'react-native-reanimated';
 import Svg, {
   Line,
   Text as SvgText,
   Polygon,
   Path,
+  Circle,
+  Rect,
 } from 'react-native-svg';
 
 // Firebase & Types
 import { db, auth } from '../config/firebase';
-import { 
-  doc, 
-  getDoc, 
-  addDoc, 
-  collection, 
-  serverTimestamp, 
-  updateDoc, 
-  increment 
+import {
+  doc,
+  getDoc,
+  addDoc,
+  collection,
+  serverTimestamp,
+  updateDoc,
+  increment,
+  query,
+  where,
+  getDocs,
 } from 'firebase/firestore';
 import { TreasureDocument } from '../types/firestore';
 
@@ -52,12 +64,12 @@ interface Props {
 }
 
 /**
- * Haversine Formula: Computes distance between two coordinates in meters.
+ * Haversine Formula: Calculates precise distance between two coordinates in meters.
  */
 function getDistanceInMeters(
-  lat1: number, 
-  lon1: number, 
-  lat2: number, 
+  lat1: number,
+  lon1: number,
+  lat2: number,
   lon2: number
 ): number {
   const R = 6371000; // Radius of Earth in meters
@@ -73,7 +85,9 @@ function getDistanceInMeters(
   return Math.round(R * c);
 }
 
-/* SPLIT-FLAP ODOMETER */
+/* -------------------------------------------------------------------------- */
+/*                          MECHANICAL ODOMETER DISPLAY                       */
+/* -------------------------------------------------------------------------- */
 const OdometerDigit: React.FC<{ char: string }> = ({ char }) => {
   if (char === ' ') return <View style={{ width: 8 }} />;
 
@@ -95,7 +109,9 @@ const OdometerDisplay: React.FC<{ value: string }> = ({ value }) => {
   );
 };
 
-/* BRASS COMPASS DIAL */
+/* -------------------------------------------------------------------------- */
+/*                            BRASS COMPASS DIAL                              */
+/* -------------------------------------------------------------------------- */
 const CompassDialView: React.FC<{ headingValue: { value: number }; size?: number }> = ({
   headingValue,
   size = 220,
@@ -173,64 +189,91 @@ const CompassDialView: React.FC<{ headingValue: { value: number }; size?: number
 };
 
 /* -------------------------------------------------------------------------- */
-/*                                MAIN COMPONENT                              */
+/*                               MAIN COMPONENT                               */
 /* -------------------------------------------------------------------------- */
 export const HuntScreen: React.FC<Props> = ({ treasureId, onBack, onSuccess }) => {
   const insets = useSafeAreaInsets();
   const { width: windowWidth, height: windowHeight } = useWindowDimensions();
 
-  // State Management
+  // Component State
   const [treasure, setTreasure] = useState<TreasureDocument | null>(null);
   const [loading, setLoading] = useState(true);
   const [distance, setDistance] = useState<number | null>(null);
   const [isExcavated, setIsExcavated] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [imageModalVisible, setImageModalVisible] = useState(false);
 
   const headingShared = useSharedValue(0);
+  const isMountedRef = useRef(true);
 
-  // 1. Fetch Treasure Document from Firestore
+  // 1. Fetch Treasure Data & Check Prior Excavation
   useEffect(() => {
-    let isMounted = true;
-    const fetchTreasure = async () => {
+    isMountedRef.current = true;
+
+    const fetchTreasureAndStatus = async () => {
       try {
+        if (!auth.currentUser) return;
+        const currentUserId = auth.currentUser.uid;
+
+        // Fetch Target Treasure Document
         const docRef = doc(db, 'treasures', treasureId);
         const docSnap = await getDoc(docRef);
 
-        if (docSnap.exists() && isMounted) {
-          setTreasure({ treasureId: docSnap.id, ...docSnap.data() } as TreasureDocument);
-        } else if (isMounted) {
-          Alert.alert('Target Lost', 'This treasure cache no longer exists.');
+        if (!docSnap.exists()) {
+          Alert.alert('Target Lost', 'This treasure cache no longer exists in Firestore.');
           onBack();
+          return;
+        }
+
+        const treasureData = { treasureId: docSnap.id, ...docSnap.data() } as TreasureDocument;
+
+        // Check if user has already discovered this treasure
+        const discQuery = query(
+          collection(db, 'discoveries'),
+          where('treasureId', '==', treasureId),
+          where('hunterId', '==', currentUserId)
+        );
+        const discSnap = await getDocs(discQuery);
+
+        if (isMountedRef.current) {
+          setTreasure(treasureData);
+          if (!discSnap.empty) {
+            setIsExcavated(true);
+          }
         }
       } catch (err) {
-        Alert.alert('Telemetry Error', 'Failed to acquire target lock.');
+        Alert.alert('Telemetry Error', 'Failed to synchronize with target field markers.');
       } finally {
-        if (isMounted) setLoading(false);
+        if (isMountedRef.current) setLoading(false);
       }
     };
 
-    fetchTreasure();
-    return () => { isMounted = false; };
+    fetchTreasureAndStatus();
+
+    return () => {
+      isMountedRef.current = false;
+    };
   }, [treasureId, onBack]);
 
-  // 2. Real GPS Location Subscription & Distance Calculation
+  // 2. Real GPS Location Tracking
   useEffect(() => {
     let locationSub: Location.LocationSubscription | null = null;
 
     const startLocationTracking = async () => {
       const { status } = await Location.requestForegroundPermissionsAsync();
       if (status !== 'granted') {
-        Alert.alert('Permission Denied', 'GPS sensor permissions required for telemetry.');
+        Alert.alert('Permission Denied', 'GPS sensor permissions are required for telemetry.');
         return;
       }
 
       locationSub = await Location.watchPositionAsync(
         {
           accuracy: Location.Accuracy.BestForNavigation,
-          distanceInterval: 1, // update every 1 meter move
+          timeInterval: 1000,
+          distanceInterval: 1, // Trigger per meter step
         },
         (loc) => {
-          if (treasure?.location) {
+          if (treasure?.location && isMountedRef.current) {
             const dist = getDistanceInMeters(
               loc.coords.latitude,
               loc.coords.longitude,
@@ -252,11 +295,11 @@ export const HuntScreen: React.FC<Props> = ({ treasureId, onBack, onSuccess }) =
     };
   }, [treasure]);
 
-  // 3. Magnetometer Filtering (Compass)
+  // 3. Magnetometer Sensor Stream with Low-Pass Filtering
   useEffect(() => {
     let prevX = 0;
     let prevY = 0;
-    const alpha = 0.15;
+    const alpha = 0.15; // Filter smoothing constant
 
     Magnetometer.setUpdateInterval(50);
 
@@ -270,7 +313,7 @@ export const HuntScreen: React.FC<Props> = ({ treasureId, onBack, onSuccess }) =
       if (angle < 0) angle += 360;
 
       headingShared.value = withSpring(angle, {
-        damping: 12,
+        damping: 14,
         stiffness: 90,
       });
     });
@@ -278,13 +321,16 @@ export const HuntScreen: React.FC<Props> = ({ treasureId, onBack, onSuccess }) =
     return () => subscription.remove();
   }, [headingShared]);
 
-  // 4. Handle Final Excavation (Firestore Writes)
+  // 4. Excavation Execution Engine (Full CRUD & Multi-Collection Transaction)
   const executeExcavation = useCallback(async () => {
     if (isExcavated || isSubmitting || !auth.currentUser || !treasure) return;
 
-    // Radius Enforcement (e.g., must be within 15 meters)
+    // Enforce Proximity Radius (15-meter threshold)
     if (distance !== null && distance > 15) {
-      Alert.alert('Out of Range', `You are ${distance}m away. Move within 15m to dig.`);
+      Alert.alert(
+        'Out of Range',
+        `Target is ${distance} meters away. Advance within 15 meters to dig.`
+      );
       return;
     }
 
@@ -293,14 +339,14 @@ export const HuntScreen: React.FC<Props> = ({ treasureId, onBack, onSuccess }) =
       const userId = auth.currentUser.uid;
       const userName = auth.currentUser.displayName || 'Anonymous Explorer';
 
-      // Record Discovery
+      // 1. Create Discovery Intersect Document
       await addDoc(collection(db, 'discoveries'), {
         treasureId: treasure.treasureId,
         hunterId: userId,
         unlockedAt: serverTimestamp(),
       });
 
-      // Post to Activity Feed
+      // 2. Broadcast Signal to Activity Feed
       await addDoc(collection(db, 'activity_feed'), {
         userId: userId,
         username: userName,
@@ -310,48 +356,50 @@ export const HuntScreen: React.FC<Props> = ({ treasureId, onBack, onSuccess }) =
         createdAt: serverTimestamp(),
       });
 
-      // Award Score Points to User Document
+      // 3. Increment User Game Score
       const userRef = doc(db, 'users', userId);
       await updateDoc(userRef, {
         totalPoints: increment(100),
         updatedAt: serverTimestamp(),
       });
 
+      // Trigger Tactile Feedback
+      await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+
       setIsExcavated(true);
       if (onSuccess) onSuccess();
     } catch (err) {
-      Alert.alert('Excavation Failed', 'Could not record excavation signal in Firestore.');
+      Alert.alert('Excavation Failed', 'Could not transmit excavation signal to Firestore.');
     } finally {
-      setIsSubmitting(false);
+      if (isMountedRef.current) setIsSubmitting(false);
     }
   }, [isExcavated, isSubmitting, treasure, distance, onSuccess]);
 
-  // 5. Accelerometer Shake Listener
+  // 5. Accelerometer Kinetic Shake Trigger
   useEffect(() => {
     Accelerometer.setUpdateInterval(100);
 
-    const accelSubscription = Accelerometer.addListener((data) => {
+    const accelSub = Accelerometer.addListener((data) => {
       const gForce = Math.sqrt(data.x * data.x + data.y * data.y + data.z * data.z);
       if (gForce > 2.2 && !isExcavated && !isSubmitting) {
         executeExcavation();
       }
     });
 
-    return () => accelSubscription.remove();
+    return () => accelSub.remove();
   }, [isExcavated, isSubmitting, executeExcavation]);
 
   if (loading) {
     return (
       <View style={[styles.container, styles.centerContent]}>
         <ActivityIndicator size="large" color={COLORS.brass} />
-        <Text style={styles.loadingText}>Calibrating Sensors...</Text>
+        <Text style={styles.loadingText}>CALIBRATING TELEMETRY SENSORS...</Text>
       </View>
     );
   }
 
-  const formattedDistance = distance !== null 
-    ? String(distance).padStart(3, '0') + ' m'
-    : '--- m';
+  const formattedDistance =
+    distance !== null ? String(distance).padStart(3, '0') + ' m' : '--- m';
 
   const isLandscape = windowWidth > windowHeight;
 
@@ -368,9 +416,12 @@ export const HuntScreen: React.FC<Props> = ({ treasureId, onBack, onSuccess }) =
       ]}
     >
       <View style={[styles.splitWrapper, { flexDirection: isLandscape ? 'row' : 'column' }]}>
-        {/* LEFT VIEWPORT: INSTRUMENTS & COMPASS (60%) */}
+        {/* LEFT VIEWPORT: INSTRUMENTS & COMPASS DIAL (60%) */}
         <View style={styles.leftViewport}>
-          <CompassDialView headingValue={headingShared} size={Math.min(windowHeight * 0.52, 220)} />
+          <CompassDialView
+            headingValue={headingShared}
+            size={Math.min(windowHeight * 0.52, 220)}
+          />
 
           <View style={styles.telemetryGroup}>
             <OdometerDisplay value={formattedDistance} />
@@ -380,7 +431,7 @@ export const HuntScreen: React.FC<Props> = ({ treasureId, onBack, onSuccess }) =
 
         {/* RIGHT VIEWPORT: CONTROL CONSOLE (40%) */}
         <View style={styles.rightViewport}>
-          <View>
+          <View style={{ flex: 1 }}>
             <View style={styles.sectionHeaderRow}>
               <View style={styles.starIconBox}>
                 <Svg width="12" height="12" viewBox="0 0 24 24" fill={COLORS.sienna}>
@@ -393,21 +444,41 @@ export const HuntScreen: React.FC<Props> = ({ treasureId, onBack, onSuccess }) =
 
             {/* Parchment Clue Card */}
             <View style={styles.clueCard}>
-              <Text style={styles.clueTitle}>{treasure?.title || 'Unknown Cache'}</Text>
+              <Text style={styles.clueTitle}>{treasure?.title || 'UNKNOWN CACHE'}</Text>
               <Text style={styles.clueBody}>"{treasure?.hint || 'No clue provided.'}"</Text>
               <Text style={styles.clueAuthor}>— left by {treasure?.creatorName || 'Explorer'}</Text>
+
+              {/* Photo Evidence Thumbnail (If exists) */}
+              {treasure?.imageUrl ? (
+                <TouchableOpacity
+                  style={styles.evidenceButton}
+                  onPress={() => setImageModalVisible(true)}
+                  accessibilityRole="button"
+                  accessibilityLabel="Inspect Photo Evidence"
+                >
+                  <Svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={COLORS.brass} strokeWidth="2">
+                    <Rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+                    <Circle cx="8.5" cy="8.5" r="1.5" />
+                    <Polygon points="21 15 16 10 5 21" />
+                  </Svg>
+                  <Text style={styles.evidenceText}>INSPECT FIELD PHOTO</Text>
+                </TouchableOpacity>
+              ) : null}
             </View>
           </View>
 
-          {/* Action / Alert Slate */}
+          {/* Action / Excavation Console */}
           <View style={styles.actionContainer}>
             <TouchableOpacity
               activeOpacity={0.8}
               onPress={executeExcavation}
-              disabled={isSubmitting}
+              disabled={isSubmitting || isExcavated}
               accessible={true}
-              accessibilityLabel={isExcavated ? "Excavation Complete" : "Tap or Shake to Excavate"}
-              accessibilityHint="Triggers treasure excavation when within radius"
+              accessibilityRole="button"
+              accessibilityLabel={
+                isExcavated ? 'Excavation Complete' : 'Tap or Shake Device to Excavate'
+              }
+              accessibilityHint="Executes treasure excavation when within 15 meters"
               style={[
                 styles.alertCard,
                 isExcavated && styles.alertCardSuccess,
@@ -420,26 +491,27 @@ export const HuntScreen: React.FC<Props> = ({ treasureId, onBack, onSuccess }) =
                   <Line x1="12" y1="17" x2="12.01" y2="17" />
                 </Svg>
                 <Text style={styles.alertTitle}>
-                  {isSubmitting 
-                    ? 'RECORDING SIGNAL...' 
-                    : isExcavated 
-                    ? 'EXCAVATION COMPLETE' 
+                  {isSubmitting
+                    ? 'TRANSMITTING SIGNAL...'
+                    : isExcavated
+                    ? 'EXCAVATION COMPLETE'
                     : 'DIG SITE DETECTED'}
                 </Text>
               </View>
 
               <Text style={styles.alertSub}>
-                {isExcavated 
-                  ? `PAYLOAD: ${treasure?.payloadText || 'CACHE UNLOCKED'}` 
+                {isExcavated
+                  ? `PAYLOAD: ${treasure?.payloadText || 'CACHE UNLOCKED (+100 PTS)'}`
                   : 'SHAKE DEVICE OR TAP BOX TO EXCAVATE'}
               </Text>
             </TouchableOpacity>
 
             {/* Abandon Button */}
-            <TouchableOpacity 
-              style={styles.abandonButton} 
+            <TouchableOpacity
+              style={styles.abandonButton}
               onPress={onBack}
               accessible={true}
+              accessibilityRole="button"
               accessibilityLabel="Abandon Hunt"
             >
               <Text style={styles.abandonText}>ABANDON HUNT ▸</Text>
@@ -447,10 +519,39 @@ export const HuntScreen: React.FC<Props> = ({ treasureId, onBack, onSuccess }) =
           </View>
         </View>
       </View>
+
+      {/* Field Photo Evidence Modal */}
+      {treasure?.imageUrl ? (
+        <Modal
+          visible={imageModalVisible}
+          transparent={true}
+          animationType="fade"
+          onRequestClose={() => setImageModalVisible(false)}
+        >
+          <View style={styles.modalOverlay}>
+            <View style={styles.modalContent}>
+              <Image
+                source={{ uri: treasure.imageUrl }}
+                style={styles.fullEvidenceImage}
+                resizeMode="cover"
+              />
+              <TouchableOpacity
+                style={styles.closeModalButton}
+                onPress={() => setImageModalVisible(false)}
+              >
+                <Text style={styles.closeModalText}>CLOSE EVIDENCE</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </Modal>
+      ) : null}
     </View>
   );
 };
 
+/* -------------------------------------------------------------------------- */
+/*                               STYLESHEETS                                  */
+/* -------------------------------------------------------------------------- */
 const styles = StyleSheet.create({
   container: {
     flex: 1,
@@ -464,7 +565,7 @@ const styles = StyleSheet.create({
     color: COLORS.parchment,
     fontFamily: 'Courier',
     marginTop: 12,
-    fontSize: 12,
+    fontSize: 11,
     letterSpacing: 1.5,
   },
   splitWrapper: {
@@ -522,7 +623,7 @@ const styles = StyleSheet.create({
     borderColor: COLORS.parchment,
   },
 
-  /* TELEMETRY / ODOMETER */
+  /* ODOMETER */
   telemetryGroup: {
     alignItems: 'center',
     marginTop: 10,
@@ -533,7 +634,7 @@ const styles = StyleSheet.create({
   },
   odometerBox: {
     width: 24,
-    height: 36,
+    height: 34,
     backgroundColor: '#161511',
     borderWidth: 1,
     borderColor: COLORS.brass,
@@ -553,7 +654,7 @@ const styles = StyleSheet.create({
   },
   odometerText: {
     color: COLORS.parchment,
-    fontSize: 18,
+    fontSize: 16,
     fontWeight: 'bold',
     fontFamily: 'Courier',
   },
@@ -566,7 +667,7 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
 
-  /* RIGHT PANEL & CLUE SLATE */
+  /* RIGHT PANEL & CLUE CARD */
   sectionHeaderRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -622,10 +723,26 @@ const styles = StyleSheet.create({
     marginTop: 6,
     fontFamily: 'Courier',
   },
+  evidenceButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 8,
+    paddingTop: 6,
+    borderTopWidth: 1,
+    borderColor: 'rgba(42, 36, 32, 0.15)',
+  },
+  evidenceText: {
+    color: COLORS.ink,
+    fontSize: 9,
+    fontWeight: 'bold',
+    fontFamily: 'Courier',
+    marginLeft: 6,
+    letterSpacing: 1,
+  },
 
   /* ACTION / ALERT CARD */
   actionContainer: {
-    marginTop: 'auto',
+    marginTop: 10,
   },
   alertCard: {
     backgroundColor: COLORS.sienna,
@@ -634,7 +751,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: COLORS.parchment,
     borderStyle: 'dashed',
-    marginBottom: 8,
+    marginBottom: 6,
   },
   alertCardSuccess: {
     backgroundColor: COLORS.forestDarker,
@@ -671,5 +788,43 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     letterSpacing: 1.5,
     fontFamily: 'Courier',
+  },
+
+  /* EVIDENCE MODAL */
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.85)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  modalContent: {
+    backgroundColor: COLORS.forestDeep,
+    padding: 12,
+    borderRadius: 6,
+    borderWidth: 2,
+    borderColor: COLORS.brass,
+    alignItems: 'center',
+    maxWidth: 400,
+    width: '100%',
+  },
+  fullEvidenceImage: {
+    width: '100%',
+    height: 200,
+    borderRadius: 4,
+    marginBottom: 12,
+  },
+  closeModalButton: {
+    backgroundColor: COLORS.sienna,
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+    borderRadius: 4,
+  },
+  closeModalText: {
+    color: COLORS.white,
+    fontFamily: 'Courier',
+    fontWeight: 'bold',
+    fontSize: 10,
+    letterSpacing: 1.5,
   },
 });

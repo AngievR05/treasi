@@ -21,7 +21,7 @@ import Animated, {
   withSpring,
 } from 'react-native-reanimated';
 import { 
-  User, 
+  User as UserIcon, 
   Lock, 
   Compass, 
   MapPin, 
@@ -29,13 +29,16 @@ import {
   RotateCw, 
   Eye, 
   EyeOff, 
-  ShieldAlert 
+  ShieldAlert,
+  Moon,
+  Zap
 } from 'lucide-react-native';
 
-// Firebase Engine & Firestore Imports
+// Firebase Auth & Firestore Engine
 import { signInWithEmailAndPassword } from 'firebase/auth';
-import { doc, updateDoc, Timestamp } from 'firebase/firestore';
+import { doc, getDoc, setDoc, updateDoc, Timestamp } from 'firebase/firestore';
 import { auth, db } from '../../config/firebase';
+import { UserDocument } from '../../types/firestore';
 
 export interface LoginScreenProps {
   onNavigateSignUp: () => void;
@@ -57,10 +60,11 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  // Pre-flight Sensor Toggles (Strictly OFF / false by default per specifications)
+  // Pre-flight Sensor & System Calibration Toggles (Strictly OFF / false by default)
   const [gpsEnabled, setGpsEnabled] = useState<boolean>(false);
   const [compassEnabled, setCompassEnabled] = useState<boolean>(false);
   const [motionEnabled, setMotionEnabled] = useState<boolean>(false);
+  const [nightModeEnabled, setNightModeEnabled] = useState<boolean>(false);
 
   // Micro-interaction: Tactile Button Press Spring Scale
   const buttonScale = useSharedValue(1);
@@ -77,7 +81,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
     buttonScale.value = withSpring(1, { damping: 12, stiffness: 200 });
   };
 
-  // Firebase Auth Login & Telemetry Sync Pipeline
+  // Firebase Auth Login & Telemetry Synchronization Pipeline
   const handleLogin = async () => {
     if (!email.trim() || !password) {
       setErrorMessage('Field protocol requires both Explorer ID and Passcode.');
@@ -92,16 +96,35 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
       const userCredential = await signInWithEmailAndPassword(auth, email.trim(), password);
       const user = userCredential.user;
 
-      // 2. Persist sensor telemetry configuration to Firestore user document
       if (user) {
         const userDocRef = doc(db, 'users', user.uid);
-        await updateDoc(userDocRef, {
+        const userDocSnap = await getDoc(userDocRef);
+
+        // 2. Synchronize active Pre-flight Toggles to user profile document
+        const telemetryPayload: Partial<UserDocument> = {
           telemetryEnabled: gpsEnabled,
+          hapticFeedbackEnabled: compassEnabled,
           motionSensitivityEnabled: motionEnabled,
+          nightModeEnabled: nightModeEnabled,
           updatedAt: Timestamp.now(),
-        }).catch(() => {
-          // Non-blocking catch: Proceed to dashboard even if telemetry write fails
-        });
+        };
+
+        if (userDocSnap.exists()) {
+          await updateDoc(userDocRef, telemetryPayload);
+        } else {
+          // Failsafe: Initialize document if missing
+          await setDoc(userDocRef, {
+            uid: user.uid,
+            username: email.split('@')[0] || 'Explorer',
+            email: user.email || email.trim(),
+            totalPoints: 0,
+            hasCompletedOnboarding: false,
+            batteryOptimizerEnabled: false,
+            skipOnboardingAuthFlow: false,
+            createdAt: Timestamp.now(),
+            ...telemetryPayload,
+          });
+        }
       }
 
       onLoginSuccess();
@@ -171,7 +194,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
                 <Text style={styles.brandSubtitle}>Hide. Explore. Stay connected.</Text>
               </View>
 
-              {/* Error Diagnostic Banner */}
+              {/* Diagnostic Banner */}
               {errorMessage && (
                 <View
                   style={styles.errorBox}
@@ -189,7 +212,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
                 
                 {/* Username / Email Input */}
                 <View style={styles.inputContainer}>
-                  <User size={18} color="#2A2420" style={styles.inputIcon} />
+                  <UserIcon size={18} color="#2A2420" style={styles.inputIcon} />
                   <TextInput
                     style={styles.textInput}
                     placeholder="USERNAME / EMAIL"
@@ -258,7 +281,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
                 </TouchableOpacity>
               </Animated.View>
 
-              {/* Link to Registration Flow */}
+              {/* Registration Link */}
               <TouchableOpacity
                 onPress={onNavigateSignUp}
                 style={styles.linkContainer}
@@ -316,7 +339,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
                 />
               </View>
 
-              {/* Compass Sensor Toggle */}
+              {/* Compass / Haptic Sensor Toggle */}
               <View style={styles.toggleRow}>
                 <View style={styles.toggleLabelGroup}>
                   <Compass size={16} color="#B08D57" />
@@ -348,6 +371,24 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
                   accessible={true}
                   accessibilityRole="switch"
                   accessibilityLabel="Enable Motion Sense Accelerometer"
+                  style={styles.switchTarget}
+                />
+              </View>
+
+              {/* Night Mode Toggle */}
+              <View style={styles.toggleRow}>
+                <View style={styles.toggleLabelGroup}>
+                  <Moon size={16} color="#B08D57" />
+                  <Text style={styles.toggleText}>NIGHT MODE</Text>
+                </View>
+                <Switch
+                  value={nightModeEnabled}
+                  onValueChange={setNightModeEnabled}
+                  trackColor={{ false: '#1A231B', true: '#A64B2A' }}
+                  thumbColor={nightModeEnabled ? '#E8DCC0' : '#B08D57'}
+                  accessible={true}
+                  accessibilityRole="switch"
+                  accessibilityLabel="Enable Night Mode Interface"
                   style={styles.switchTarget}
                 />
               </View>
@@ -509,7 +550,7 @@ const styles = StyleSheet.create({
     borderRadius: 4,
     alignItems: 'center',
     justifyContent: 'center',
-    minHeight: 48, // Minimum WCAG touch target
+    minHeight: 48,
   },
   buttonDisabled: {
     opacity: 0.6,
