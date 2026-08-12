@@ -1,22 +1,36 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import {
   View,
   Text,
   StyleSheet,
   TouchableOpacity,
   useWindowDimensions,
+  ActivityIndicator,
+  Alert,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Magnetometer, Accelerometer } from 'expo-sensors';
+import * as Location from 'expo-location';
 import Animated, { useSharedValue, useAnimatedStyle, withSpring } from 'react-native-reanimated';
 import Svg, {
-  Circle,
   Line,
   Text as SvgText,
   Polygon,
   Path,
-  G,
 } from 'react-native-svg';
+
+// Firebase & Types
+import { db, auth } from '../config/firebase';
+import { 
+  doc, 
+  getDoc, 
+  addDoc, 
+  collection, 
+  serverTimestamp, 
+  updateDoc, 
+  increment 
+} from 'firebase/firestore';
+import { TreasureDocument } from '../types/firestore';
 
 const COLORS = {
   forestDeep: '#2C3B2E',
@@ -32,10 +46,31 @@ const COLORS = {
 };
 
 interface Props {
+  treasureId: string;
   onBack: () => void;
-  targetDistance?: number;
-  clueText?: string;
-  authorName?: string;
+  onSuccess?: () => void;
+}
+
+/**
+ * Haversine Formula: Computes distance between two coordinates in meters.
+ */
+function getDistanceInMeters(
+  lat1: number, 
+  lon1: number, 
+  lat2: number, 
+  lon2: number
+): number {
+  const R = 6371000; // Radius of Earth in meters
+  const dLat = (lat2 - lat1) * (Math.PI / 180);
+  const dLon = (lon2 - lon1) * (Math.PI / 180);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1 * (Math.PI / 180)) *
+      Math.cos(lat2 * (Math.PI / 180)) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return Math.round(R * c);
 }
 
 /* SPLIT-FLAP ODOMETER */
@@ -52,7 +87,7 @@ const OdometerDigit: React.FC<{ char: string }> = ({ char }) => {
 
 const OdometerDisplay: React.FC<{ value: string }> = ({ value }) => {
   return (
-    <View style={styles.odometerContainer}>
+    <View style={styles.odometerContainer} accessibilityLabel={`Distance readout: ${value}`}>
       {value.split('').map((ch, index) => (
         <OdometerDigit key={index} char={ch} />
       ))}
@@ -125,9 +160,7 @@ const CompassDialView: React.FC<{ headingValue: { value: number }; size?: number
         {/* Rotatable Compass Needle */}
         <Animated.View style={[styles.needleWrapper, animatedNeedleStyle]}>
           <Svg width="20" height={size * 0.65} viewBox="0 0 20 160">
-            {/* North Pointer (Sienna Red) */}
             <Polygon points="10,6 3,80 17,80" fill={COLORS.sienna} />
-            {/* South Pointer (Vintage Gold) */}
             <Polygon points="10,154 3,80 17,80" fill="#D8BD8A" />
           </Svg>
         </Animated.View>
@@ -140,42 +173,102 @@ const CompassDialView: React.FC<{ headingValue: { value: number }; size?: number
 };
 
 /* -------------------------------------------------------------------------- */
-/*                               MAIN COMPONENT                               */
+/*                                MAIN COMPONENT                              */
 /* -------------------------------------------------------------------------- */
-export const HuntScreen: React.FC<Props> = ({
-  onBack,
-  targetDistance = 45,
-  clueText = '"Where the old oak splits the fence, ten steps toward the setting sun..."',
-  authorName = 'Jess',
-}) => {
+export const HuntScreen: React.FC<Props> = ({ treasureId, onBack, onSuccess }) => {
   const insets = useSafeAreaInsets();
   const { width: windowWidth, height: windowHeight } = useWindowDimensions();
 
-  const headingShared = useSharedValue(0);
+  // State Management
+  const [treasure, setTreasure] = useState<TreasureDocument | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [distance, setDistance] = useState<number | null>(null);
   const [isExcavated, setIsExcavated] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // Magnetometer Low-Pass Filter state variables
+  const headingShared = useSharedValue(0);
+
+  // 1. Fetch Treasure Document from Firestore
+  useEffect(() => {
+    let isMounted = true;
+    const fetchTreasure = async () => {
+      try {
+        const docRef = doc(db, 'treasures', treasureId);
+        const docSnap = await getDoc(docRef);
+
+        if (docSnap.exists() && isMounted) {
+          setTreasure({ treasureId: docSnap.id, ...docSnap.data() } as TreasureDocument);
+        } else if (isMounted) {
+          Alert.alert('Target Lost', 'This treasure cache no longer exists.');
+          onBack();
+        }
+      } catch (err) {
+        Alert.alert('Telemetry Error', 'Failed to acquire target lock.');
+      } finally {
+        if (isMounted) setLoading(false);
+      }
+    };
+
+    fetchTreasure();
+    return () => { isMounted = false; };
+  }, [treasureId, onBack]);
+
+  // 2. Real GPS Location Subscription & Distance Calculation
+  useEffect(() => {
+    let locationSub: Location.LocationSubscription | null = null;
+
+    const startLocationTracking = async () => {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Permission Denied', 'GPS sensor permissions required for telemetry.');
+        return;
+      }
+
+      locationSub = await Location.watchPositionAsync(
+        {
+          accuracy: Location.Accuracy.BestForNavigation,
+          distanceInterval: 1, // update every 1 meter move
+        },
+        (loc) => {
+          if (treasure?.location) {
+            const dist = getDistanceInMeters(
+              loc.coords.latitude,
+              loc.coords.longitude,
+              treasure.location.latitude,
+              treasure.location.longitude
+            );
+            setDistance(dist);
+          }
+        }
+      );
+    };
+
+    if (treasure) {
+      startLocationTracking();
+    }
+
+    return () => {
+      if (locationSub) locationSub.remove();
+    };
+  }, [treasure]);
+
+  // 3. Magnetometer Filtering (Compass)
   useEffect(() => {
     let prevX = 0;
     let prevY = 0;
-    const alpha = 0.15; // LPF coefficient
+    const alpha = 0.15;
 
-    Magnetometer.setUpdateInterval(50); // 20 updates per second
+    Magnetometer.setUpdateInterval(50);
 
     const subscription = Magnetometer.addListener((data) => {
-      // Low-pass filter application
       const filteredX = alpha * data.x + (1 - alpha) * prevX;
       const filteredY = alpha * data.y + (1 - alpha) * prevY;
       prevX = filteredX;
       prevY = filteredY;
 
-      // Calculate heading angle
       let angle = Math.atan2(filteredY, filteredX) * (180 / Math.PI);
-      if (angle < 0) {
-        angle += 360;
-      }
+      if (angle < 0) angle += 360;
 
-      // Smooth transition using Reanimated Spring
       headingShared.value = withSpring(angle, {
         damping: 12,
         stiffness: 90,
@@ -185,21 +278,81 @@ export const HuntScreen: React.FC<Props> = ({
     return () => subscription.remove();
   }, [headingShared]);
 
-  // Accelerometer Shake Detection
+  // 4. Handle Final Excavation (Firestore Writes)
+  const executeExcavation = useCallback(async () => {
+    if (isExcavated || isSubmitting || !auth.currentUser || !treasure) return;
+
+    // Radius Enforcement (e.g., must be within 15 meters)
+    if (distance !== null && distance > 15) {
+      Alert.alert('Out of Range', `You are ${distance}m away. Move within 15m to dig.`);
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      const userId = auth.currentUser.uid;
+      const userName = auth.currentUser.displayName || 'Anonymous Explorer';
+
+      // Record Discovery
+      await addDoc(collection(db, 'discoveries'), {
+        treasureId: treasure.treasureId,
+        hunterId: userId,
+        unlockedAt: serverTimestamp(),
+      });
+
+      // Post to Activity Feed
+      await addDoc(collection(db, 'activity_feed'), {
+        userId: userId,
+        username: userName,
+        type: 'TREASURE_FOUND',
+        message: `Excavated "${treasure.title}"`,
+        targetId: treasure.treasureId,
+        createdAt: serverTimestamp(),
+      });
+
+      // Award Score Points to User Document
+      const userRef = doc(db, 'users', userId);
+      await updateDoc(userRef, {
+        totalPoints: increment(100),
+        updatedAt: serverTimestamp(),
+      });
+
+      setIsExcavated(true);
+      if (onSuccess) onSuccess();
+    } catch (err) {
+      Alert.alert('Excavation Failed', 'Could not record excavation signal in Firestore.');
+    } finally {
+      setIsSubmitting(false);
+    }
+  }, [isExcavated, isSubmitting, treasure, distance, onSuccess]);
+
+  // 5. Accelerometer Shake Listener
   useEffect(() => {
     Accelerometer.setUpdateInterval(100);
 
     const accelSubscription = Accelerometer.addListener((data) => {
       const gForce = Math.sqrt(data.x * data.x + data.y * data.y + data.z * data.z);
-      if (gForce > 2.2 && !isExcavated) {
-        setIsExcavated(true);
+      if (gForce > 2.2 && !isExcavated && !isSubmitting) {
+        executeExcavation();
       }
     });
 
     return () => accelSubscription.remove();
-  }, [isExcavated]);
+  }, [isExcavated, isSubmitting, executeExcavation]);
 
-  const formattedDistance = String(targetDistance).padStart(3, '0') + ' m';
+  if (loading) {
+    return (
+      <View style={[styles.container, styles.centerContent]}>
+        <ActivityIndicator size="large" color={COLORS.brass} />
+        <Text style={styles.loadingText}>Calibrating Sensors...</Text>
+      </View>
+    );
+  }
+
+  const formattedDistance = distance !== null 
+    ? String(distance).padStart(3, '0') + ' m'
+    : '--- m';
+
   const isLandscape = windowWidth > windowHeight;
 
   return (
@@ -217,7 +370,7 @@ export const HuntScreen: React.FC<Props> = ({
       <View style={[styles.splitWrapper, { flexDirection: isLandscape ? 'row' : 'column' }]}>
         {/* LEFT VIEWPORT: INSTRUMENTS & COMPASS (60%) */}
         <View style={styles.leftViewport}>
-          <CompassDialView headingValue={headingShared} size={Math.min(windowHeight * 0.55, 230)} />
+          <CompassDialView headingValue={headingShared} size={Math.min(windowHeight * 0.52, 220)} />
 
           <View style={styles.telemetryGroup}>
             <OdometerDisplay value={formattedDistance} />
@@ -240,8 +393,9 @@ export const HuntScreen: React.FC<Props> = ({
 
             {/* Parchment Clue Card */}
             <View style={styles.clueCard}>
-              <Text style={styles.clueBody}>{clueText}</Text>
-              <Text style={styles.clueAuthor}>— left by {authorName}</Text>
+              <Text style={styles.clueTitle}>{treasure?.title || 'Unknown Cache'}</Text>
+              <Text style={styles.clueBody}>"{treasure?.hint || 'No clue provided.'}"</Text>
+              <Text style={styles.clueAuthor}>— left by {treasure?.creatorName || 'Explorer'}</Text>
             </View>
           </View>
 
@@ -249,7 +403,11 @@ export const HuntScreen: React.FC<Props> = ({
           <View style={styles.actionContainer}>
             <TouchableOpacity
               activeOpacity={0.8}
-              onPress={() => setIsExcavated(true)}
+              onPress={executeExcavation}
+              disabled={isSubmitting}
+              accessible={true}
+              accessibilityLabel={isExcavated ? "Excavation Complete" : "Tap or Shake to Excavate"}
+              accessibilityHint="Triggers treasure excavation when within radius"
               style={[
                 styles.alertCard,
                 isExcavated && styles.alertCardSuccess,
@@ -262,16 +420,28 @@ export const HuntScreen: React.FC<Props> = ({
                   <Line x1="12" y1="17" x2="12.01" y2="17" />
                 </Svg>
                 <Text style={styles.alertTitle}>
-                  {isExcavated ? 'EXCAVATION COMPLETE' : 'DIG SITE DETECTED'}
+                  {isSubmitting 
+                    ? 'RECORDING SIGNAL...' 
+                    : isExcavated 
+                    ? 'EXCAVATION COMPLETE' 
+                    : 'DIG SITE DETECTED'}
                 </Text>
               </View>
+
               <Text style={styles.alertSub}>
-                {isExcavated ? 'PAYLOAD UNLOCKED IN INVENTORY' : 'SHAKE DEVICE TO EXCAVATE'}
+                {isExcavated 
+                  ? `PAYLOAD: ${treasure?.payloadText || 'CACHE UNLOCKED'}` 
+                  : 'SHAKE DEVICE OR TAP BOX TO EXCAVATE'}
               </Text>
             </TouchableOpacity>
 
             {/* Abandon Button */}
-            <TouchableOpacity style={styles.abandonButton} onPress={onBack}>
+            <TouchableOpacity 
+              style={styles.abandonButton} 
+              onPress={onBack}
+              accessible={true}
+              accessibilityLabel="Abandon Hunt"
+            >
               <Text style={styles.abandonText}>ABANDON HUNT ▸</Text>
             </TouchableOpacity>
           </View>
@@ -286,6 +456,17 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: COLORS.forestDarker,
   },
+  centerContent: {
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  loadingText: {
+    color: COLORS.parchment,
+    fontFamily: 'Courier',
+    marginTop: 12,
+    fontSize: 12,
+    letterSpacing: 1.5,
+  },
   splitWrapper: {
     flex: 1,
   },
@@ -294,12 +475,12 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.forestDarker,
     justifyContent: 'center',
     alignItems: 'center',
-    padding: 16,
+    padding: 12,
   },
   rightViewport: {
     flex: 0.4,
     backgroundColor: COLORS.forestDeep,
-    padding: 16,
+    padding: 14,
     borderLeftWidth: 2,
     borderColor: COLORS.brass,
     justifyContent: 'space-between',
@@ -308,7 +489,7 @@ const styles = StyleSheet.create({
   /* COMPASS STYLING */
   compassRim: {
     backgroundColor: COLORS.brassDark,
-    padding: 12,
+    padding: 10,
     borderWidth: 2,
     borderColor: COLORS.brass,
     justifyContent: 'center',
@@ -344,15 +525,15 @@ const styles = StyleSheet.create({
   /* TELEMETRY / ODOMETER */
   telemetryGroup: {
     alignItems: 'center',
-    marginTop: 12,
+    marginTop: 10,
   },
   odometerContainer: {
     flexDirection: 'row',
     alignItems: 'center',
   },
   odometerBox: {
-    width: 26,
-    height: 38,
+    width: 24,
+    height: 36,
     backgroundColor: '#161511',
     borderWidth: 1,
     borderColor: COLORS.brass,
@@ -372,16 +553,16 @@ const styles = StyleSheet.create({
   },
   odometerText: {
     color: COLORS.parchment,
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: 'bold',
     fontFamily: 'Courier',
   },
   targetSubtext: {
     color: COLORS.brass,
     fontSize: 9,
-    letterSpacing: 3,
+    letterSpacing: 2.5,
     fontFamily: 'Courier',
-    marginTop: 6,
+    marginTop: 4,
     fontWeight: '600',
   },
 
@@ -389,7 +570,7 @@ const styles = StyleSheet.create({
   sectionHeaderRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 10,
+    marginBottom: 8,
   },
   starIconBox: {
     marginRight: 6,
@@ -411,7 +592,7 @@ const styles = StyleSheet.create({
   clueCard: {
     backgroundColor: COLORS.parchment2,
     borderRadius: 4,
-    padding: 14,
+    padding: 12,
     borderTopWidth: 3,
     borderTopColor: COLORS.brass,
     elevation: 4,
@@ -420,17 +601,25 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.3,
     shadowRadius: 3,
   },
+  clueTitle: {
+    color: COLORS.ink,
+    fontSize: 12,
+    fontWeight: 'bold',
+    fontFamily: 'Courier',
+    marginBottom: 4,
+    textTransform: 'uppercase',
+  },
   clueBody: {
     color: COLORS.ink,
-    fontSize: 13,
+    fontSize: 12,
     fontStyle: 'italic',
-    lineHeight: 18,
+    lineHeight: 16,
   },
   clueAuthor: {
     color: COLORS.inkSoft,
-    fontSize: 11,
+    fontSize: 10,
     textAlign: 'right',
-    marginTop: 8,
+    marginTop: 6,
     fontFamily: 'Courier',
   },
 
@@ -441,11 +630,11 @@ const styles = StyleSheet.create({
   alertCard: {
     backgroundColor: COLORS.sienna,
     borderRadius: 4,
-    padding: 12,
+    padding: 10,
     borderWidth: 1,
     borderColor: COLORS.parchment,
     borderStyle: 'dashed',
-    marginBottom: 12,
+    marginBottom: 8,
   },
   alertCardSuccess: {
     backgroundColor: COLORS.forestDarker,
@@ -455,26 +644,26 @@ const styles = StyleSheet.create({
   alertHeaderRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 4,
+    marginBottom: 2,
   },
   alertTitle: {
     color: COLORS.white,
     fontWeight: 'bold',
-    fontSize: 11,
-    letterSpacing: 1.5,
+    fontSize: 10,
+    letterSpacing: 1.2,
     marginLeft: 6,
     fontFamily: 'Courier',
   },
   alertSub: {
     color: COLORS.parchment,
-    fontSize: 9,
-    letterSpacing: 1,
+    fontSize: 8.5,
+    letterSpacing: 0.8,
     fontFamily: 'Courier',
   },
   abandonButton: {
     alignSelf: 'flex-end',
-    paddingVertical: 6,
-    paddingHorizontal: 8,
+    paddingVertical: 4,
+    paddingHorizontal: 6,
   },
   abandonText: {
     color: COLORS.brass,

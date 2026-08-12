@@ -30,6 +30,7 @@ import {
   orderBy,
   limit,
   onSnapshot,
+  Timestamp,
 } from 'firebase/firestore';
 
 import { auth, db } from '../config/firebase';
@@ -44,7 +45,7 @@ interface Props {
   onNavigate?: (screen: string) => void;
 }
 
-// Custom Vintage Map Styling Matrix (Sepia & Forest Palette)
+// Vintage Map Styling Matrix (Sepia & Forest Palette)
 const VINTAGE_MAP_STYLE = [
   { elementType: 'geometry', stylers: [{ color: '#E8DCC0' }] },
   { elementType: 'labels.text.fill', stylers: [{ color: '#2A2420' }] },
@@ -59,13 +60,28 @@ const VINTAGE_MAP_STYLE = [
 
 const AnimatedTouchableOpacity = Animated.createAnimatedComponent(TouchableOpacity);
 
+/**
+ * Relative Timestamp Formatter for Field Signals
+ */
+const formatRelativeTime = (timestamp?: Timestamp): string => {
+  if (!timestamp) return 'JUST NOW';
+  const now = Date.now();
+  const millis = timestamp.toMillis();
+  const diffInSeconds = Math.floor((now - millis) / 1000);
+
+  if (diffInSeconds < 60) return 'JUST NOW';
+  if (diffInSeconds < 3600) return `${Math.floor(diffInSeconds / 60)}M AGO`;
+  if (diffInSeconds < 86400) return `${Math.floor(diffInSeconds / 3600)}H AGO`;
+  return `${Math.floor(diffInSeconds / 86400)}D AGO`;
+};
+
 export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
   const { width, height } = useWindowDimensions();
   const isLandscape = width > height;
   const insets = useSafeAreaInsets();
   const mapRef = useRef<MapView | null>(null);
 
-  // Firebase singleton instances
+  // Firebase Auth State
   const currentUser = auth.currentUser;
 
   // Real-time Firestore State
@@ -74,7 +90,7 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
   const [activityFeed, setActivityFeed] = useState<ActivityFeedDocument[]>([]);
   const [isLoadingFeed, setIsLoadingFeed] = useState(true);
 
-  // Location & Hardware Telemetry State
+  // Location & Telemetry State
   const [userLocation, setUserLocation] = useState<Location.LocationObject | null>(null);
   const [isInitializingLocation, setIsInitializingLocation] = useState(true);
   const [region, setRegion] = useState<Region>({
@@ -100,7 +116,7 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
   useEffect(() => {
     if (!currentUser) return;
 
-    // A. User Profile Subscription (Score & Rank)
+    // A. User Profile Subscription (Score, Rank, & Telemetry Settings)
     const userDocRef = doc(db, 'users', currentUser.uid);
     const unsubscribeUser = onSnapshot(userDocRef, (snapshot) => {
       if (snapshot.exists()) {
@@ -108,7 +124,7 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
       }
     });
 
-    // B. Active Field Treasures Subscription (Non-archived)
+    // B. Active Field Treasures Subscription (Non-archived Caches)
     const treasuresQuery = query(
       collection(db, 'treasures'),
       where('isArchived', '==', false)
@@ -143,11 +159,11 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
       unsubscribeTreasures();
       unsubscribeActivity();
     };
-  }, [currentUser, db]);
+  }, [currentUser]);
 
   // 3. Location Telemetry Lifecycle
   useEffect(() => {
-    // Pulse animation for radar status badge
+    // Pulse animation for satellite status indicator badge
     pulseOpacity.value = withRepeat(
       withSequence(
         withTiming(0.3, { duration: 1000 }),
@@ -165,7 +181,7 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
         if (status !== 'granted') {
           Alert.alert(
             'GPS PERMISSION REQUIRED',
-            'Treasi requires GPS telemetry to map caches near your vicinity.'
+            'Treasi requires GPS telemetry to display active caches near your current position.'
           );
           setIsInitializingLocation(false);
           return;
@@ -209,7 +225,7 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
     };
   }, []);
 
-  // Animated Component Styles
+  // Reanimated Animated Component Styles
   const animatedButtonStyle = useAnimatedStyle(() => ({
     transform: [{ scale: buttonScale.value }],
   }));
@@ -249,7 +265,6 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
         styles.container,
         {
           flexDirection: isLandscape ? 'row' : 'column',
-          // Edge-to-edge landscape support handling for iPhone Dynamic Island & notch
           paddingLeft: isLandscape ? Math.max(insets.left, 12) : 0,
           paddingRight: isLandscape ? Math.max(insets.right, 12) : 0,
           paddingTop: isLandscape ? 0 : Math.max(insets.top, 12),
@@ -257,7 +272,7 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
         },
       ]}
     >
-      {/* LEFT VIEWPORT: Operational Parchment Canvas (60% Width in Landscape) */}
+      {/* LEFT VIEWPORT: Operational Map Canvas (60% Width in Landscape) */}
       <View style={isLandscape ? styles.leftViewportLandscape : styles.leftViewportPortrait}>
         <MapView
           ref={mapRef}
@@ -267,8 +282,8 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
           customMapStyle={VINTAGE_MAP_STYLE}
           showsUserLocation={true}
           showsCompass={false}
-          accessibilityLabel="Scavenger Hunt Map Canvas"
-          accessibilityHint="Displays your real-time position and nearby hidden field treasures"
+          accessibilityLabel="Scavenger Hunt Field Map Canvas"
+          accessibilityHint="Displays active user position and nearby hidden field treasures"
         >
           {activeTreasures.map((treasure) => (
             <Marker
@@ -378,7 +393,7 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
                       <Ionicons name="radio-outline" size={12} color="#A64B2A" style={{ marginRight: 4 }} />
                       <Text style={styles.signalAuthor}>{item.username.toUpperCase()}</Text>
                     </View>
-                    <Text style={styles.signalTypeTag}>{item.type.replace('_', ' ')}</Text>
+                    <Text style={styles.signalTimeTag}>{formatRelativeTime(item.createdAt)}</Text>
                   </View>
                   <Text style={styles.signalBody}>{item.message}</Text>
                 </Animated.View>
@@ -612,7 +627,7 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     fontSize: 10,
   },
-  signalTypeTag: {
+  signalTimeTag: {
     color: '#8C8275',
     fontSize: 8,
     fontWeight: 'bold',
@@ -635,7 +650,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     marginBottom: 8,
-    minHeight: 48, // Standard touch-target size requirement
+    minHeight: 48,
   },
   stampButtonText: {
     color: '#F3ECD8',
