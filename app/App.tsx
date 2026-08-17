@@ -111,7 +111,7 @@ function MainNavigator() {
         } else {
           setCurrentScreen('DASHBOARD');
         }
-      }, 2400);
+      }, 7500);
       return () => clearTimeout(timer);
     }
   }, [currentScreen, skipOnboardingToggle, bypassAuthToggle]);
@@ -121,8 +121,8 @@ function MainNavigator() {
       <Suspense 
         fallback={
           <View style={styles.loadingState}>
-            <Text style={styles.loadingPrefix}>[ INSTRUMENT CALIBRATING ]</Text>
-            <Text style={styles.loadingText}>INITIALIZING INSTRUMENT MODULE...</Text>
+            <Text style={styles.loadingPrefix}>Loading...</Text>
+            <Text style={styles.loadingText}>Please Wait</Text>
           </View>
         }
       >
