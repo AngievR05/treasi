@@ -17,6 +17,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { doc, updateDoc, serverTimestamp } from 'firebase/firestore';
+import { signOut, updateProfile } from 'firebase/auth';
 import { db, auth } from '../config/firebase';
 import { FieldNavBar, NavigationTab } from '../components/FieldNavBar';
 import { UserDocument } from '../types/firestore';
@@ -26,6 +27,7 @@ interface ProfileSettingsScreenProps {
   onSignOut: () => void;
   onNavigate?: (tab: NavigationTab) => void;
   userData?: UserDocument | null;
+  isLoadingUserData?: boolean;
   onUpdateUserSettings?: (updatedFields: Partial<UserDocument>) => Promise<void>;
 }
 
@@ -34,19 +36,19 @@ export const ProfileSettingsScreen: React.FC<ProfileSettingsScreenProps> = ({
   onSignOut,
   onNavigate,
   userData,
+  isLoadingUserData = false,
   onUpdateUserSettings,
 }) => {
   const insets = useSafeAreaInsets();
   const { width, height } = useWindowDimensions();
-
-  // Screen Orientation Detection for Dynamic Landscape Layouts
   const isLandscape = width > height;
 
-  // Persistence & Loading States
+  // Operational States
   const [isSaving, setIsSaving] = useState<boolean>(false);
+  const [isLoggingOut, setIsLoggingOut] = useState<boolean>(false);
   const [isEditing, setIsEditing] = useState<boolean>(false);
 
-  // Calibration Array Toggles - Strictly Default OFF (false)
+  // Calibration Array Toggles - Strictly Synced from User Document (Default: OFF / false)
   const [hapticTriggers, setHapticTriggers] = useState<boolean>(false);
   const [sensorSensitivity, setSensorSensitivity] = useState<boolean>(false);
   const [batteryOptimize, setBatteryOptimize] = useState<boolean>(false);
@@ -61,9 +63,8 @@ export const ProfileSettingsScreen: React.FC<ProfileSettingsScreenProps> = ({
   // Micro-interaction Tactile Animation References
   const editBtnScale = useRef(new Animated.Value(1)).current;
   const signOutBtnScale = useRef(new Animated.Value(1)).current;
-  const consolePulse = useRef(new Animated.Value(1)).current;
 
-  // Sync state dynamically when live userData document resolves from Firestore
+  // Dynamic state synchronization directly from authenticated user profile source
   useEffect(() => {
     if (userData) {
       setHapticTriggers(userData.hapticFeedbackEnabled ?? false);
@@ -73,9 +74,9 @@ export const ProfileSettingsScreen: React.FC<ProfileSettingsScreenProps> = ({
       setTelemetryEnabled(userData.telemetryEnabled ?? false);
       setSkipOnboardingAuthFlow(userData.skipOnboardingAuthFlow ?? false);
 
-      const resolvedName = userData.username || 'EXPLORER UNKNOWN';
-      setAgentName(resolvedName);
-      setHandle(`@${resolvedName.toLowerCase().replace(/\s+/g, '_')}`);
+      const activeName = userData.username || auth.currentUser?.displayName || 'UNREGISTERED_AGENT';
+      setAgentName(activeName);
+      setHandle(`@${activeName.toLowerCase().replace(/\s+/g, '_')}`);
     }
   }, [userData]);
 
@@ -100,8 +101,8 @@ export const ProfileSettingsScreen: React.FC<ProfileSettingsScreenProps> = ({
   };
 
   /**
-   * Unified Firestore Mutation Fallback
-   * Attempts parent prop persistence first, falling back to direct Firestore updateDoc
+   * Unified Firestore Settings Mutation
+   * Executes parent callback or directly updates current user document in Firestore
    */
   const persistUserFields = useCallback(
     async (fields: Partial<UserDocument>) => {
@@ -112,7 +113,7 @@ export const ProfileSettingsScreen: React.FC<ProfileSettingsScreenProps> = ({
         } else {
           const currentUid = userData?.uid || auth.currentUser?.uid;
           if (!currentUid) {
-            throw new Error('No authenticated user session found.');
+            throw new Error('No authenticated Firebase user session found.');
           }
           const userRef = doc(db, 'users', currentUid);
           await updateDoc(userRef, {
@@ -121,10 +122,10 @@ export const ProfileSettingsScreen: React.FC<ProfileSettingsScreenProps> = ({
           });
         }
       } catch (error: any) {
-        console.error('[FIELD PERSISTENCE ERROR]', error);
+        console.error('[SETTINGS PERSISTENCE ERROR]', error);
         Alert.alert(
-          'CALIBRATION FAILED',
-          'Failed to synchronize telemetry data with Firestore console.'
+          'CALIBRATION ERROR',
+          error?.message || 'Failed to synchronize telemetry settings with Firestore.'
         );
       } finally {
         setIsSaving(false);
@@ -141,13 +142,10 @@ export const ProfileSettingsScreen: React.FC<ProfileSettingsScreenProps> = ({
     value: boolean,
     setter: (val: boolean) => void
   ) => {
-    // Optimistic local update
     setter(value);
-
     try {
       await persistUserFields({ [key]: value });
     } catch {
-      // Revert on failure
       setter(!value);
     }
   };
@@ -157,18 +155,26 @@ export const ProfileSettingsScreen: React.FC<ProfileSettingsScreenProps> = ({
    */
   const handleSaveProfile = () => {
     triggerPressAnimation(editBtnScale, async () => {
-      if (agentName.trim().length === 0) {
+      const cleanUsername = agentName.trim();
+      if (cleanUsername.length === 0) {
         Alert.alert('INVALID CALLSIGN', 'Agent callsign cannot be empty.');
         return;
       }
 
-      const cleanUsername = agentName.trim();
-      await persistUserFields({
-        username: cleanUsername,
-      });
-
-      setHandle(`@${cleanUsername.toLowerCase().replace(/\s+/g, '_')}`);
-      setIsEditing(false);
+      try {
+        setIsSaving(true);
+        // Sync Firebase Auth profile display name if user is authenticated
+        if (auth.currentUser) {
+          await updateProfile(auth.currentUser, { displayName: cleanUsername });
+        }
+        await persistUserFields({ username: cleanUsername });
+        setHandle(`@${cleanUsername.toLowerCase().replace(/\s+/g, '_')}`);
+        setIsEditing(false);
+      } catch (error: any) {
+        Alert.alert('PROFILE UPDATE ERROR', error.message || 'Failed to update user profile.');
+      } finally {
+        setIsSaving(false);
+      }
     });
   };
 
@@ -178,22 +184,53 @@ export const ProfileSettingsScreen: React.FC<ProfileSettingsScreenProps> = ({
     });
   };
 
+  /**
+   * Firebase Authentication Logout Process
+   */
   const handleSignOutPress = () => {
-    triggerPressAnimation(signOutBtnScale, () => {
-      onSignOut();
-    });
+    if (isLoggingOut) return;
+
+    Alert.alert(
+      'TERMINATE SESSION',
+      'Are you sure you want to sign out of Treasi?',
+      [
+        { text: 'CANCEL', style: 'cancel' },
+        {
+          text: 'LOGOUT',
+          style: 'destructive',
+          onPress: () => {
+            triggerPressAnimation(signOutBtnScale, async () => {
+              try {
+                setIsLoggingOut(true);
+                await signOut(auth);
+                onSignOut();
+              } catch (error: any) {
+                console.error('[SIGNOUT ERROR]', error);
+                Alert.alert('LOGOUT FAILED', error.message || 'Could not sign out user.');
+              } finally {
+                setIsLoggingOut(false);
+              }
+            });
+          },
+        },
+      ]
+    );
   };
 
-  // Dynamic formatting derived from live Firestore User Document
+  // Live Firestore Metadata Formatting
   const formatMemberSince = (): string => {
-    if (!userData?.createdAt) return 'NOV 2025';
+    if (!userData?.createdAt) return 'N/A';
     try {
-      const date = userData.createdAt.toDate ? userData.createdAt.toDate() : new Date();
+      const date =
+        typeof userData.createdAt.toDate === 'function'
+          ? userData.createdAt.toDate()
+          : new Date(userData.createdAt as any);
+      if (isNaN(date.getTime())) return 'N/A';
       const month = date.toLocaleString('default', { month: 'short' }).toUpperCase();
       const year = date.getFullYear();
       return `${month} ${year}`;
     } catch {
-      return 'NOV 2025';
+      return 'N/A';
     }
   };
 
@@ -203,6 +240,19 @@ export const ProfileSettingsScreen: React.FC<ProfileSettingsScreenProps> = ({
     if (points >= 100) return 'TRAILBLAZER III';
     return 'RECON SCOUT';
   };
+
+  const currentEmail = userData?.email || auth.currentUser?.email || 'N/A';
+  const currentUid = userData?.uid || auth.currentUser?.uid || 'N/A';
+
+  // Loading state guard preventing rendering of unauthenticated or fake profile views
+  if (isLoadingUserData && !userData) {
+    return (
+      <View style={[styles.safeAreaContainer, styles.centeredLoading]}>
+        <ActivityIndicator size="large" color="#B08D57" />
+        <Text style={styles.loadingText}>FETCHING AGENT PROFILE...</Text>
+      </View>
+    );
+  }
 
   return (
     <View
@@ -217,28 +267,23 @@ export const ProfileSettingsScreen: React.FC<ProfileSettingsScreenProps> = ({
       ]}
     >
       <View style={[styles.splitWrapper, !isLandscape && styles.portraitWrapper]}>
-        {/* ============================================================ */}
-        {/* LEFT VIEWPORT: FIELD IDENTITY LOG CARD (PARCHMENT - 58%)     */}
-        {/* ============================================================ */}
+        {/* LEFT VIEWPORT: FIELD IDENTITY LOG CARD */}
         <View style={styles.leftViewport}>
           <View style={styles.cardInnerBorder}>
-            {/* Header Identity Bar */}
             <View style={styles.cardHeader}>
               <View style={styles.headerTitleGroup}>
                 <Ionicons name="document-text-outline" size={13} color="#2A2420" />
                 <Text style={styles.headerTitle}> FIELD IDENTITY LOG</Text>
               </View>
               <Text style={styles.headerTag}>
-                UID: {userData?.uid ? `${userData.uid.substring(0, 6).toUpperCase()}` : 'T-5100'}
+                UID: {currentUid !== 'N/A' ? currentUid.substring(0, 6).toUpperCase() : 'N/A'}
               </Text>
             </View>
 
-            {/* Main Agent Details */}
             <View style={styles.identityRow}>
               <View style={styles.avatarBox}>
                 <Ionicons name="person" size={32} color="#E8DCC0" />
               </View>
-
               <View style={styles.identityDetails}>
                 {isEditing ? (
                   <View style={styles.editInputGroup}>
@@ -251,35 +296,22 @@ export const ProfileSettingsScreen: React.FC<ProfileSettingsScreenProps> = ({
                       autoCapitalize="characters"
                       accessible={true}
                       accessibilityLabel="Agent Callsign Input"
-                      accessibilityHint="Enter custom field callsign"
-                    />
-                    <TextInput
-                      style={[styles.textInput, styles.handleInput]}
-                      value={handle}
-                      onChangeText={setHandle}
-                      placeholder="@handle"
-                      placeholderTextColor="#8C7A6B"
-                      autoCapitalize="none"
-                      accessible={true}
-                      accessibilityLabel="Agent Handle Input"
-                      accessibilityHint="Enter handle starting with at symbol"
                     />
                   </View>
                 ) : (
                   <>
                     <Text style={styles.agentName} numberOfLines={1}>
-                      {agentName || 'EXPLORER UNKNOWN'}
+                      {agentName || 'UNREGISTERED_AGENT'}
                     </Text>
                     <Text style={styles.handleText} numberOfLines={1}>
-                      {handle || '@explorer'}
+                      {handle || '@unregistered'}
                     </Text>
                   </>
                 )}
-
                 <View style={styles.badgeContainer}>
                   <Ionicons name="shield-checkmark" size={10} color="#F3ECD8" style={styles.badgeIcon} />
                   <Text style={styles.badgeText}>
-                    {calculateBadgeRank(userData?.totalPoints)}
+                    {calculateBadgeRank(userData?.totalPoints ?? 0)}
                   </Text>
                 </View>
               </View>
@@ -287,13 +319,11 @@ export const ProfileSettingsScreen: React.FC<ProfileSettingsScreenProps> = ({
 
             <View style={styles.dashedDivider} />
 
-            {/* Live Firestore Metadata Grid */}
             <View style={styles.metaGrid}>
               <View style={styles.metaRow}>
                 <Text style={styles.metaKey}>MEMBER SINCE</Text>
                 <Text style={styles.metaVal}>{formatMemberSince()}</Text>
               </View>
-
               <View style={styles.metaRow}>
                 <Text style={styles.metaKey}>FIELD PERMIT</Text>
                 <View style={styles.permitStarRow}>
@@ -306,26 +336,18 @@ export const ProfileSettingsScreen: React.FC<ProfileSettingsScreenProps> = ({
                   </Text>
                 </View>
               </View>
-
               <View style={styles.metaRow}>
                 <Text style={styles.metaKey}>EXP POINTS</Text>
                 <Text style={styles.metaVal}>{userData?.totalPoints ?? 0} PTS</Text>
               </View>
-
-              <View style={styles.metaRow}>
-                <Text style={styles.metaKey}>SECTOR</Text>
-                <Text style={styles.metaVal}>OPEN WINDOW HQ</Text>
-              </View>
-
               <View style={styles.metaRow}>
                 <Text style={styles.metaKey}>EMAIL</Text>
                 <Text style={styles.metaVal} numberOfLines={1}>
-                  {userData?.email || 'N/A'}
+                  {currentEmail}
                 </Text>
               </View>
             </View>
 
-            {/* Action Trigger: Edit/Save Profile Button */}
             <Animated.View style={{ transform: [{ scale: editBtnScale }] }}>
               <TouchableOpacity
                 style={styles.editProfileButton}
@@ -335,7 +357,6 @@ export const ProfileSettingsScreen: React.FC<ProfileSettingsScreenProps> = ({
                 accessible={true}
                 accessibilityRole="button"
                 accessibilityLabel={isEditing ? 'Save identity record' : 'Edit identity details'}
-                accessibilityHint="Toggles input mode to edit agent callsign"
               >
                 {isSaving ? (
                   <ActivityIndicator size="small" color="#2A2420" />
@@ -357,15 +378,12 @@ export const ProfileSettingsScreen: React.FC<ProfileSettingsScreenProps> = ({
           </View>
         </View>
 
-        {/* ============================================================ */}
-        {/* RIGHT VIEWPORT: SYSTEM CALIBRATION CONSOLE (DARK - 42%)     */}
-        {/* ============================================================ */}
+        {/* RIGHT VIEWPORT: SYSTEM CALIBRATION CONSOLE */}
         <View style={styles.rightViewport}>
           <ScrollView
             showsVerticalScrollIndicator={false}
             contentContainerStyle={styles.scrollContent}
           >
-            {/* Console Header */}
             <View style={styles.panelHeaderRow}>
               <Ionicons name="hardware-chip-outline" size={11} color="#A64B2A" />
               <Text style={styles.panelTitle}> CALIBRATION ARRAY</Text>
@@ -504,14 +522,20 @@ export const ProfileSettingsScreen: React.FC<ProfileSettingsScreenProps> = ({
               <TouchableOpacity
                 style={styles.signOutButton}
                 activeOpacity={0.8}
+                disabled={isLoggingOut}
                 onPress={handleSignOutPress}
                 accessible={true}
                 accessibilityRole="button"
                 accessibilityLabel="Logout Session"
-                accessibilityHint="Logs out of current explorer field session"
               >
-                <Ionicons name="log-out-outline" size={13} color="#F3ECD8" />
-                <Text style={styles.signOutText}>LOGOUT SESSION</Text>
+                {isLoggingOut ? (
+                  <ActivityIndicator size="small" color="#F3ECD8" />
+                ) : (
+                  <>
+                    <Ionicons name="log-out-outline" size={13} color="#F3ECD8" />
+                    <Text style={styles.signOutText}>LOGOUT SESSION</Text>
+                  </>
+                )}
               </TouchableOpacity>
             </Animated.View>
 
@@ -547,7 +571,18 @@ const fontMonospace = Platform.OS === 'ios' ? 'Courier' : 'monospace';
 const styles = StyleSheet.create({
   safeAreaContainer: {
     flex: 1,
-    backgroundColor: '#1E281F', // Forest Deep Chassis
+    backgroundColor: '#1E281F',
+  },
+  centeredLoading: {
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  loadingText: {
+    fontFamily: fontMonospace,
+    color: '#E8DCC0',
+    fontSize: 11,
+    marginTop: 10,
+    letterSpacing: 1,
   },
   splitWrapper: {
     flex: 1,
@@ -555,24 +590,20 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     overflow: 'hidden',
     borderWidth: 2,
-    borderColor: '#B08D57', // Brass Trim
+    borderColor: '#B08D57',
   },
   portraitWrapper: {
     flexDirection: 'column',
   },
-
-  /* ============================================================ */
-  /* LEFT VIEWPORT (PARCHMENT CARD - 58%)                         */
-  /* ============================================================ */
   leftViewport: {
     flex: 0.58,
-    backgroundColor: '#E8DCC0', // Vintage Parchment
+    backgroundColor: '#E8DCC0',
     padding: 8,
   },
   cardInnerBorder: {
     flex: 1,
     borderWidth: 1,
-    borderColor: '#2A2420', // Ink Black
+    borderColor: '#2A2420',
     padding: 8,
     justifyContent: 'space-between',
   },
@@ -645,14 +676,11 @@ const styles = StyleSheet.create({
     color: '#2A2420',
     marginBottom: 2,
   },
-  handleInput: {
-    fontSize: 8.5,
-  },
   badgeContainer: {
     flexDirection: 'row',
     alignItems: 'center',
     alignSelf: 'flex-start',
-    backgroundColor: '#A64B2A', // Sienna Accent
+    backgroundColor: '#A64B2A',
     paddingVertical: 2,
     paddingHorizontal: 5,
     borderRadius: 6,
@@ -723,13 +751,9 @@ const styles = StyleSheet.create({
     color: '#2A2420',
     letterSpacing: 0.8,
   },
-
-  /* ============================================================ */
-  /* RIGHT VIEWPORT (DARK CONSOLE - 42%)                          */
-  /* ============================================================ */
   rightViewport: {
     flex: 0.42,
-    backgroundColor: '#2C3B2E', // Forest Chassis Deep
+    backgroundColor: '#2C3B2E',
     borderLeftWidth: 2,
     borderColor: '#B08D57',
     padding: 6,

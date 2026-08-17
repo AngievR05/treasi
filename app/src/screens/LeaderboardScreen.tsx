@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
   Text,
@@ -23,21 +23,21 @@ import Animated, {
   withSpring,
 } from 'react-native-reanimated';
 import Svg, { Path, Circle, Polyline } from 'react-native-svg';
-import { 
-  collection, 
-  query, 
-  orderBy, 
-  limit, 
-  onSnapshot, 
-  doc, 
-  setDoc, 
-  addDoc, 
+import {
+  collection,
+  query,
+  orderBy,
+  limit,
+  onSnapshot,
+  doc,
+  setDoc,
+  addDoc,
   deleteDoc,
   updateDoc,
-  where, 
-  getDocs, 
+  where,
+  getDocs,
   Timestamp,
-  GeoPoint
+  GeoPoint,
 } from 'firebase/firestore';
 import { auth, db } from '../config/firebase';
 import { UserDocument, FriendshipDocument } from '../types/firestore';
@@ -104,15 +104,16 @@ interface NearbyExplorer {
   uid: string;
   name: string;
   initial: string;
-  distanceKm: number;
+  distanceKm: number | null;
   distanceFormatted: string;
+  hasValidLocation: boolean;
   friendMeta?: FriendshipMeta;
 }
 
 interface Props {
   onBack?: () => void;
   onNavigate?: (tab: string) => void;
-  userCoordinates?: { latitude: number; longitude: number };
+  userCoordinates?: { latitude: number; longitude: number } | null;
 }
 
 // 20km Haversine Distance Calculator
@@ -122,7 +123,7 @@ const calculateHaversineDistanceKm = (
   lat2: number,
   lon2: number
 ): number => {
-  const R = 6371; // Earth radius in kilometers
+  const R = 6371; // Earth's radius in kilometers
   const dLat = ((lat2 - lat1) * Math.PI) / 180;
   const dLon = ((lon2 - lon1) * Math.PI) / 180;
   const a =
@@ -135,14 +136,18 @@ const calculateHaversineDistanceKm = (
   return R * c;
 };
 
-export const LeaderboardScreen: React.FC<Props> = ({ 
+// Generates deterministic document ID to avoid duplicate relationships
+const getDeterministicFriendshipId = (uid1: string, uid2: string): string => {
+  return [uid1, uid2].sort().join('_');
+};
+
+export const LeaderboardScreen: React.FC<Props> = ({
   onNavigate,
-  userCoordinates = { latitude: -25.7479, longitude: 28.2293 } // Default campus base
+  userCoordinates = null,
 }) => {
   const insets = useSafeAreaInsets();
-  const { width, height } = useWindowDimensions();
+  const { width } = useWindowDimensions();
   const currentTab: NavigationTab = 'LEADERBOARD';
-
   const currentUser = auth?.currentUser;
   const currentUserId = currentUser?.uid || '';
 
@@ -153,7 +158,7 @@ export const LeaderboardScreen: React.FC<Props> = ({
   const [searchAgentTag, setSearchAgentTag] = useState('');
   const [searchError, setSearchError] = useState('');
 
-  // Firestore Realtime Collections State
+  // Firestore Realtime State
   const [manifest, setManifest] = useState<ExplorerEntry[]>([]);
   const [nearbyExplorers, setNearbyExplorers] = useState<NearbyExplorer[]>([]);
   const [friendshipsMap, setFriendshipsMap] = useState<Record<string, FriendshipMeta>>({});
@@ -167,8 +172,12 @@ export const LeaderboardScreen: React.FC<Props> = ({
     transform: [{ scale: buttonScale.value }],
   }));
 
-  const handlePressIn = () => { buttonScale.value = withSpring(0.95); };
-  const handlePressOut = () => { buttonScale.value = withSpring(1); };
+  const handlePressIn = () => {
+    buttonScale.value = withSpring(0.95);
+  };
+  const handlePressOut = () => {
+    buttonScale.value = withSpring(1);
+  };
 
   /**
    * 1. READ: LISTEN TO GLOBAL LEADERBOARD MANIFEST
@@ -178,37 +187,39 @@ export const LeaderboardScreen: React.FC<Props> = ({
       setLoadingManifest(false);
       return;
     }
-
     const leaderboardQuery = query(
       collection(db, 'users'),
       orderBy('totalPoints', 'desc'),
       limit(50)
     );
 
-    const unsubscribe = onSnapshot(leaderboardQuery, (snapshot) => {
-      const entries: ExplorerEntry[] = snapshot.docs.map((docSnap, index) => {
-        const data = docSnap.data() as UserDocument;
-        const isUser = docSnap.id === currentUserId;
-        const rankFormatted = String(index + 1).padStart(2, '0');
-        const formattedName = isUser 
-          ? `YOU - ${data.username?.toUpperCase() || 'EXPLORER'}`
-          : (data.username?.toUpperCase() || 'UNKNOWN_AGENT');
+    const unsubscribe = onSnapshot(
+      leaderboardQuery,
+      (snapshot) => {
+        const entries: ExplorerEntry[] = snapshot.docs.map((docSnap, index) => {
+          const data = docSnap.data() as UserDocument;
+          const isUser = docSnap.id === currentUserId;
+          const rankFormatted = String(index + 1).padStart(2, '0');
+          const formattedName = isUser
+            ? `YOU - ${data.username?.toUpperCase() || 'EXPLORER'}`
+            : data.username?.toUpperCase() || 'UNKNOWN_AGENT';
 
-        return {
-          uid: docSnap.id,
-          rank: rankFormatted,
-          name: formattedName,
-          points: (data.totalPoints || 0).toLocaleString(),
-          isUser,
-        };
-      });
-
-      setManifest(entries);
-      setLoadingManifest(false);
-    }, (err) => {
-      console.error("Leaderboard Snapshot Error:", err);
-      setLoadingManifest(false);
-    });
+          return {
+            uid: docSnap.id,
+            rank: rankFormatted,
+            name: formattedName,
+            points: (data.totalPoints || 0).toLocaleString(),
+            isUser,
+          };
+        });
+        setManifest(entries);
+        setLoadingManifest(false);
+      },
+      (err) => {
+        console.error('Leaderboard Snapshot Error:', err);
+        setLoadingManifest(false);
+      }
+    );
 
     return () => unsubscribe();
   }, [currentUserId]);
@@ -219,13 +230,11 @@ export const LeaderboardScreen: React.FC<Props> = ({
   useEffect(() => {
     if (!db || !currentUserId) return;
 
-    // Outgoing Requests
     const qOutgoing = query(
       collection(db, 'friendships'),
       where('requesterId', '==', currentUserId)
     );
 
-    // Incoming Requests
     const qIncoming = query(
       collection(db, 'friendships'),
       where('receiverId', '==', currentUserId)
@@ -236,10 +245,11 @@ export const LeaderboardScreen: React.FC<Props> = ({
     const unsubOutgoing = onSnapshot(qOutgoing, (snap) => {
       snap.docs.forEach((docSnap) => {
         const data = docSnap.data() as FriendshipDocument;
-        activeMap[data.receiverId] = {
+        const targetId = data.receiverId === currentUserId ? data.requesterId : data.receiverId;
+        activeMap[targetId] = {
           docId: docSnap.id,
           status: data.status,
-          isRequester: true,
+          isRequester: data.requesterId === currentUserId,
         };
       });
       setFriendshipsMap({ ...activeMap });
@@ -248,10 +258,11 @@ export const LeaderboardScreen: React.FC<Props> = ({
     const unsubIncoming = onSnapshot(qIncoming, (snap) => {
       snap.docs.forEach((docSnap) => {
         const data = docSnap.data() as FriendshipDocument;
-        activeMap[data.requesterId] = {
+        const targetId = data.requesterId === currentUserId ? data.receiverId : data.requesterId;
+        activeMap[targetId] = {
           docId: docSnap.id,
           status: data.status,
-          isRequester: false,
+          isRequester: data.requesterId === currentUserId,
         };
       });
       setFriendshipsMap({ ...activeMap });
@@ -264,7 +275,7 @@ export const LeaderboardScreen: React.FC<Props> = ({
   }, [currentUserId]);
 
   /**
-   * 3. READ & FILTER: NEARBY EXPLORERS (STRICT 20KM RADIUS FILTER)
+   * 3. READ & FILTER: NEARBY EXPLORERS (STRICT VERIFIED DATA ONLY)
    */
   useEffect(() => {
     if (!db || !currentUserId) {
@@ -274,60 +285,90 @@ export const LeaderboardScreen: React.FC<Props> = ({
 
     const usersQuery = query(collection(db, 'users'), limit(100));
 
-    const unsubscribe = onSnapshot(usersQuery, (snapshot) => {
-      const filteredList: NearbyExplorer[] = [];
+    const unsubscribe = onSnapshot(
+      usersQuery,
+      (snapshot) => {
+        const parsedList: NearbyExplorer[] = [];
 
-      snapshot.docs.forEach((docSnap) => {
-        if (docSnap.id === currentUserId) return; // Exclude self
+        snapshot.docs.forEach((docSnap) => {
+          if (docSnap.id === currentUserId) return; // Exclude self
 
-        const data = docSnap.data() as any;
-        const rawName = data.username?.toUpperCase() || 'AGENT';
-        
-        // Extract or fallback location coordinates
-        const targetLat = data.location?.latitude ?? (userCoordinates.latitude + (Math.random() * 0.1 - 0.05));
-        const targetLon = data.location?.longitude ?? (userCoordinates.longitude + (Math.random() * 0.1 - 0.05));
+          const data = docSnap.data() as UserDocument & { location?: GeoPoint };
+          const rawName = data.username?.toUpperCase() || 'AGENT';
 
-        const distKm = calculateHaversineDistanceKm(
-          userCoordinates.latitude,
-          userCoordinates.longitude,
-          targetLat,
-          targetLon
-        );
+          let distKm: number | null = null;
+          let distanceFormatted = 'NO SIGNAL';
+          let hasValidLocation = false;
 
-        // STRICT 20KM PROXIMITY RULE
-        if (distKm <= 20.0) {
-          filteredList.push({
-            uid: docSnap.id,
-            name: rawName,
-            initial: rawName.charAt(0) || 'A',
-            distanceKm: distKm,
-            distanceFormatted: distKm < 1 ? `${Math.round(distKm * 1000)} m` : `${distKm.toFixed(1)} km`,
-            friendMeta: friendshipsMap[docSnap.id],
-          });
-        }
-      });
+          // Strictly validate genuine GeoPoint coordinates without dummy fallbacks
+          if (
+            data.location &&
+            typeof data.location.latitude === 'number' &&
+            typeof data.location.longitude === 'number' &&
+            userCoordinates
+          ) {
+            hasValidLocation = true;
+            distKm = calculateHaversineDistanceKm(
+              userCoordinates.latitude,
+              userCoordinates.longitude,
+              data.location.latitude,
+              data.location.longitude
+            );
 
-      // Sort by closest proximity
-      filteredList.sort((a, b) => a.distanceKm - b.distanceKm);
+            distanceFormatted =
+              distKm < 1 ? `${Math.round(distKm * 1000)} m` : `${distKm.toFixed(1)} km`;
+          }
 
-      setNearbyExplorers(filteredList);
-      setLoadingExplorers(false);
-    }, (err) => {
-      console.error("Explorers Snapshot Error:", err);
-      setLoadingExplorers(false);
-    });
+          // Retain unit if within 20km or flag location as unavailable without inventing coordinates
+          if (!hasValidLocation || (distKm !== null && distKm <= 20.0)) {
+            parsedList.push({
+              uid: docSnap.id,
+              name: rawName,
+              initial: rawName.charAt(0) || 'A',
+              distanceKm: distKm,
+              distanceFormatted,
+              hasValidLocation,
+              friendMeta: friendshipsMap[docSnap.id],
+            });
+          }
+        });
+
+        // Sort: Active spatial units within range first, followed by agents without location data
+        parsedList.sort((a, b) => {
+          if (a.hasValidLocation && b.hasValidLocation) {
+            return (a.distanceKm || 0) - (b.distanceKm || 0);
+          }
+          return a.hasValidLocation ? -1 : 1;
+        });
+
+        setNearbyExplorers(parsedList);
+        setLoadingExplorers(false);
+      },
+      (err) => {
+        console.error('Explorers Snapshot Error:', err);
+        setLoadingExplorers(false);
+      }
+    );
 
     return () => unsubscribe();
   }, [currentUserId, userCoordinates, friendshipsMap]);
 
   /**
-   * CREATE: SEND FRIEND LINK REQUEST
+   * CREATE: SEND FRIEND LINK REQUEST (DETERMINISTIC & INVARIANT ENFORCED)
    */
   const handleSendFriendRequest = async (targetUid: string) => {
-    if (!db || !currentUserId) return;
+    if (!db || !currentUserId || targetUid === currentUserId) return;
 
     try {
-      const friendshipId = `${currentUserId}_${targetUid}`;
+      const friendshipId = getDeterministicFriendshipId(currentUserId, targetUid);
+
+      // Verify no duplicate pending or accepted relationship exists
+      const existingMeta = friendshipsMap[targetUid];
+      if (existingMeta && (existingMeta.status === 'pending' || existingMeta.status === 'accepted')) {
+        Alert.alert('LINK ACTIVE', 'A friendship or pending request already exists with this explorer.');
+        return;
+      }
+
       await setDoc(doc(db, 'friendships', friendshipId), {
         friendshipId,
         requesterId: currentUserId,
@@ -337,7 +378,8 @@ export const LeaderboardScreen: React.FC<Props> = ({
         updatedAt: Timestamp.now(),
       } as FriendshipDocument);
     } catch (err) {
-      console.error("Error creating friendship request:", err);
+      console.error('Error creating friendship request:', err);
+      Alert.alert('TRANSMISSION ERROR', 'Failed to issue friend link request.');
     }
   };
 
@@ -352,7 +394,7 @@ export const LeaderboardScreen: React.FC<Props> = ({
         updatedAt: Timestamp.now(),
       });
     } catch (err) {
-      console.error("Error accepting friendship:", err);
+      console.error('Error accepting friendship:', err);
     }
   };
 
@@ -361,20 +403,19 @@ export const LeaderboardScreen: React.FC<Props> = ({
    */
   const handleRemoveFriendship = async (docId: string, agentName: string) => {
     if (!db) return;
-
     Alert.alert(
-      "TERMINATE LINK",
+      'TERMINATE LINK',
       `Are you sure you want to disconnect telemetry link with ${agentName}?`,
       [
-        { text: "CANCEL", style: "cancel" },
+        { text: 'CANCEL', style: 'cancel' },
         {
-          text: "UNLINK",
-          style: "destructive",
+          text: 'UNLINK',
+          style: 'destructive',
           onPress: async () => {
             try {
               await deleteDoc(doc(db, 'friendships', docId));
             } catch (err) {
-              console.error("Error deleting friendship:", err);
+              console.error('Error deleting friendship:', err);
             }
           },
         },
@@ -411,7 +452,7 @@ export const LeaderboardScreen: React.FC<Props> = ({
       setSearchAgentTag('');
       setFriendModalVisible(false);
     } catch (err) {
-      console.error("Error searching agent:", err);
+      console.error('Error searching agent:', err);
       setSearchError('TRANSMISSION FAILED');
     }
   };
@@ -426,7 +467,6 @@ export const LeaderboardScreen: React.FC<Props> = ({
     try {
       const senderName = currentUser?.displayName || 'FIELD_EXPLORER';
 
-      // 1. Write to Message Collection
       await addDoc(collection(db, 'messages'), {
         senderId: currentUserId,
         senderName,
@@ -434,7 +474,6 @@ export const LeaderboardScreen: React.FC<Props> = ({
         createdAt: Timestamp.now(),
       });
 
-      // 2. Log in Activity Feed
       await addDoc(collection(db, 'activity_feed'), {
         userId: currentUserId,
         username: senderName,
@@ -448,7 +487,7 @@ export const LeaderboardScreen: React.FC<Props> = ({
       setIsTransmitting(false);
       setTelegramModalVisible(false);
     } catch (err) {
-      console.error("Error dispatching telegram:", err);
+      console.error('Error dispatching telegram:', err);
       setIsTransmitting(false);
     }
   };
@@ -499,13 +538,11 @@ export const LeaderboardScreen: React.FC<Props> = ({
                 <Text style={[styles.rowText, item.isUser && styles.rowHighlightText, { flex: 0.55 }]} numberOfLines={1}>
                   {item.name}
                 </Text>
-
                 <View style={styles.dotLeaderContainer}>
                   <Text style={styles.dotLeader} numberOfLines={1}>
                     ...................................
                   </Text>
                 </View>
-
                 <Text style={[styles.rowText, item.isUser && styles.rowHighlightText, { flex: 0.3, textAlign: 'right' }]}>
                   {item.points}
                 </Text>
@@ -525,9 +562,8 @@ export const LeaderboardScreen: React.FC<Props> = ({
             </View>
             <Text style={styles.subText}>Active Units Within 20km Radius</Text>
           </View>
-
-          <TouchableOpacity 
-            style={styles.iconAddButton} 
+          <TouchableOpacity
+            style={styles.iconAddButton}
             onPress={() => setFriendModalVisible(true)}
             accessibilityLabel="Link New Explorer Callsign"
             accessibilityRole="button"
@@ -561,17 +597,19 @@ export const LeaderboardScreen: React.FC<Props> = ({
                     </View>
                     <View>
                       <Text style={styles.explorerName}>{item.name}</Text>
-                      <Text style={styles.explorerMeta}>RANGE: {item.distanceFormatted}</Text>
+                      <Text style={[styles.explorerMeta, !item.hasValidLocation && styles.metaUnlinked]}>
+                        RANGE: {item.distanceFormatted}
+                      </Text>
                     </View>
                   </View>
 
                   <View style={styles.cardRight}>
-                    <View style={styles.onlineDot} />
+                    <View style={[styles.onlineDot, !item.hasValidLocation && { backgroundColor: '#8A7B66' }]} />
 
                     {/* Friend Action States */}
                     {!friendMeta && (
-                      <TouchableOpacity 
-                        style={styles.friendActionButton} 
+                      <TouchableOpacity
+                        style={styles.friendActionButton}
                         onPress={() => handleSendFriendRequest(item.uid)}
                         accessibilityLabel={`Send link request to ${item.name}`}
                       >
@@ -581,14 +619,14 @@ export const LeaderboardScreen: React.FC<Props> = ({
 
                     {isIncomingRequest && (
                       <View style={{ flexDirection: 'row', gap: 4 }}>
-                        <TouchableOpacity 
-                          style={[styles.friendActionButton, { backgroundColor: '#4CAF50' }]} 
+                        <TouchableOpacity
+                          style={[styles.friendActionButton, { backgroundColor: '#4CAF50' }]}
                           onPress={() => handleAcceptFriendRequest(friendMeta.docId)}
                         >
                           <UserCheckIcon color="#FFFFFF" size={12} />
                         </TouchableOpacity>
-                        <TouchableOpacity 
-                          style={[styles.friendActionButton, { backgroundColor: '#A64B2A' }]} 
+                        <TouchableOpacity
+                          style={[styles.friendActionButton, { backgroundColor: '#A64B2A' }]}
                           onPress={() => handleRemoveFriendship(friendMeta.docId, item.name)}
                         >
                           <UserXIcon color="#FFFFFF" size={12} />
@@ -597,8 +635,8 @@ export const LeaderboardScreen: React.FC<Props> = ({
                     )}
 
                     {isPending && friendMeta?.isRequester && (
-                      <TouchableOpacity 
-                        style={[styles.friendActionButton, { backgroundColor: '#D9B98A' }]} 
+                      <TouchableOpacity
+                        style={[styles.friendActionButton, { backgroundColor: '#D9B98A' }]}
                         onPress={() => handleRemoveFriendship(friendMeta.docId, item.name)}
                       >
                         <Text style={styles.pendingText}>PENDING</Text>
@@ -606,8 +644,8 @@ export const LeaderboardScreen: React.FC<Props> = ({
                     )}
 
                     {isAccepted && (
-                      <TouchableOpacity 
-                        style={[styles.friendActionButton, { backgroundColor: '#CBBBA0' }]} 
+                      <TouchableOpacity
+                        style={[styles.friendActionButton, { backgroundColor: '#CBBBA0' }]}
                         onPress={() => handleRemoveFriendship(friendMeta.docId, item.name)}
                       >
                         <UserCheckIcon color="#2C3B2E" size={14} />
@@ -648,7 +686,6 @@ export const LeaderboardScreen: React.FC<Props> = ({
               </TouchableOpacity>
             </View>
             <Text style={styles.modalSub}>Send encrypted signal note to active sector agents.</Text>
-
             <TextInput
               style={styles.telegramInput}
               placeholder="Type dispatch message..."
@@ -657,7 +694,6 @@ export const LeaderboardScreen: React.FC<Props> = ({
               value={telegramText}
               onChangeText={setTelegramText}
             />
-
             <TouchableOpacity
               style={[styles.sendButton, isTransmitting && { opacity: 0.6 }]}
               onPress={handleDispatchTelegram}
@@ -687,9 +723,7 @@ export const LeaderboardScreen: React.FC<Props> = ({
               </TouchableOpacity>
             </View>
             <Text style={styles.modalSub}>Enter agent callsign tag (e.g., wilder_wren)</Text>
-
             {searchError ? <Text style={styles.errorText}>{searchError}</Text> : null}
-
             <TextInput
               style={styles.tagInput}
               placeholder="AGENT_CALLSIGN"
@@ -701,7 +735,6 @@ export const LeaderboardScreen: React.FC<Props> = ({
                 setSearchError('');
               }}
             />
-
             <TouchableOpacity style={styles.sendButton} onPress={handleSearchAndLinkAgent}>
               <UserPlusIcon color="#F3ECD8" size={16} />
               <Text style={styles.sendButtonText}>SEND LINK REQUEST</Text>
@@ -893,6 +926,10 @@ const styles = StyleSheet.create({
     color: '#6E6152',
     fontSize: 8,
     marginTop: 1,
+  },
+  metaUnlinked: {
+    color: '#A64B2A',
+    fontWeight: 'bold',
   },
   cardRight: {
     flexDirection: 'row',
