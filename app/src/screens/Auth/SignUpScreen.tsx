@@ -13,7 +13,11 @@ import {
   ScrollView,
   Switch,
 } from 'react-native';
-import { createUserWithEmailAndPassword } from 'firebase/auth';
+import { 
+  createUserWithEmailAndPassword, 
+  updateProfile, 
+  deleteUser 
+} from 'firebase/auth';
 import { doc, setDoc, serverTimestamp } from 'firebase/firestore';
 import { auth, db } from '../../config/firebase';
 import { UserDocument } from '../../types/firestore';
@@ -27,13 +31,21 @@ export const SignUpScreen: React.FC<Props> = ({ onNavigateLogin, onSignUpSuccess
   const { width, height } = useWindowDimensions();
   const isLandscape = width > height;
 
-  // Primary Input States
+  // Unmount Safety Tracker
+  const isMounted = useRef(true);
+  useEffect(() => {
+    return () => {
+      isMounted.current = false;
+    };
+  }, []);
+
+  // Input States
   const [callsign, setCallsign] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
 
-  // Pre-Configuration Telemetry Toggles (Strictly defaulted to OFF / false)
+  // Hardware & Calibration Toggles (Default: false / OFF)
   const [telemetryEnabled, setTelemetryEnabled] = useState(false);
   const [hapticFeedbackEnabled, setHapticFeedbackEnabled] = useState(false);
   const [motionSensitivityEnabled, setMotionSensitivityEnabled] = useState(false);
@@ -41,7 +53,7 @@ export const SignUpScreen: React.FC<Props> = ({ onNavigateLogin, onSignUpSuccess
   const [nightModeEnabled, setNightModeEnabled] = useState(false);
   const [skipOnboardingAuthFlow, setSkipOnboardingAuthFlow] = useState(false);
 
-  // Interface & Processing State
+  // Processing & Feedback State
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
@@ -50,7 +62,6 @@ export const SignUpScreen: React.FC<Props> = ({ onNavigateLogin, onSignUpSuccess
   const fadeErrorAnim = useRef(new Animated.Value(0)).current;
   const screenFadeAnim = useRef(new Animated.Value(0)).current;
 
-  // Screen Mount Entrance Tween
   useEffect(() => {
     Animated.timing(screenFadeAnim, {
       toValue: 1,
@@ -59,7 +70,6 @@ export const SignUpScreen: React.FC<Props> = ({ onNavigateLogin, onSignUpSuccess
     }).start();
   }, [screenFadeAnim]);
 
-  // Micro-interaction: Button Spring Tween
   const animateButtonPress = (toValue: number) => {
     Animated.spring(scaleAnim, {
       toValue,
@@ -69,7 +79,6 @@ export const SignUpScreen: React.FC<Props> = ({ onNavigateLogin, onSignUpSuccess
     }).start();
   };
 
-  // Error Display Tween
   const displayError = (msg: string) => {
     setErrorMessage(msg);
     fadeErrorAnim.setValue(0);
@@ -85,13 +94,25 @@ export const SignUpScreen: React.FC<Props> = ({ onNavigateLogin, onSignUpSuccess
     fadeErrorAnim.setValue(0);
   };
 
-  // Firebase Pipeline Operations
   const handleRegister = async () => {
     clearError();
 
-    // Data Validation
-    if (!callsign.trim() || !email.trim() || !password || !confirmPassword) {
-      displayError('ALL FIELD COORDINATES ARE REQUIRED');
+    const formattedCallsign = callsign.trim().toUpperCase();
+    const formattedEmail = email.trim().toLowerCase();
+
+    // 1. Local Validation Steps
+    if (!formattedCallsign) {
+      displayError('CALLSIGN / USERNAME IS REQUIRED');
+      return;
+    }
+
+    if (!formattedEmail) {
+      displayError('EMAIL COORDINATE IS REQUIRED');
+      return;
+    }
+
+    if (!password || !confirmPassword) {
+      displayError('PASSCODE COORDINATES ARE REQUIRED');
       return;
     }
 
@@ -106,44 +127,60 @@ export const SignUpScreen: React.FC<Props> = ({ onNavigateLogin, onSignUpSuccess
     }
 
     setLoading(true);
+    let createdUserInstance = null;
 
     try {
-      // 1. Create Authentication Account
+      // 2. Firebase Authentication Registration
       const userCredential = await createUserWithEmailAndPassword(
         auth,
-        email.trim(),
+        formattedEmail,
         password
       );
-      const user = userCredential.user;
+      createdUserInstance = userCredential.user;
 
-      // 2. Prepare Firestore User Document
+      // 3. Synchronize Auth Display Name with Callsign
+      await updateProfile(createdUserInstance, {
+        displayName: formattedCallsign,
+      });
+
+      // 4. Construct Firestore User Document Schema
       const newUserDocument: UserDocument = {
-        uid: user.uid,
-        username: callsign.trim().toUpperCase(),
-        email: email.trim().toLowerCase(),
+        uid: createdUserInstance.uid,
+        username: formattedCallsign,
+        email: formattedEmail,
         totalPoints: 0,
         hasCompletedOnboarding: false,
 
-        // System & Calibration Toggles (Saved from user toggles)
         telemetryEnabled,
         hapticFeedbackEnabled,
         motionSensitivityEnabled,
         batteryOptimizerEnabled,
         nightModeEnabled,
-
-        // Persistent bypass toggle
         skipOnboardingAuthFlow,
 
         createdAt: serverTimestamp() as any,
         updatedAt: serverTimestamp() as any,
       };
 
-      // 3. Persist to Firestore 'users' collection
-      await setDoc(doc(db, 'users', user.uid), newUserDocument);
+      // 5. Persist Document to Firestore Database
+      await setDoc(doc(db, 'users', createdUserInstance.uid), newUserDocument);
 
-      setLoading(false);
-      onSignUpSuccess();
+      if (isMounted.current) {
+        setLoading(false);
+        onSignUpSuccess();
+      }
     } catch (error: any) {
+      // Rollback orphaned Auth account if Firestore setup fails
+      if (createdUserInstance && auth.currentUser) {
+        try {
+          await deleteUser(createdUserInstance);
+        } catch (rollbackErr) {
+          // Failure logged safely for monitoring
+        }
+      }
+
+      if (!isMounted.current) return;
+
       setLoading(false);
       let friendlyError = 'FIELD REGISTRATION FAILED. CHECK SIGNAL.';
 
@@ -152,9 +189,11 @@ export const SignUpScreen: React.FC<Props> = ({ onNavigateLogin, onSignUpSuccess
       } else if (error.code === 'auth/invalid-email') {
         friendlyError = 'INVALID EMAIL FORMAT DETECTED';
       } else if (error.code === 'auth/weak-password') {
-        friendlyError = 'PASSCODE IS TOO WEAK FOR SECURE FIELD TRANSMISSION';
+        friendlyError = 'PASSCODE IS TOO WEAK FOR SECURE TRANSMISSION';
       } else if (error.code === 'auth/network-request-failed') {
         friendlyError = 'COMMUNICATION LINK LOST. CHECK NETWORK CONNECTION.';
+      } else if (error.message && error.message.includes('Firestore')) {
+        friendlyError = 'DATABASE LINK FAILED. REGISTRATION ROLLED BACK.';
       }
 
       displayError(friendlyError);
@@ -253,7 +292,7 @@ export const SignUpScreen: React.FC<Props> = ({ onNavigateLogin, onSignUpSuccess
               />
             </View>
 
-            {/* Action CTA Button */}
+            {/* Submit Action */}
             <Animated.View style={{ transform: [{ scale: scaleAnim }] }}>
               <TouchableOpacity
                 style={[styles.submitButton, loading && styles.buttonDisabled]}
@@ -291,7 +330,7 @@ export const SignUpScreen: React.FC<Props> = ({ onNavigateLogin, onSignUpSuccess
               Default system telemetry states. All sensors are disabled until explicitly toggled.
             </Text>
 
-            {/* Functional Sensor Controls */}
+            {/* System Configuration Controls */}
             <View style={styles.toggleRow}>
               <Text style={styles.toggleLabel}>TELEMETRY STREAMING</Text>
               <Switch

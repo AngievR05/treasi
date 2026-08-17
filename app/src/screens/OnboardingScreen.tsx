@@ -8,9 +8,14 @@ import {
   useWindowDimensions,
   Platform,
   AccessibilityInfo,
+  Modal,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Svg, { Path, Circle, Line, Polygon } from 'react-native-svg';
+import * as Location from 'expo-location';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { doc, updateDoc } from 'firebase/firestore';
+import { auth, db } from '../config/firebase';
 
 const PALETTE = {
   forestDeep: '#2C3B2E',
@@ -23,8 +28,6 @@ const PALETTE = {
   signalGreen: '#4CAF50',
   alertRed: '#8B0000',
 };
-
-// --- SVG INSTRUMENT ICONS ---
 
 const CompassIcon: React.FC<{ color?: string; size?: number }> = ({
   color = PALETTE.sienna,
@@ -82,6 +85,7 @@ interface OnboardingStep {
   desc: string;
   IconComponent: React.FC<{ color?: string; size?: number }>;
   telemetryStatus: string;
+  requiresLocationPermission?: boolean;
 }
 
 const STEPS: OnboardingStep[] = [
@@ -101,7 +105,8 @@ const STEPS: OnboardingStep[] = [
     subtitle: 'GEOSPATIAL VECTORING',
     desc: 'Follow continuous live heading and GPS telemetry to navigate towards hidden field caches scattered across campus.',
     IconComponent: TelemetryIcon,
-    telemetryStatus: 'GPS & MAGNETOMETER: ONLINE',
+    telemetryStatus: 'GPS & MAGNETOMETER: PENDING_AUTH',
+    requiresLocationPermission: true,
   },
   {
     step: '03 / 03',
@@ -118,8 +123,9 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
   const { width, height } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const [index, setIndex] = useState(0);
+  const [showPermissionModal, setShowPermissionModal] = useState(false);
+  const [locationGranted, setLocationGranted] = useState(false);
 
-  // Animation Refs
   const fadeAnim = useRef(new Animated.Value(1)).current;
   const slideAnim = useRef(new Animated.Value(0)).current;
   const progressAnim = useRef(new Animated.Value(1 / STEPS.length)).current;
@@ -128,7 +134,6 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
 
   const isLandscape = width > height;
 
-  // Pulsing Status Indicator Loop
   useEffect(() => {
     const pulseLoop = Animated.loop(
       Animated.sequence([
@@ -148,7 +153,6 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
     return () => pulseLoop.stop();
   }, [pulseAnim]);
 
-  // Sync progress bar
   useEffect(() => {
     Animated.timing(progressAnim, {
       toValue: (index + 1) / STEPS.length,
@@ -157,12 +161,27 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
     }).start();
   }, [index, progressAnim]);
 
-  // Announce step transitions to Screen Readers
   const announceStepToScreenReader = (stepIndex: number) => {
     const currentStep = STEPS[stepIndex];
     AccessibilityInfo.announceForAccessibility(
       `Protocol step ${stepIndex + 1} of ${STEPS.length}: ${currentStep.title}. ${currentStep.desc}`
     );
+  };
+
+  const finalizeCompletion = async () => {
+    try {
+      await AsyncStorage.setItem('@treasi_device_onboarding_complete', 'true');
+      if (auth.currentUser) {
+        const userRef = doc(db, 'users', auth.currentUser.uid);
+        await updateDoc(userRef, {
+          hasCompletedOnboarding: true,
+        });
+      }
+    } catch (error) {
+      // Graceful fallback
+    } finally {
+      onComplete();
+    }
   };
 
   const handleStepTransition = (nextIndex: number) => {
@@ -200,26 +219,25 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
     });
   };
 
-  const handlePressIn = () => {
-    Animated.spring(btnScaleAnim, {
-      toValue: 0.95,
-      useNativeDriver: true,
-    }).start();
-  };
-
-  const handlePressOut = () => {
-    Animated.spring(btnScaleAnim, {
-      toValue: 1,
-      friction: 4,
-      useNativeDriver: true,
-    }).start();
+  const requestLocationPermission = async () => {
+    setShowPermissionModal(false);
+    const { status } = await Location.requestForegroundPermissionsAsync();
+    if (status === 'granted') {
+      setLocationGranted(true);
+    }
+    handleStepTransition(index + 1);
   };
 
   const handleNext = () => {
-    if (index < STEPS.length - 1) {
-      handleStepTransition(index + 1);
+    const nextIdx = index + 1;
+    if (nextIdx < STEPS.length) {
+      if (STEPS[nextIdx].requiresLocationPermission && !locationGranted) {
+        setShowPermissionModal(true);
+      } else {
+        handleStepTransition(nextIdx);
+      }
     } else {
-      onComplete();
+      finalizeCompletion();
     }
   };
 
@@ -239,7 +257,6 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
         },
       ]}
     >
-      {/* PORTRAIT OVERRIDE WARNING BANNER */}
       {!isLandscape ? (
         <View style={styles.portraitWarningOverlay} accessibilityRole="header">
           <RotateDeviceIcon color={PALETTE.parchment} size={40} />
@@ -250,9 +267,7 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
         </View>
       ) : (
         <View style={styles.container}>
-          {/* LEFT OPERATIONAL VIEWPORT (60%) */}
           <View style={styles.leftViewport} importantForAccessibility="no-hide-descendants">
-            {/* Rivet Accents */}
             <View style={[styles.rivet, styles.rivetTopLeft]} />
             <View style={[styles.rivet, styles.rivetTopRight]} />
             <View style={[styles.rivet, styles.rivetBottomLeft]} />
@@ -296,24 +311,29 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
             </View>
           </View>
 
-          {/* RIGHT CONTROL CONSOLE (40%) */}
           <View style={styles.rightViewport}>
             <View style={styles.consoleCard}>
               <Text style={styles.consoleHeader} accessibilityRole="header">
                 SYSTEM TELEMETRY
               </Text>
 
-              {/* Live Status Indicator */}
               <View
                 style={styles.telemetryStatusBox}
                 accessible={true}
-                accessibilityLabel={`System Status: ${current.telemetryStatus}`}
+                accessibilityLabel={`System Status: ${
+                  locationGranted && index === 1
+                    ? 'GPS & MAGNETOMETER: ONLINE'
+                    : current.telemetryStatus
+                }`}
               >
                 <Animated.View style={[styles.statusDot, { opacity: pulseAnim }]} />
-                <Text style={styles.telemetryStatusText}>{current.telemetryStatus}</Text>
+                <Text style={styles.telemetryStatusText}>
+                  {locationGranted && index === 1
+                    ? 'GPS & MAGNETOMETER: ONLINE'
+                    : current.telemetryStatus}
+                </Text>
               </View>
 
-              {/* Progress Tracker */}
               <View
                 style={styles.progressTrackerContainer}
                 accessible={true}
@@ -335,7 +355,6 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
                 </View>
               </View>
 
-              {/* Step Navigation Nodes */}
               <View style={styles.nodeRow}>
                 {STEPS.map((_, i) => (
                   <TouchableOpacity
@@ -355,7 +374,6 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
                 ))}
               </View>
 
-              {/* Interactive Actions */}
               <View style={styles.actionSection}>
                 <Animated.View style={{ transform: [{ scale: btnScaleAnim }] }}>
                   <TouchableOpacity
@@ -364,17 +382,10 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
                       isFinalStep && styles.primaryButtonComplete,
                     ]}
                     activeOpacity={0.9}
-                    onPressIn={handlePressIn}
-                    onPressOut={handlePressOut}
                     onPress={handleNext}
                     accessible={true}
                     accessibilityRole="button"
                     accessibilityLabel={isFinalStep ? 'Enter Field' : 'Next Protocol Step'}
-                    accessibilityHint={
-                      isFinalStep
-                        ? 'Completes onboarding and opens authentication screen.'
-                        : 'Advances to the next onboarding instruction.'
-                    }
                   >
                     <Text style={styles.buttonText}>
                       {isFinalStep ? 'ENTER FIELD ›' : 'NEXT PROTOCOL ›'}
@@ -385,7 +396,7 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
                 {!isFinalStep && (
                   <TouchableOpacity
                     style={styles.skipButton}
-                    onPress={onComplete}
+                    onPress={finalizeCompletion}
                     hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
                     accessible={true}
                     accessibilityRole="button"
@@ -399,6 +410,32 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
           </View>
         </View>
       )}
+
+      {/* Contextual Permission Modal */}
+      <Modal visible={showPermissionModal} transparent animationType="fade">
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalBox}>
+            <Text style={styles.modalTitle}>LOCATION PERMISSION REQUIRED</Text>
+            <Text style={styles.modalDesc}>
+              Treasi requires geospatial positioning to pinpoint hidden caches relative to your physical location.
+            </Text>
+            <View style={styles.modalActionRow}>
+              <TouchableOpacity
+                style={styles.modalCancelBtn}
+                onPress={() => {
+                  setShowPermissionModal(false);
+                  handleStepTransition(index + 1);
+                }}
+              >
+                <Text style={styles.modalCancelText}>SKIP PERMISSION</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.modalGrantBtn} onPress={requestLocationPermission}>
+                <Text style={styles.modalGrantText}>ALLOW ACCESS</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 };
@@ -673,6 +710,70 @@ const styles = StyleSheet.create({
     fontSize: 9,
     letterSpacing: 1,
     textDecorationLine: 'underline',
+    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.75)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 24,
+  },
+  modalBox: {
+    backgroundColor: PALETTE.forestDeep,
+    borderWidth: 2,
+    borderColor: PALETTE.brass,
+    borderRadius: 6,
+    padding: 20,
+    maxWidth: 400,
+    width: '100%',
+  },
+  modalTitle: {
+    color: PALETTE.parchment,
+    fontSize: 14,
+    fontWeight: 'bold',
+    letterSpacing: 1.5,
+    marginBottom: 10,
+    textAlign: 'center',
+    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+  },
+  modalDesc: {
+    color: PALETTE.parchmentLight,
+    fontSize: 11,
+    lineHeight: 16,
+    textAlign: 'center',
+    marginBottom: 16,
+  },
+  modalActionRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  modalCancelBtn: {
+    flex: 1,
+    paddingVertical: 10,
+    borderWidth: 1,
+    borderColor: PALETTE.brass,
+    borderRadius: 4,
+    alignItems: 'center',
+  },
+  modalCancelText: {
+    color: PALETTE.brass,
+    fontSize: 10,
+    fontWeight: 'bold',
+    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+  },
+  modalGrantBtn: {
+    flex: 1,
+    paddingVertical: 10,
+    backgroundColor: PALETTE.sienna,
+    borderRadius: 4,
+    alignItems: 'center',
+  },
+  modalGrantText: {
+    color: PALETTE.parchmentLight,
+    fontSize: 10,
+    fontWeight: 'bold',
     fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
   },
 });

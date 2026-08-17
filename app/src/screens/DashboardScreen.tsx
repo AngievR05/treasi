@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import {
   View,
   Text,
@@ -8,6 +8,7 @@ import {
   useWindowDimensions,
   Alert,
   ActivityIndicator,
+  Platform,
 } from 'react-native';
 import MapView, { Marker, PROVIDER_DEFAULT, Region } from 'react-native-maps';
 import * as Location from 'expo-location';
@@ -42,8 +43,16 @@ import {
   ActivityFeedDocument,
 } from '../types/firestore';
 
+export interface NavigationParams {
+  treasureId?: string;
+  mode?: 'hunt' | 'create';
+  latitude?: number;
+  longitude?: number;
+  [key: string]: any;
+}
+
 interface Props {
-  onNavigate?: (screen: string) => void;
+  onNavigate?: (screen: string, params?: NavigationParams) => void;
 }
 
 // Vintage Map Styling Matrix (Sepia & Forest Palette)
@@ -61,16 +70,13 @@ const VINTAGE_MAP_STYLE = [
 
 const AnimatedTouchableOpacity = Animated.createAnimatedComponent(TouchableOpacity);
 
-/**
- * Haversine Formula: Calculates great-circle distance between two GPS coordinates in Kilometers
- */
 const calculateHaversineDistance = (
   lat1: number,
   lon1: number,
   lat2: number,
   lon2: number
 ): number => {
-  const R = 6371; // Earth's radius in km
+  const R = 6371;
   const dLat = ((lat2 - lat1) * Math.PI) / 180;
   const dLon = ((lon2 - lon1) * Math.PI) / 180;
   const a =
@@ -83,9 +89,6 @@ const calculateHaversineDistance = (
   return R * c;
 };
 
-/**
- * Relative Timestamp Formatter for Field Signals
- */
 const formatRelativeTime = (timestamp?: Timestamp): string => {
   if (!timestamp) return 'JUST NOW';
   const now = Date.now();
@@ -104,18 +107,18 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
   const insets = useSafeAreaInsets();
   const mapRef = useRef<MapView | null>(null);
 
-  // Firebase Auth State
+  const isNavigatingRef = useRef(false);
   const currentUser = auth.currentUser;
 
-  // Real-time Firestore State
   const [userData, setUserData] = useState<UserDocument | null>(null);
   const [allRawTreasures, setAllRawTreasures] = useState<TreasureDocument[]>([]);
   const [activityFeed, setActivityFeed] = useState<ActivityFeedDocument[]>([]);
   const [isLoadingFeed, setIsLoadingFeed] = useState(true);
+  const [firestoreError, setFirestoreError] = useState<string | null>(null);
 
-  // Location & Telemetry State
   const [userLocation, setUserLocation] = useState<Location.LocationObject | null>(null);
   const [isInitializingLocation, setIsInitializingLocation] = useState(true);
+  const [locationError, setLocationError] = useState<string | null>(null);
   const [region, setRegion] = useState<Region>({
     latitude: -25.7479,
     longitude: 28.2293,
@@ -123,11 +126,9 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
     longitudeDelta: 0.08,
   });
 
-  // Reanimated Shared Values
   const buttonScale = useSharedValue(1);
   const pulseOpacity = useSharedValue(1);
 
-  // Dynamic Rank Calculation Helper
   const getRankTitle = (points: number = 0): string => {
     if (points >= 3000) return 'RANK: MASTER EXPLORER';
     if (points >= 1500) return 'RANK: TRAILBLAZER III';
@@ -135,36 +136,49 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
     return 'RANK: NOVICE SCOUT I';
   };
 
-  // Real-time Firestore Subscriptions
   useEffect(() => {
     if (!currentUser) return;
+    setFirestoreError(null);
 
-    // A. User Profile Subscription (Score, Rank, & Telemetry Settings)
     const userDocRef = doc(db, 'users', currentUser.uid);
-    const unsubscribeUser = onSnapshot(userDocRef, (snapshot) => {
-      if (snapshot.exists()) {
-        setUserData(snapshot.data() as UserDocument);
-      }
-    });
+    const unsubscribeUser = onSnapshot(
+      userDocRef,
+      (snapshot) => {
+        if (snapshot.exists()) {
+          setUserData(snapshot.data() as UserDocument);
+        }
+      },
+      () => setFirestoreError('USER PROFILE TELEMETRY OFFLINE')
+    );
 
-    // B. Global Active Field Treasures Subscription
     const treasuresQuery = query(
       collection(db, 'treasures'),
       where('isArchived', '==', false)
     );
-    const unsubscribeTreasures = onSnapshot(treasuresQuery, (snapshot) => {
-      const treasures: TreasureDocument[] = [];
-      snapshot.forEach((docSnap) => {
-        const rawData = docSnap.data() as TreasureDocument;
-        treasures.push({
-          ...rawData,
-          treasureId: rawData.treasureId || docSnap.id,
+    const unsubscribeTreasures = onSnapshot(
+      treasuresQuery,
+      (snapshot) => {
+        const treasures: TreasureDocument[] = [];
+        snapshot.forEach((docSnap) => {
+          const rawData = docSnap.data() as TreasureDocument;
+          if (
+            rawData.location &&
+            typeof rawData.location.latitude === 'number' &&
+            typeof rawData.location.longitude === 'number' &&
+            !isNaN(rawData.location.latitude) &&
+            !isNaN(rawData.location.longitude)
+          ) {
+            treasures.push({
+              ...rawData,
+              treasureId: rawData.treasureId || docSnap.id,
+            });
+          }
         });
-      });
-      setAllRawTreasures(treasures);
-    });
+        setAllRawTreasures(treasures);
+      },
+      () => setFirestoreError('TREASURE CACHE FIELD SYNC FAILED')
+    );
 
-    // C. Activity Feed Subscription
     const activityQuery = query(
       collection(db, 'activity_feed'),
       orderBy('createdAt', 'desc'),
@@ -186,6 +200,7 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
       },
       () => {
         setIsLoadingFeed(false);
+        setFirestoreError('FIELD SIGNALS FEED OFFLINE');
       }
     );
 
@@ -196,7 +211,59 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
     };
   }, [currentUser]);
 
-  // Location Telemetry Lifecycle
+  const initializeLocationService = useCallback(async () => {
+    setIsInitializingLocation(true);
+    setLocationError(null);
+
+    try {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') {
+        setLocationError('GPS PERMISSION DENIED. ENABLE LOCATION IN SYSTEM SETTINGS.');
+        setIsInitializingLocation(false);
+        return null;
+      }
+
+      const initialPosition = await Location.getCurrentPositionAsync({
+        accuracy: Location.Accuracy.Balanced,
+      }).catch(() => null);
+
+      if (initialPosition) {
+        setUserLocation(initialPosition);
+        const newRegion = {
+          latitude: initialPosition.coords.latitude,
+          longitude: initialPosition.coords.longitude,
+          latitudeDelta: 0.08,
+          longitudeDelta: 0.08,
+        };
+        setRegion(newRegion);
+        if (Platform.OS !== 'web') {
+          mapRef.current?.animateToRegion(newRegion, 1200);
+        }
+      } else {
+        setLocationError('SATELLITE FIX TIMEOUT. RETRYING POSITIONAL TELEMETRY...');
+      }
+
+      const subscription = await Location.watchPositionAsync(
+        {
+          accuracy: Location.Accuracy.Balanced,
+          timeInterval: 5000,
+          distanceInterval: 15,
+        },
+        (newLocation) => {
+          setUserLocation(newLocation);
+          setLocationError(null);
+        }
+      );
+
+      setIsInitializingLocation(false);
+      return subscription;
+    } catch {
+      setLocationError('HARDWARE GPS TELEMETRY UNAVAILABLE');
+      setIsInitializingLocation(false);
+      return null;
+    }
+  }, []);
+
   useEffect(() => {
     pulseOpacity.value = withRepeat(
       withSequence(
@@ -207,64 +274,20 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
       true
     );
 
-    let locationSubscription: Location.LocationSubscription | null = null;
-
-    (async () => {
-      try {
-        const { status } = await Location.requestForegroundPermissionsAsync();
-        if (status !== 'granted') {
-          Alert.alert(
-            'GPS PERMISSION REQUIRED',
-            'Treasi requires GPS telemetry to display active caches within your 20km operational zone.'
-          );
-          setIsInitializingLocation(false);
-          return;
-        }
-
-        const initialPosition = await Location.getCurrentPositionAsync({
-          accuracy: Location.Accuracy.High,
-        });
-
-        setUserLocation(initialPosition);
-        const newRegion = {
-          latitude: initialPosition.coords.latitude,
-          longitude: initialPosition.coords.longitude,
-          latitudeDelta: 0.08,
-          longitudeDelta: 0.08,
-        };
-        setRegion(newRegion);
-        mapRef.current?.animateToRegion(newRegion, 1200);
-        setIsInitializingLocation(false);
-
-        // Continuous GPS Position Stream
-        locationSubscription = await Location.watchPositionAsync(
-          {
-            accuracy: Location.Accuracy.Balanced,
-            timeInterval: 4000,
-            distanceInterval: 10,
-          },
-          (newLocation) => {
-            setUserLocation(newLocation);
-          }
-        );
-      } catch (err) {
-        setIsInitializingLocation(false);
-      }
-    })();
+    let activeSubscription: Location.LocationSubscription | null = null;
+    initializeLocationService().then((sub) => {
+      activeSubscription = sub;
+    });
 
     return () => {
-      if (locationSubscription) {
-        locationSubscription.remove();
+      if (activeSubscription) {
+        activeSubscription.remove();
       }
     };
-  }, []);
+  }, [initializeLocationService]);
 
-  /**
-   * Filter caches to include ONLY those within a 20km radius of the user's live position
-   */
   const nearbyTreasures = useMemo(() => {
     if (!userLocation) return allRawTreasures;
-
     const userLat = userLocation.coords.latitude;
     const userLon = userLocation.coords.longitude;
 
@@ -276,11 +299,10 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
         treasure.location.latitude,
         treasure.location.longitude
       );
-      return distanceKm <= 20; // 20 Kilometers Operational Boundary
+      return distanceKm <= 20;
     });
   }, [userLocation, allRawTreasures]);
 
-  // Reanimated Animated Component Styles
   const animatedButtonStyle = useAnimatedStyle(() => ({
     transform: [{ scale: buttonScale.value }],
   }));
@@ -289,33 +311,51 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
     opacity: pulseOpacity.value,
   }));
 
-  const handlePressIn = () => {
-    buttonScale.value = withSpring(0.94);
+  const safeNavigate = (screen: string, params?: NavigationParams) => {
+    if (isNavigatingRef.current) return;
+    isNavigatingRef.current = true;
+    onNavigate?.(screen, params);
+
+    setTimeout(() => {
+      isNavigatingRef.current = false;
+    }, 600);
   };
 
-  const handlePressOut = () => {
-    buttonScale.value = withSpring(1.0);
-  };
-
+  /**
+   * Fix 1: STAMP LOCATION Navigation
+   * Directly opens INVENTORY in 'create' mode with user's current coordinates.
+   */
   const handleStampLocation = () => {
+    if (isNavigatingRef.current) return;
+
     if (!userLocation) {
-      Alert.alert('TELEMETRY OFFLINE', 'Acquiring satellite fix. Standby...');
+      Alert.alert(
+        'TELEMETRY OFFLINE',
+        'Cannot stamp location without an active GPS lock. Verify location services and retry.'
+      );
       return;
     }
 
     const { latitude, longitude } = userLocation.coords;
-    Alert.alert(
-      'STAMP LOCATION',
-      `LAT: ${latitude.toFixed(4)}\nLONG: ${longitude.toFixed(4)}\n\nBury a new treasure cache at your current coordinates?`,
-      [
-        { text: 'CANCEL', style: 'cancel' },
-        { text: 'BURY CACHE', onPress: () => onNavigate?.('HUNT') },
-      ]
-    );
+
+    safeNavigate('INVENTORY', {
+      mode: 'create',
+      latitude: Number(latitude.toFixed(6)),
+      longitude: Number(longitude.toFixed(6)),
+    });
   };
 
-  // Interactive Map Marker Action (CRUD Read & Archive)
+  /**
+   * Fix 2: TRACK IN HUNT Navigation
+   * Explicitly passes treasureId and exact coordinates to the HUNT screen.
+   */
   const handleMarkerPress = (treasure: TreasureDocument) => {
+    const targetId = treasure.treasureId;
+    if (!targetId) {
+      Alert.alert('INVALID CACHE', 'Selected treasure cache record is missing an ID.');
+      return;
+    }
+
     const isCreator = treasure.creatorId === currentUser?.uid;
     let distString = 'CALCULATING...';
 
@@ -331,18 +371,26 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
 
     Alert.alert(
       treasure.title.toUpperCase(),
-      `Creator: ${treasure.creatorName}\nDistance: ${distString}\nHint: ${treasure.hint}\n\nCoordinates:\nLat: ${treasure.location.latitude.toFixed(4)}, Long: ${treasure.location.longitude.toFixed(4)}`,
+      `Creator: ${treasure.creatorName}\nDistance: ${distString}\nHint: ${treasure.hint}\n\nCoordinates:\nLat: ${treasure.location.latitude.toFixed(
+        4
+      )}, Long: ${treasure.location.longitude.toFixed(4)}`,
       [
         { text: 'CLOSE', style: 'cancel' },
         isCreator
           ? {
               text: 'ARCHIVE CACHE',
               style: 'destructive',
-              onPress: () => handleArchiveTreasure(treasure.treasureId),
+              onPress: () => handleArchiveTreasure(targetId),
             }
           : {
               text: 'TRACK IN HUNT',
-              onPress: () => onNavigate?.('HUNT'),
+              onPress: () =>
+                safeNavigate('HUNT', {
+                  treasureId: targetId,
+                  mode: 'hunt',
+                  latitude: treasure.location.latitude,
+                  longitude: treasure.location.longitude,
+                }),
             },
       ]
     );
@@ -358,6 +406,21 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
     }
   };
 
+  const getDisplayUsername = (item: ActivityFeedDocument): string => {
+    if (item.userId === currentUser?.uid) {
+      return (userData?.username || currentUser?.displayName || 'YOU').toUpperCase();
+    }
+    return (item.username || 'FIELD EXPLORER').toUpperCase();
+  };
+
+  // OpenStreetMap Web Frame Embed URL (No Google Console API key needed)
+  const webOsmUrl = useMemo(() => {
+    const lat = region.latitude;
+    const lon = region.longitude;
+    const bbox = `${lon - 0.03},${lat - 0.03},${lon + 0.03},${lat + 0.03}`;
+    return `https://www.openstreetmap.org/export/embed.html?bbox=${bbox}&layer=mapnik&marker=${lat},${lon}`;
+  }, [region]);
+
   return (
     <View
       style={[
@@ -371,54 +434,56 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
         },
       ]}
     >
-      {/* LEFT VIEWPORT: Operational Map Canvas (60% Width in Landscape) */}
+      {/* LEFT VIEWPORT: Operational Map Canvas */}
       <View style={isLandscape ? styles.leftViewportLandscape : styles.leftViewportPortrait}>
-        <MapView
-          ref={mapRef}
-          provider={PROVIDER_DEFAULT}
-          style={StyleSheet.absoluteFillObject}
-          initialRegion={region}
-          customMapStyle={VINTAGE_MAP_STYLE}
-          showsUserLocation={true}
-          showsCompass={false}
-          accessibilityLabel="Scavenger Hunt Field Map Canvas"
-          accessibilityHint="Displays active user position and nearby hidden field treasures within a 20km radius"
-        >
-          {nearbyTreasures.map((treasure, index) => (
-            <Marker
-              key={treasure.treasureId || `treasure-marker-${index}`}
-              coordinate={{
-                latitude: treasure.location.latitude,
-                longitude: treasure.location.longitude,
-              }}
-              title={treasure.title}
-              description={`Hidden by ${treasure.creatorName}`}
-              onPress={() => handleMarkerPress(treasure)}
-            >
-              <View
-                style={styles.customMarker}
-                accessible={true}
-                accessibilityLabel={`Treasure marker: ${treasure.title}`}
+        {Platform.OS === 'web' ? (
+          <View style={styles.webMapContainer}>
+            <iframe
+              title="Treasi Field Map"
+              src={webOsmUrl}
+              style={{ width: '100%', height: '100%', border: 'none' }}
+            />
+          </View>
+        ) : (
+          <MapView
+            ref={mapRef}
+            provider={PROVIDER_DEFAULT}
+            style={StyleSheet.absoluteFillObject}
+            initialRegion={region}
+            customMapStyle={VINTAGE_MAP_STYLE}
+            showsUserLocation={true}
+            showsCompass={false}
+            accessibilityLabel="Scavenger Hunt Field Map Canvas"
+          >
+            {nearbyTreasures.map((treasure, index) => (
+              <Marker
+                key={treasure.treasureId || `treasure-marker-${index}`}
+                coordinate={{
+                  latitude: treasure.location.latitude,
+                  longitude: treasure.location.longitude,
+                }}
+                title={treasure.title}
+                description={`Hidden by ${treasure.creatorName}`}
+                onPress={() => handleMarkerPress(treasure)}
               >
-                <MaterialCommunityIcons name="treasure-chest" size={14} color="#F3ECD8" />
-              </View>
-            </Marker>
-          ))}
-        </MapView>
+                <View style={styles.customMarker}>
+                  <MaterialCommunityIcons name="treasure-chest" size={14} color="#F3ECD8" />
+                </View>
+              </Marker>
+            ))}
+          </MapView>
+        )}
 
-        {/* Compass Dial Indicator Overlay */}
         <View style={styles.compassOverlay} aria-hidden={true}>
           <Ionicons name="compass-outline" size={16} color="#2A2420" />
           <Text style={styles.compassText}>N</Text>
         </View>
 
-        {/* 20KM Radius Telemetry Badge */}
         <View style={styles.radiusBadge} aria-hidden={true}>
           <MaterialCommunityIcons name="radar" size={12} color="#2A2420" style={{ marginRight: 4 }} />
           <Text style={styles.radiusBadgeText}>20KM RANGE LOCK</Text>
         </View>
 
-        {/* Live Satellite Lock Badge */}
         <Animated.View style={[styles.locationBadge, animatedBadgeStyle]}>
           <Ionicons name="radio-sharp" size={12} color="#A64B2A" style={{ marginRight: 4 }} />
           <Text style={styles.locationBadgeText}>
@@ -430,6 +495,16 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
           </Text>
         </Animated.View>
 
+        {locationError && (
+          <View style={styles.mapErrorBanner}>
+            <Ionicons name="warning-outline" size={14} color="#F3ECD8" style={{ marginRight: 6 }} />
+            <Text style={styles.mapErrorText}>{locationError}</Text>
+            <TouchableOpacity style={styles.retryButton} onPress={initializeLocationService}>
+              <Text style={styles.retryButtonText}>RETRY</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+
         {isInitializingLocation && (
           <View style={styles.loadingContainer}>
             <ActivityIndicator size="small" color="#A64B2A" />
@@ -437,21 +512,17 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
         )}
       </View>
 
-      {/* RIGHT VIEWPORT: Command Console (40% Width in Landscape) */}
+      {/* RIGHT VIEWPORT: Command Console */}
       <View style={isLandscape ? styles.rightViewportLandscape : styles.rightViewportPortrait}>
-        {/* User Stats & Score Card */}
-        <View
-          style={styles.statusCard}
-          accessible={true}
-          accessibilityRole="header"
-          accessibilityLabel={`Field Status: Total score ${userData?.totalPoints ?? 0} points, Rank ${getRankTitle(userData?.totalPoints)}`}
-        >
-          {/* Decorative Brass Rivets */}
-          <View style={styles.rivetTL} />
-          <View style={styles.rivetTR} />
-          <View style={styles.rivetBL} />
-          <View style={styles.rivetBR} />
+        {firestoreError && (
+          <View style={styles.firestoreErrorCard}>
+            <Ionicons name="cloud-offline-outline" size={12} color="#F3ECD8" style={{ marginRight: 4 }} />
+            <Text style={styles.firestoreErrorText}>{firestoreError}</Text>
+          </View>
+        )}
 
+        {/* User Stats Card */}
+        <View style={styles.statusCard}>
           <View style={styles.statusHeaderRow}>
             <MaterialCommunityIcons name="star-four-points" size={12} color="#B08D57" />
             <Text style={styles.statusHeader}>FIELD STATUS</Text>
@@ -467,7 +538,7 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
           <Text style={styles.rankText}>{getRankTitle(userData?.totalPoints)}</Text>
         </View>
 
-        {/* Real-time Field Signals Stream */}
+        {/* Field Signals Stream */}
         <View style={styles.signalsContainer}>
           <View style={styles.sectionHeaderRow}>
             <MaterialCommunityIcons name="radio-handheld" size={14} color="#B08D57" />
@@ -491,13 +562,11 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
                   key={item.activityId || `activity-signal-${index}`}
                   entering={FadeInDown.delay(index * 100).duration(400)}
                   style={styles.signalCard}
-                  accessible={true}
-                  accessibilityLabel={`Signal from ${item.username}: ${item.message}`}
                 >
                   <View style={styles.signalHeader}>
                     <View style={styles.authorRow}>
                       <Ionicons name="radio-outline" size={12} color="#A64B2A" style={{ marginRight: 4 }} />
-                      <Text style={styles.signalAuthor}>{item.username.toUpperCase()}</Text>
+                      <Text style={styles.signalAuthor}>{getDisplayUsername(item)}</Text>
                     </View>
                     <Text style={styles.signalTimeTag}>{formatRelativeTime(item.createdAt)}</Text>
                   </View>
@@ -512,13 +581,12 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
         <AnimatedTouchableOpacity
           style={[styles.stampButton, animatedButtonStyle]}
           activeOpacity={0.85}
-          onPressIn={handlePressIn}
-          onPressOut={handlePressOut}
+          onPressIn={() => (buttonScale.value = withSpring(0.94))}
+          onPressOut={() => (buttonScale.value = withSpring(1.0))}
           onPress={handleStampLocation}
           accessible={true}
           accessibilityRole="button"
           accessibilityLabel="Stamp Current Location"
-          accessibilityHint="Triggers GPS coordinate logging to plant or record a field cache"
         >
           <Ionicons name="print-outline" size={16} color="#F3ECD8" style={{ marginRight: 6 }} />
           <Text style={styles.stampButtonText}>STAMP LOCATION</Text>
@@ -562,6 +630,12 @@ const styles = StyleSheet.create({
     padding: 12,
     justifyContent: 'space-between',
   },
+  webMapContainer: {
+    flex: 1,
+    width: '100%',
+    height: '100%',
+    backgroundColor: '#E8DCC0',
+  },
   loadingContainer: {
     position: 'absolute',
     bottom: 16,
@@ -572,7 +646,6 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#B08D57',
   },
-  /* Map Overlays */
   compassOverlay: {
     position: 'absolute',
     top: 12,
@@ -630,6 +703,37 @@ const styles = StyleSheet.create({
     color: '#2A2420',
     letterSpacing: 1,
   },
+  mapErrorBanner: {
+    position: 'absolute',
+    top: 45,
+    alignSelf: 'center',
+    backgroundColor: '#A64B2A',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 4,
+    flexDirection: 'row',
+    alignItems: 'center',
+    maxWidth: '90%',
+  },
+  mapErrorText: {
+    color: '#F3ECD8',
+    fontSize: 9,
+    fontWeight: 'bold',
+    letterSpacing: 0.5,
+    flexShrink: 1,
+  },
+  retryButton: {
+    backgroundColor: '#F3ECD8',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 2,
+    marginLeft: 8,
+  },
+  retryButtonText: {
+    color: '#2A2420',
+    fontSize: 8,
+    fontWeight: 'bold',
+  },
   customMarker: {
     width: 28,
     height: 28,
@@ -640,12 +744,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     elevation: 4,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.3,
   },
-
-  /* Field Status Card */
   statusCard: {
     backgroundColor: '#E8DCC0',
     borderWidth: 2,
@@ -690,13 +789,20 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     letterSpacing: 1,
   },
-  /* Brass Rivets */
-  rivetTL: { position: 'absolute', top: 3, left: 3, width: 4, height: 4, borderRadius: 2, backgroundColor: '#B08D57' },
-  rivetTR: { position: 'absolute', top: 3, right: 3, width: 4, height: 4, borderRadius: 2, backgroundColor: '#B08D57' },
-  rivetBL: { position: 'absolute', bottom: 3, left: 3, width: 4, height: 4, borderRadius: 2, backgroundColor: '#B08D57' },
-  rivetBR: { position: 'absolute', bottom: 3, right: 3, width: 4, height: 4, borderRadius: 2, backgroundColor: '#B08D57' },
-
-  /* Signals Feed */
+  firestoreErrorCard: {
+    backgroundColor: '#A64B2A',
+    padding: 4,
+    borderRadius: 2,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 4,
+  },
+  firestoreErrorText: {
+    color: '#F3ECD8',
+    fontSize: 8,
+    fontWeight: 'bold',
+  },
   signalsContainer: {
     flex: 1,
     marginVertical: 8,
@@ -756,15 +862,12 @@ const styles = StyleSheet.create({
     color: '#8C8275',
     fontSize: 8,
     fontWeight: 'bold',
-    letterSpacing: 0.5,
   },
   signalBody: {
     color: '#2A2420',
     fontSize: 10,
     lineHeight: 13,
   },
-
-  /* Stamp Button */
   stampButton: {
     backgroundColor: '#A64B2A',
     paddingVertical: 10,

@@ -21,7 +21,7 @@ import Animated, {
   withSpring,
 } from 'react-native-reanimated';
 import { 
-  User as UserIcon, 
+  Mail, 
   Lock, 
   Compass, 
   MapPin, 
@@ -30,8 +30,7 @@ import {
   Eye, 
   EyeOff, 
   ShieldAlert,
-  Moon,
-  Zap
+  Moon
 } from 'lucide-react-native';
 
 // Firebase Auth & Firestore Engine
@@ -60,13 +59,13 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  // Pre-flight Sensor & System Calibration Toggles (Strictly OFF / false by default)
+  // Pre-flight Sensor & System Calibration Toggles (Default OFF)
   const [gpsEnabled, setGpsEnabled] = useState<boolean>(false);
-  const [compassEnabled, setCompassEnabled] = useState<boolean>(false);
+  const [compassHapticsEnabled, setCompassHapticsEnabled] = useState<boolean>(false);
   const [motionEnabled, setMotionEnabled] = useState<boolean>(false);
   const [nightModeEnabled, setNightModeEnabled] = useState<boolean>(false);
 
-  // Micro-interaction: Tactile Button Press Spring Scale
+  // Tactile Button Press Spring Scale
   const buttonScale = useSharedValue(1);
 
   const animatedButtonStyle = useAnimatedStyle(() => ({
@@ -83,8 +82,10 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
 
   // Firebase Auth Login & Telemetry Synchronization Pipeline
   const handleLogin = async () => {
-    if (!email.trim() || !password) {
-      setErrorMessage('Field protocol requires both Explorer ID and Passcode.');
+    const trimmedEmail = email.trim();
+
+    if (!trimmedEmail || !password) {
+      setErrorMessage('Field protocol requires both Explorer Email and Passcode.');
       return;
     }
 
@@ -93,7 +94,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
 
     try {
       // 1. Authenticate credentials via Firebase Auth
-      const userCredential = await signInWithEmailAndPassword(auth, email.trim(), password);
+      const userCredential = await signInWithEmailAndPassword(auth, trimmedEmail, password);
       const user = userCredential.user;
 
       if (user) {
@@ -103,7 +104,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
         // 2. Synchronize active Pre-flight Toggles to user profile document
         const telemetryPayload: Partial<UserDocument> = {
           telemetryEnabled: gpsEnabled,
-          hapticFeedbackEnabled: compassEnabled,
+          hapticFeedbackEnabled: compassHapticsEnabled,
           motionSensitivityEnabled: motionEnabled,
           nightModeEnabled: nightModeEnabled,
           updatedAt: Timestamp.now(),
@@ -112,11 +113,11 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
         if (userDocSnap.exists()) {
           await updateDoc(userDocRef, telemetryPayload);
         } else {
-          // Failsafe: Initialize document if missing
+          // Failsafe: Initialize user document if missing
           await setDoc(userDocRef, {
             uid: user.uid,
-            username: email.split('@')[0] || 'Explorer',
-            email: user.email || email.trim(),
+            username: trimmedEmail.split('@')[0] || 'Explorer',
+            email: user.email || trimmedEmail,
             totalPoints: 0,
             hasCompletedOnboarding: false,
             batteryOptimizerEnabled: false,
@@ -130,17 +131,27 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
       onLoginSuccess();
     } catch (error: any) {
       let msg = 'Authentication failed. Please check field credentials.';
-      if (error.code === 'auth/invalid-email') {
-        msg = 'Invalid Explorer ID format.';
+      const errorCode = error?.code;
+
+      if (errorCode === 'auth/network-request-failed') {
+        msg = 'Network connection lost. Check telemetry signal and retry.';
+      } else if (errorCode === 'auth/invalid-email') {
+        msg = 'Invalid Explorer Email format. Check email syntax.';
       } else if (
-        error.code === 'auth/user-not-found' ||
-        error.code === 'auth/wrong-password' ||
-        error.code === 'auth/invalid-credential'
+        errorCode === 'auth/user-not-found' ||
+        errorCode === 'auth/wrong-password' ||
+        errorCode === 'auth/invalid-credential'
       ) {
-        msg = 'Unrecognized Explorer credentials. Access denied.';
-      } else if (error.code === 'auth/too-many-requests') {
-        msg = 'Too many failed attempts. Terminal locked temporarily.';
+        msg = 'Unrecognized Explorer Email or Passcode. Access denied.';
+      } else if (errorCode === 'auth/too-many-requests') {
+        msg = 'Too many failed attempts. Terminal locked temporarily. Try again shortly.';
+      } else if (
+        errorCode === 'auth/unavailable' ||
+        errorCode === 'auth/internal-error'
+      ) {
+        msg = 'Firebase Authentication service offline. Retry in a moment.';
       }
+      
       setErrorMessage(msg);
     } finally {
       setIsLoading(false);
@@ -210,12 +221,12 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
               {/* Form Input Stack */}
               <View style={styles.inputStack}>
                 
-                {/* Username / Email Input */}
+                {/* Explorer Email Input */}
                 <View style={styles.inputContainer}>
-                  <UserIcon size={18} color="#2A2420" style={styles.inputIcon} />
+                  <Mail size={18} color="#2A2420" style={styles.inputIcon} />
                   <TextInput
                     style={styles.textInput}
-                    placeholder="USERNAME / EMAIL"
+                    placeholder="EXPLORER EMAIL"
                     placeholderTextColor="#8C7350"
                     value={email}
                     onChangeText={setEmail}
@@ -233,7 +244,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
                   <Lock size={18} color="#2A2420" style={styles.inputIcon} />
                   <TextInput
                     style={styles.textInput}
-                    placeholder="PASSWORD"
+                    placeholder="PASSCODE"
                     placeholderTextColor="#8C7350"
                     value={password}
                     onChangeText={setPassword}
@@ -248,7 +259,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
                     style={styles.eyeButton}
                     accessible={true}
                     accessibilityRole="button"
-                    accessibilityLabel={showPassword ? 'Hide password' : 'Show password'}
+                    accessibilityLabel={showPassword ? 'Hide passcode' : 'Show passcode'}
                   >
                     {showPassword ? (
                       <EyeOff size={18} color="#2A2420" />
@@ -317,7 +328,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
 
             {/* Pre-flight Sensor Toggles Section */}
             <Text style={[styles.consoleSectionTitle, styles.topMarginSection]}>
-              ★ ENABLE SENSORS
+              ★ INITIALIZE TELEMETRY
             </Text>
 
             <View style={styles.toggleList}>
@@ -325,7 +336,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
               <View style={styles.toggleRow}>
                 <View style={styles.toggleLabelGroup}>
                   <MapPin size={16} color="#B08D57" />
-                  <Text style={styles.toggleText}>GPS</Text>
+                  <Text style={styles.toggleText}>GPS TELEMETRY</Text>
                 </View>
                 <Switch
                   value={gpsEnabled}
@@ -339,20 +350,20 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
                 />
               </View>
 
-              {/* Compass / Haptic Sensor Toggle */}
+              {/* Compass Haptics Toggle */}
               <View style={styles.toggleRow}>
                 <View style={styles.toggleLabelGroup}>
                   <Compass size={16} color="#B08D57" />
-                  <Text style={styles.toggleText}>COMPASS</Text>
+                  <Text style={styles.toggleText}>COMPASS HAPTICS</Text>
                 </View>
                 <Switch
-                  value={compassEnabled}
-                  onValueChange={setCompassEnabled}
+                  value={compassHapticsEnabled}
+                  onValueChange={setCompassHapticsEnabled}
                   trackColor={{ false: '#1A231B', true: '#A64B2A' }}
-                  thumbColor={compassEnabled ? '#E8DCC0' : '#B08D57'}
+                  thumbColor={compassHapticsEnabled ? '#E8DCC0' : '#B08D57'}
                   accessible={true}
                   accessibilityRole="switch"
-                  accessibilityLabel="Enable Compass Sensor"
+                  accessibilityLabel="Enable Compass Heading Haptic Pulses"
                   style={styles.switchTarget}
                 />
               </View>
@@ -408,7 +419,7 @@ const styles = StyleSheet.create({
     flex: 1,
     width: '100%',
     height: '100%',
-    backgroundColor: '#1C261D', // Forest Green Chassis
+    backgroundColor: '#1C261D',
   },
   scrollContainer: {
     flexGrow: 1,
