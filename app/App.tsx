@@ -2,6 +2,10 @@ import React, { useState, useEffect, useRef, Suspense, lazy } from 'react';
 import { StatusBar } from 'expo-status-bar';
 import { StyleSheet, Text, View, useWindowDimensions, Animated, Easing } from 'react-native';
 import { SafeAreaProvider, initialWindowMetrics } from 'react-native-safe-area-context';
+import { onAuthStateChanged, User } from 'firebase/auth';
+import { doc, getDoc } from 'firebase/firestore';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { auth, db } from './src/config/firebase';
 
 // Lazy-loaded screen components for optimized performance
 const SplashScreen = lazy(() => 
@@ -95,26 +99,71 @@ function MainNavigator() {
   // Active Navigation State
   const [currentScreen, setCurrentScreen] = useState<ScreenState>('SPLASH');
 
-  // Flow Controls (Defaults strictly set to false / OFF)
-  // Guarantees mandatory traversal: Splash -> Onboarding -> Auth -> Dashboard
-  const [skipOnboardingToggle] = useState<boolean>(false);
-  const [bypassAuthToggle] = useState<boolean>(false);
+  // Synchronization & Auth State Flags
+  const [isSplashFinished, setIsSplashFinished] = useState<boolean>(false);
+  const [isAuthResolved, setIsAuthResolved] = useState<boolean>(false);
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [hasCompletedOnboarding, setHasCompletedOnboarding] = useState<boolean>(false);
+  const [isInitialBootDone, setIsInitialBootDone] = useState<boolean>(false);
 
-  // Splash Screen Telemetry Initializer
+  // 1. Listen for Firebase Auth state changes & check Firestore onboarding state
   useEffect(() => {
-    if (currentScreen === 'SPLASH') {
-      const timer = setTimeout(() => {
-        if (!skipOnboardingToggle) {
+    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      if (user) {
+        setCurrentUser(user);
+        try {
+          const userDocRef = doc(db, 'users', user.uid);
+          const userSnap = await getDoc(userDocRef);
+          if (userSnap.exists()) {
+            const data = userSnap.data();
+            setHasCompletedOnboarding(data?.hasCompletedOnboarding ?? false);
+          } else {
+            const localOnboarding = await AsyncStorage.getItem('@treasi_onboarding_completed');
+            setHasCompletedOnboarding(localOnboarding === 'true');
+          }
+        } catch (error) {
+          const localOnboarding = await AsyncStorage.getItem('@treasi_onboarding_completed');
+          setHasCompletedOnboarding(localOnboarding === 'true');
+        }
+      } else {
+        setCurrentUser(null);
+        const localOnboarding = await AsyncStorage.getItem('@treasi_onboarding_completed');
+        setHasCompletedOnboarding(localOnboarding === 'true');
+      }
+      setIsAuthResolved(true);
+    });
+
+    return () => unsubscribe();
+  }, []);
+
+  // 2. Synchronized Startup Routing Resolver (Waits for both Splash finish and Auth resolution)
+  useEffect(() => {
+    if (!isInitialBootDone && isSplashFinished && isAuthResolved) {
+      setIsInitialBootDone(true);
+      if (currentUser) {
+        if (hasCompletedOnboarding) {
+          setCurrentScreen('DASHBOARD');
+        } else {
           setCurrentScreen('ONBOARDING');
-        } else if (!bypassAuthToggle) {
+        }
+      } else {
+        if (hasCompletedOnboarding) {
           setCurrentScreen('LOGIN');
         } else {
-          setCurrentScreen('DASHBOARD');
+          setCurrentScreen('ONBOARDING');
         }
-      }, 7500);
-      return () => clearTimeout(timer);
+      }
     }
-  }, [currentScreen, skipOnboardingToggle, bypassAuthToggle]);
+  }, [isSplashFinished, isAuthResolved, currentUser, hasCompletedOnboarding, isInitialBootDone]);
+
+  // 3. Dynamic Guard for Mid-session Auth Changes (e.g. Sign out)
+  useEffect(() => {
+    if (isInitialBootDone) {
+      if (!currentUser && ['DASHBOARD', 'HUNT', 'LEADERBOARD', 'INVENTORY', 'PROFILE'].includes(currentScreen)) {
+        setCurrentScreen('LOGIN');
+      }
+    }
+  }, [currentUser, isInitialBootDone, currentScreen]);
 
   const renderActiveScreen = () => {
     const renderWithSuspense = (element: React.ReactNode) => (
@@ -134,11 +183,23 @@ function MainNavigator() {
 
     switch (currentScreen) {
       case 'SPLASH':
-        return renderWithSuspense(<SplashScreen />);
+        return renderWithSuspense(
+          <SplashScreen onFinish={() => setIsSplashFinished(true)} />
+        );
 
       case 'ONBOARDING':
         return renderWithSuspense(
-          <OnboardingScreen onComplete={() => setCurrentScreen('LOGIN')} />
+          <OnboardingScreen 
+            onComplete={async () => {
+              await AsyncStorage.setItem('@treasi_onboarding_completed', 'true');
+              setHasCompletedOnboarding(true);
+              if (auth.currentUser) {
+                setCurrentScreen('DASHBOARD');
+              } else {
+                setCurrentScreen('LOGIN');
+              }
+            }} 
+          />
         );
 
       case 'LOGIN':
@@ -187,7 +248,10 @@ function MainNavigator() {
         return renderWithSuspense(
           <ProfileSettingsScreen 
             onBack={() => setCurrentScreen('DASHBOARD')} 
-            onSignOut={() => setCurrentScreen('LOGIN')} 
+            onSignOut={async () => {
+              await auth.signOut();
+              setCurrentScreen('LOGIN');
+            }} 
           />
         );
 
