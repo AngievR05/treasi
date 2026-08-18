@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -6,9 +6,11 @@ import {
   TouchableOpacity,
   Animated,
   useWindowDimensions,
-  Platform,
   AccessibilityInfo,
   Modal,
+  AppState,
+  AppStateStatus,
+  ActivityIndicator,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Svg, { Path, Circle, Line, Polygon } from 'react-native-svg';
@@ -73,6 +75,33 @@ const RotateDeviceIcon: React.FC<{ color?: string; size?: number }> = ({
   </Svg>
 );
 
+const ChevronLeftIcon: React.FC<{ color?: string; size?: number }> = ({
+  color = PALETTE.parchment,
+  size = 20,
+}) => (
+  <Svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+    <Path d="M15 18l-6-6 6-6" />
+  </Svg>
+);
+
+const ChevronRightIcon: React.FC<{ color?: string; size?: number }> = ({
+  color = PALETTE.parchment,
+  size = 20,
+}) => (
+  <Svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+    <Path d="M9 18l6-6-6-6" />
+  </Svg>
+);
+
+const CheckIcon: React.FC<{ color?: string; size?: number }> = ({
+  color = PALETTE.signalGreen,
+  size = 20,
+}) => (
+  <Svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+    <Path d="M20 6L9 17l-5-5" />
+  </Svg>
+);
+
 interface Props {
   onComplete: () => void;
 }
@@ -119,20 +148,54 @@ const STEPS: OnboardingStep[] = [
   },
 ];
 
+type LocationPermissionState = 'undetermined' | 'granted' | 'denied';
+
 export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
   const { width, height } = useWindowDimensions();
   const insets = useSafeAreaInsets();
+
   const [index, setIndex] = useState(0);
   const [showPermissionModal, setShowPermissionModal] = useState(false);
-  const [locationGranted, setLocationGranted] = useState(false);
+  const [permissionState, setPermissionState] = useState<LocationPermissionState>('undetermined');
+  const [isCompleting, setIsCompleting] = useState(false);
+  const [isAnimating, setIsAnimating] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const fadeAnim = useRef(new Animated.Value(1)).current;
   const slideAnim = useRef(new Animated.Value(0)).current;
   const progressAnim = useRef(new Animated.Value(1 / STEPS.length)).current;
   const pulseAnim = useRef(new Animated.Value(1)).current;
-  const btnScaleAnim = useRef(new Animated.Value(1)).current;
 
   const isLandscape = width > height;
+
+  const checkLocationPermission = useCallback(async () => {
+    try {
+      const { status } = await Location.getForegroundPermissionsAsync();
+      if (status === 'granted') {
+        setPermissionState('granted');
+      } else if (status === 'denied') {
+        setPermissionState('denied');
+      } else {
+        setPermissionState('undetermined');
+      }
+    } catch {
+      setPermissionState('undetermined');
+    }
+  }, []);
+
+  useEffect(() => {
+    checkLocationPermission();
+
+    const subscription = AppState.addEventListener('change', (nextAppState: AppStateStatus) => {
+      if (nextAppState === 'active') {
+        checkLocationPermission();
+      }
+    });
+
+    return () => {
+      subscription.remove();
+    };
+  }, [checkLocationPermission]);
 
   useEffect(() => {
     const pulseLoop = Animated.loop(
@@ -168,24 +231,11 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
     );
   };
 
-  const finalizeCompletion = async () => {
-    try {
-      await AsyncStorage.setItem('@treasi_device_onboarding_complete', 'true');
-      if (auth.currentUser) {
-        const userRef = doc(db, 'users', auth.currentUser.uid);
-        await updateDoc(userRef, {
-          hasCompletedOnboarding: true,
-        });
-      }
-    } catch (error) {
-      // Graceful fallback
-    } finally {
-      onComplete();
-    }
-  };
-
   const handleStepTransition = (nextIndex: number) => {
-    if (nextIndex === index) return;
+    if (nextIndex === index || isAnimating || nextIndex < 0 || nextIndex >= STEPS.length) return;
+    setIsAnimating(true);
+
+    const direction = nextIndex > index ? -1 : 1;
 
     Animated.parallel([
       Animated.timing(fadeAnim, {
@@ -194,14 +244,14 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
         useNativeDriver: true,
       }),
       Animated.timing(slideAnim, {
-        toValue: -15,
+        toValue: direction * 20,
         duration: 150,
         useNativeDriver: true,
       }),
     ]).start(() => {
       setIndex(nextIndex);
       announceStepToScreenReader(nextIndex);
-      slideAnim.setValue(15);
+      slideAnim.setValue(-direction * 20);
 
       Animated.parallel([
         Animated.timing(fadeAnim, {
@@ -215,23 +265,54 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
           tension: 70,
           useNativeDriver: true,
         }),
-      ]).start();
+      ]).start(() => {
+        setIsAnimating(false);
+      });
     });
   };
 
   const requestLocationPermission = async () => {
     setShowPermissionModal(false);
-    const { status } = await Location.requestForegroundPermissionsAsync();
-    if (status === 'granted') {
-      setLocationGranted(true);
+    try {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status === 'granted') {
+        setPermissionState('granted');
+      } else {
+        setPermissionState('denied');
+      }
+    } catch {
+      setPermissionState('denied');
     }
-    handleStepTransition(index + 1);
+  };
+
+  const finalizeCompletion = async () => {
+    if (isCompleting) return;
+    setIsCompleting(true);
+    setErrorMessage(null);
+
+    try {
+      await AsyncStorage.setItem('@treasi_device_onboarding_complete', 'true');
+
+      if (auth.currentUser) {
+        const userRef = doc(db, 'users', auth.currentUser.uid);
+        await updateDoc(userRef, {
+          hasCompletedOnboarding: true,
+        });
+      }
+
+      onComplete();
+    } catch {
+      setErrorMessage('Failed to persist protocol state. Tap to retry.');
+      setIsCompleting(false);
+    }
   };
 
   const handleNext = () => {
+    if (isAnimating || isCompleting) return;
+
     const nextIdx = index + 1;
     if (nextIdx < STEPS.length) {
-      if (STEPS[nextIdx].requiresLocationPermission && !locationGranted) {
+      if (STEPS[nextIdx].requiresLocationPermission && permissionState !== 'granted') {
         setShowPermissionModal(true);
       } else {
         handleStepTransition(nextIdx);
@@ -241,9 +322,23 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
     }
   };
 
+  const handleBack = () => {
+    if (isAnimating || isCompleting || index === 0) return;
+    handleStepTransition(index - 1);
+  };
+
   const current = STEPS[index];
   const isFinalStep = index === STEPS.length - 1;
   const StepIcon = current.IconComponent;
+
+  const getDisplayedTelemetryStatus = () => {
+    if (index === 1) {
+      if (permissionState === 'granted') return 'GPS & MAGNETOMETER: ONLINE';
+      if (permissionState === 'denied') return 'GPS & MAGNETOMETER: ACCESS_DENIED';
+      return 'GPS & MAGNETOMETER: PENDING_AUTH';
+    }
+    return current.telemetryStatus;
+  };
 
   return (
     <View
@@ -267,6 +362,7 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
         </View>
       ) : (
         <View style={styles.container}>
+          {/* LEFT VIEWPORT (60% width) */}
           <View style={styles.leftViewport} importantForAccessibility="no-hide-descendants">
             <View style={[styles.rivet, styles.rivetTopLeft]} />
             <View style={[styles.rivet, styles.rivetTopRight]} />
@@ -293,7 +389,7 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
               accessibilityLabel={`${current.title}. ${current.subtitle}. ${current.desc}`}
             >
               <View style={styles.iconWrapper}>
-                <StepIcon color={PALETTE.sienna} size={24} />
+                <StepIcon color={PALETTE.sienna} size={28} />
               </View>
 
               <Text style={styles.protocolCodeText}>{current.protocolCode}</Text>
@@ -305,12 +401,25 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
               <Text style={styles.descText}>{current.desc}</Text>
             </Animated.View>
 
+            {errorMessage ? (
+              <TouchableOpacity
+                style={styles.errorContainer}
+                onPress={finalizeCompletion}
+                accessible={true}
+                accessibilityRole="button"
+                accessibilityLabel={errorMessage}
+              >
+                <Text style={styles.errorText}>{errorMessage}</Text>
+              </TouchableOpacity>
+            ) : null}
+
             <View style={styles.footerNoteRow}>
               <Text style={styles.footerNote}>TREASI FIELD PROTOCOL</Text>
               <Text style={styles.footerNote}>SECURE SPECIFICATION</Text>
             </View>
           </View>
 
+          {/* RIGHT VIEWPORT (40% width) */}
           <View style={styles.rightViewport}>
             <View style={styles.consoleCard}>
               <Text style={styles.consoleHeader} accessibilityRole="header">
@@ -320,26 +429,47 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
               <View
                 style={styles.telemetryStatusBox}
                 accessible={true}
-                accessibilityLabel={`System Status: ${
-                  locationGranted && index === 1
-                    ? 'GPS & MAGNETOMETER: ONLINE'
-                    : current.telemetryStatus
-                }`}
+                accessibilityLabel={`System Status: ${getDisplayedTelemetryStatus()}`}
               >
-                <Animated.View style={[styles.statusDot, { opacity: pulseAnim }]} />
-                <Text style={styles.telemetryStatusText}>
-                  {locationGranted && index === 1
-                    ? 'GPS & MAGNETOMETER: ONLINE'
-                    : current.telemetryStatus}
-                </Text>
+                <Animated.View
+                  style={[
+                    styles.statusDot,
+                    { opacity: pulseAnim },
+                    permissionState === 'denied' && index === 1
+                      ? styles.statusDotAlert
+                      : permissionState === 'granted' && index === 1
+                      ? styles.statusDotOnline
+                      : null,
+                  ]}
+                />
+                <Text style={styles.telemetryStatusText}>{getDisplayedTelemetryStatus()}</Text>
               </View>
 
+              {index === 1 && permissionState !== 'granted' ? (
+                <TouchableOpacity
+                  style={styles.permissionActionBtn}
+                  onPress={() => setShowPermissionModal(true)}
+                  activeOpacity={0.8}
+                  accessible={true}
+                  accessibilityRole="button"
+                  accessibilityLabel="Enable Location Access"
+                  accessibilityHint="Opens permission dialog to grant geospatial telemetry access"
+                >
+                  <Text style={styles.permissionActionBtnText}>
+                    {permissionState === 'denied' ? 'RETRY LOCATION ACCESS' : 'GRANT LOCATION ACCESS'}
+                  </Text>
+                </TouchableOpacity>
+              ) : null}
+
+              {/* Progress Tracker */}
               <View
                 style={styles.progressTrackerContainer}
                 accessible={true}
                 accessibilityLabel={`Onboarding Progress: Step ${index + 1} of ${STEPS.length}`}
               >
-                <Text style={styles.progressLabel}>PROTOCOL PROGRESS</Text>
+                <Text style={styles.progressLabel}>
+                  PROTOCOL PROGRESS — STEP {index + 1} OF {STEPS.length}
+                </Text>
                 <View style={styles.progressBarTrack}>
                   <Animated.View
                     style={[
@@ -355,12 +485,14 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
                 </View>
               </View>
 
+              {/* Step Navigation Nodes */}
               <View style={styles.nodeRow}>
                 {STEPS.map((_, i) => (
                   <TouchableOpacity
                     key={i}
                     activeOpacity={0.7}
                     onPress={() => handleStepTransition(i)}
+                    disabled={isAnimating || isCompleting}
                     style={[
                       styles.stepNode,
                       i === index && styles.stepNodeActive,
@@ -369,68 +501,126 @@ export const OnboardingScreen: React.FC<Props> = ({ onComplete }) => {
                     accessible={true}
                     accessibilityRole="button"
                     accessibilityState={{ selected: i === index }}
-                    accessibilityLabel={`Navigate to step ${i + 1}`}
-                  />
+                    accessibilityLabel={`Navigate directly to step ${i + 1}`}
+                  >
+                    <Text
+                      style={[
+                        styles.stepNodeText,
+                        i === index && styles.stepNodeTextActive,
+                        i < index && styles.stepNodeTextCompleted,
+                      ]}
+                    >
+                      {i < index ? '✓' : `0${i + 1}`}
+                    </Text>
+                  </TouchableOpacity>
                 ))}
               </View>
 
-              <View style={styles.actionSection}>
-                <Animated.View style={{ transform: [{ scale: btnScaleAnim }] }}>
-                  <TouchableOpacity
-                    style={[
-                      styles.primaryButton,
-                      isFinalStep && styles.primaryButtonComplete,
-                    ]}
-                    activeOpacity={0.9}
-                    onPress={handleNext}
-                    accessible={true}
-                    accessibilityRole="button"
-                    accessibilityLabel={isFinalStep ? 'Enter Field' : 'Next Protocol Step'}
-                  >
-                    <Text style={styles.buttonText}>
-                      {isFinalStep ? 'ENTER FIELD ›' : 'NEXT PROTOCOL ›'}
-                    </Text>
-                  </TouchableOpacity>
-                </Animated.View>
+              {/* Action Buttons Row */}
+              <View style={styles.controlButtonsRow}>
+                <TouchableOpacity
+                  style={[styles.navBtn, styles.backBtn, index === 0 && styles.navBtnDisabled]}
+                  onPress={handleBack}
+                  disabled={index === 0 || isAnimating || isCompleting}
+                  activeOpacity={0.8}
+                  accessible={true}
+                  accessibilityRole="button"
+                  accessibilityLabel="Previous onboarding step"
+                  accessibilityState={{ disabled: index === 0 }}
+                >
+                  <ChevronLeftIcon color={index === 0 ? PALETTE.brass : PALETTE.parchment} size={18} />
+                  <Text style={[styles.navBtnText, index === 0 && styles.navBtnTextDisabled]}>
+                    BACK
+                  </Text>
+                </TouchableOpacity>
 
-                {!isFinalStep && (
-                  <TouchableOpacity
-                    style={styles.skipButton}
-                    onPress={finalizeCompletion}
-                    hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
-                    accessible={true}
-                    accessibilityRole="button"
-                    accessibilityLabel="Abort Tutorial and Skip"
-                  >
-                    <Text style={styles.skipButtonText}>ABORT TUTORIAL [SKIP]</Text>
-                  </TouchableOpacity>
-                )}
+                <TouchableOpacity
+                  style={[
+                    styles.navBtn,
+                    styles.nextBtn,
+                    isFinalStep && styles.completeBtn,
+                    (isAnimating || isCompleting) && styles.navBtnDisabled,
+                  ]}
+                  onPress={handleNext}
+                  disabled={isAnimating || isCompleting}
+                  activeOpacity={0.8}
+                  accessible={true}
+                  accessibilityRole="button"
+                  accessibilityLabel={isFinalStep ? 'Complete onboarding protocol' : 'Next onboarding step'}
+                >
+                  {isCompleting ? (
+                    <ActivityIndicator size="small" color={PALETTE.parchment} />
+                  ) : (
+                    <>
+                      <Text style={styles.nextBtnText}>
+                        {isFinalStep ? 'COMPLETE' : 'NEXT'}
+                      </Text>
+                      {isFinalStep ? (
+                        <CheckIcon color={PALETTE.parchment} size={18} />
+                      ) : (
+                        <ChevronRightIcon color={PALETTE.parchment} size={18} />
+                      )}
+                    </>
+                  )}
+                </TouchableOpacity>
               </View>
             </View>
           </View>
         </View>
       )}
 
-      {/* Contextual Permission Modal */}
-      <Modal visible={showPermissionModal} transparent animationType="fade">
+      {/* Location Permission Modal */}
+      <Modal
+        visible={showPermissionModal}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => setShowPermissionModal(false)}
+      >
         <View style={styles.modalOverlay}>
-          <View style={styles.modalBox}>
-            <Text style={styles.modalTitle}>LOCATION PERMISSION REQUIRED</Text>
+          <View
+            style={styles.modalCard}
+            accessible={true}
+            accessibilityRole="alert"
+            accessibilityLabel="Location permission explanation"
+          >
+            <View style={styles.modalIconWrapper}>
+              <TelemetryIcon color={PALETTE.sienna} size={32} />
+            </View>
+
+            <Text style={styles.modalTitle}>GEOSPATIAL PERMISSION REQUIRED</Text>
+            <Text style={styles.modalSubTitle}>[ GEOLOCATION_AUTH_REQUEST ]</Text>
+
+            <View style={styles.modalDivider} />
+
             <Text style={styles.modalDesc}>
-              Treasi requires geospatial positioning to pinpoint hidden caches relative to your physical location.
+              Treasi requires real-time device GPS coordinates and magnetometer heading telemetry to
+              locate nearby digital treasures, calculate live compass bearings, and enable kinetic excavation.
             </Text>
-            <View style={styles.modalActionRow}>
+
+            <View style={styles.modalActionsRow}>
               <TouchableOpacity
                 style={styles.modalCancelBtn}
                 onPress={() => {
                   setShowPermissionModal(false);
                   handleStepTransition(index + 1);
                 }}
+                activeOpacity={0.8}
+                accessible={true}
+                accessibilityRole="button"
+                accessibilityLabel="Continue without granting location permission"
               >
-                <Text style={styles.modalCancelText}>SKIP PERMISSION</Text>
+                <Text style={styles.modalCancelBtnText}>SKIP FOR NOW</Text>
               </TouchableOpacity>
-              <TouchableOpacity style={styles.modalGrantBtn} onPress={requestLocationPermission}>
-                <Text style={styles.modalGrantText}>ALLOW ACCESS</Text>
+
+              <TouchableOpacity
+                style={styles.modalGrantBtn}
+                onPress={requestLocationPermission}
+                activeOpacity={0.8}
+                accessible={true}
+                accessibilityRole="button"
+                accessibilityLabel="Grant Location Permission"
+              >
+                <Text style={styles.modalGrantBtnText}>ENABLE LOCATION</Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -448,6 +638,7 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     flexDirection: 'row',
+    gap: 12,
   },
   portraitWarningOverlay: {
     flex: 1,
@@ -455,123 +646,34 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     padding: 24,
-    borderWidth: 2,
-    borderColor: PALETTE.brass,
-    borderRadius: 8,
   },
   portraitWarningTitle: {
-    color: PALETTE.parchment,
+    fontFamily: 'Courier',
+    fontWeight: 'bold',
     fontSize: 16,
-    fontWeight: '900',
-    letterSpacing: 2,
+    color: PALETTE.sienna,
     marginTop: 16,
+    marginBottom: 8,
     textAlign: 'center',
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+    letterSpacing: 1.5,
   },
   portraitWarningDesc: {
-    color: PALETTE.brass,
+    fontFamily: 'Courier',
     fontSize: 12,
+    color: PALETTE.parchment,
     textAlign: 'center',
-    marginTop: 8,
-    letterSpacing: 1,
     lineHeight: 18,
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+    letterSpacing: 0.8,
   },
   leftViewport: {
     flex: 0.6,
     backgroundColor: PALETTE.parchment,
+    borderRadius: 6,
+    borderWidth: 2,
+    borderColor: PALETTE.brass,
     padding: 16,
     justifyContent: 'space-between',
-    borderRightWidth: 3,
-    borderColor: PALETTE.brass,
-    borderRadius: 4,
     position: 'relative',
-  },
-  headerMetaRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 4,
-  },
-  metaDocCode: {
-    color: PALETTE.mutedGreen,
-    fontSize: 10,
-    fontWeight: '700',
-    letterSpacing: 1.5,
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-  },
-  metaStepBadge: {
-    backgroundColor: PALETTE.sienna,
-    color: PALETTE.parchmentLight,
-    fontWeight: 'bold',
-    fontSize: 10,
-    paddingVertical: 2,
-    paddingHorizontal: 6,
-    borderRadius: 2,
-    letterSpacing: 1,
-  },
-  contentContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    paddingHorizontal: 8,
-  },
-  iconWrapper: {
-    width: 42,
-    height: 42,
-    borderRadius: 21,
-    backgroundColor: PALETTE.parchmentLight,
-    borderWidth: 1.5,
-    borderColor: PALETTE.brass,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 8,
-  },
-  protocolCodeText: {
-    color: PALETTE.sienna,
-    fontSize: 10,
-    fontWeight: '800',
-    letterSpacing: 2,
-    marginBottom: 2,
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-  },
-  titleText: {
-    color: PALETTE.inkBlack,
-    fontSize: 20,
-    fontWeight: '900',
-    letterSpacing: 1.5,
-  },
-  subtitleText: {
-    color: PALETTE.mutedGreen,
-    fontSize: 10,
-    fontWeight: '700',
-    letterSpacing: 1,
-    marginBottom: 8,
-  },
-  dividerLine: {
-    height: 2,
-    backgroundColor: PALETTE.brass,
-    width: '40%',
-    marginBottom: 8,
-    opacity: 0.5,
-  },
-  descText: {
-    color: PALETTE.inkBlack,
-    fontSize: 12,
-    lineHeight: 17,
-    fontWeight: '500',
-  },
-  footerNoteRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    borderTopWidth: 1,
-    borderColor: 'rgba(176, 141, 87, 0.4)',
-    paddingTop: 6,
-  },
-  footerNote: {
-    color: PALETTE.mutedGreen,
-    fontSize: 8,
-    letterSpacing: 1,
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
   },
   rivet: {
     position: 'absolute',
@@ -579,72 +681,200 @@ const styles = StyleSheet.create({
     height: 6,
     borderRadius: 3,
     backgroundColor: PALETTE.brass,
+    borderWidth: 1,
+    borderColor: PALETTE.inkBlack,
   },
   rivetTopLeft: { top: 6, left: 6 },
   rivetTopRight: { top: 6, right: 6 },
   rivetBottomLeft: { bottom: 6, left: 6 },
   rivetBottomRight: { bottom: 6, right: 6 },
+
+  headerMetaRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    borderBottomWidth: 1,
+    borderBottomColor: PALETTE.brass,
+    paddingBottom: 8,
+  },
+  metaDocCode: {
+    fontFamily: 'Courier',
+    fontSize: 10,
+    fontWeight: 'bold',
+    color: PALETTE.inkBlack,
+    letterSpacing: 1,
+  },
+  metaStepBadge: {
+    fontFamily: 'Courier',
+    fontSize: 11,
+    fontWeight: 'bold',
+    color: PALETTE.sienna,
+    letterSpacing: 1,
+  },
+  contentContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'flex-start',
+    paddingVertical: 8,
+  },
+  iconWrapper: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: PALETTE.parchmentLight,
+    borderWidth: 1.5,
+    borderColor: PALETTE.sienna,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  protocolCodeText: {
+    fontFamily: 'Courier',
+    fontSize: 10,
+    color: PALETTE.sienna,
+    fontWeight: 'bold',
+    letterSpacing: 1,
+    marginBottom: 2,
+  },
+  titleText: {
+    fontFamily: 'Courier',
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: PALETTE.inkBlack,
+    letterSpacing: 1.2,
+  },
+  subtitleText: {
+    fontFamily: 'Courier',
+    fontSize: 10,
+    color: PALETTE.mutedGreen,
+    letterSpacing: 0.8,
+    marginTop: 2,
+    marginBottom: 8,
+  },
+  dividerLine: {
+    width: '100%',
+    height: 1,
+    backgroundColor: PALETTE.brass,
+    marginVertical: 8,
+    opacity: 0.5,
+  },
+  descText: {
+    fontFamily: 'Courier',
+    fontSize: 12,
+    color: PALETTE.inkBlack,
+    lineHeight: 18,
+    letterSpacing: 0.4,
+  },
+  footerNoteRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    borderTopWidth: 1,
+    borderTopColor: PALETTE.brass,
+    paddingTop: 6,
+  },
+  footerNote: {
+    fontFamily: 'Courier',
+    fontSize: 8,
+    color: PALETTE.brass,
+    letterSpacing: 0.8,
+  },
+  errorContainer: {
+    backgroundColor: PALETTE.alertRed,
+    padding: 8,
+    borderRadius: 4,
+    marginVertical: 6,
+  },
+  errorText: {
+    fontFamily: 'Courier',
+    fontSize: 10,
+    color: PALETTE.parchment,
+    textAlign: 'center',
+  },
   rightViewport: {
     flex: 0.4,
-    backgroundColor: PALETTE.forestDeep,
-    paddingLeft: 12,
-    justifyContent: 'center',
   },
   consoleCard: {
     flex: 1,
+    backgroundColor: PALETTE.forestDeep,
+    borderRadius: 6,
     borderWidth: 2,
     borderColor: PALETTE.brass,
-    backgroundColor: 'rgba(0, 0, 0, 0.25)',
-    padding: 12,
-    borderRadius: 4,
+    padding: 14,
     justifyContent: 'space-between',
   },
   consoleHeader: {
-    color: PALETTE.parchment,
-    fontSize: 11,
+    fontFamily: 'Courier',
+    fontSize: 12,
     fontWeight: 'bold',
-    letterSpacing: 2,
-    textAlign: 'center',
-    marginBottom: 8,
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+    color: PALETTE.parchment,
+    letterSpacing: 1.2,
+    borderBottomWidth: 1,
+    borderBottomColor: PALETTE.brass,
+    paddingBottom: 6,
   },
   telemetryStatusBox: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: 'rgba(44, 59, 46, 0.9)',
-    padding: 8,
+    backgroundColor: '#1E2920',
     borderRadius: 4,
     borderWidth: 1,
     borderColor: PALETTE.brass,
-    marginBottom: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    marginVertical: 4,
   },
   statusDot: {
     width: 8,
     height: 8,
     borderRadius: 4,
-    backgroundColor: PALETTE.signalGreen,
+    backgroundColor: PALETTE.brass,
     marginRight: 8,
   },
+  statusDotOnline: {
+    backgroundColor: PALETTE.signalGreen,
+  },
+  statusDotAlert: {
+    backgroundColor: PALETTE.alertRed,
+  },
   telemetryStatusText: {
-    color: PALETTE.parchmentLight,
-    fontSize: 8.5,
+    fontFamily: 'Courier',
+    fontSize: 9,
     fontWeight: 'bold',
+    color: PALETTE.parchment,
+    flexShrink: 1,
+    letterSpacing: 0.6,
+  },
+  permissionActionBtn: {
+    backgroundColor: PALETTE.sienna,
+    borderRadius: 4,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: PALETTE.brass,
+    minHeight: 36,
+    justifyContent: 'center',
+  },
+  permissionActionBtnText: {
+    fontFamily: 'Courier',
+    fontSize: 9,
+    fontWeight: 'bold',
+    color: PALETTE.parchment,
     letterSpacing: 0.8,
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
   },
   progressTrackerContainer: {
-    marginBottom: 8,
+    marginVertical: 4,
   },
   progressLabel: {
+    fontFamily: 'Courier',
+    fontSize: 9,
     color: PALETTE.brass,
-    fontSize: 8.5,
-    fontWeight: 'bold',
-    letterSpacing: 1,
+    letterSpacing: 0.8,
     marginBottom: 4,
   },
   progressBarTrack: {
     height: 6,
-    backgroundColor: '#1E281F',
+    backgroundColor: '#1E2920',
     borderRadius: 3,
     overflow: 'hidden',
     borderWidth: 1,
@@ -656,126 +886,185 @@ const styles = StyleSheet.create({
   },
   nodeRow: {
     flexDirection: 'row',
-    justifyContent: 'center',
-    alignItems: 'center',
+    justifyContent: 'space-between',
     marginVertical: 4,
-    gap: 10,
   },
   stepNode: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: '#1E2920',
     borderWidth: 1.5,
     borderColor: PALETTE.brass,
-    backgroundColor: 'transparent',
+    justifyContent: 'center',
+    alignItems: 'center',
+    minWidth: 36,
+    minHeight: 36,
   },
   stepNodeActive: {
     backgroundColor: PALETTE.sienna,
-    transform: [{ scale: 1.25 }],
+    borderColor: PALETTE.parchment,
   },
   stepNodeCompleted: {
-    backgroundColor: PALETTE.brass,
+    backgroundColor: PALETTE.mutedGreen,
+    borderColor: PALETTE.signalGreen,
   },
-  actionSection: {
-    marginTop: 'auto',
-    gap: 6,
+  stepNodeText: {
+    fontFamily: 'Courier',
+    fontSize: 10,
+    fontWeight: 'bold',
+    color: PALETTE.brass,
   },
-  primaryButton: {
-    backgroundColor: PALETTE.sienna,
-    paddingVertical: 12,
-    paddingHorizontal: 10,
-    borderRadius: 4,
-    alignItems: 'center',
+  stepNodeTextActive: {
+    color: PALETTE.parchment,
+  },
+  stepNodeTextCompleted: {
+    color: PALETTE.signalGreen,
+  },
+  controlButtonsRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginTop: 4,
+  },
+  navBtn: {
+    flex: 1,
+    flexDirection: 'row',
     minHeight: 44,
+    borderRadius: 4,
+    borderWidth: 1.5,
     justifyContent: 'center',
-    borderWidth: 1,
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 8,
+  },
+  backBtn: {
+    backgroundColor: '#1E2920',
     borderColor: PALETTE.brass,
   },
-  primaryButtonComplete: {
-    backgroundColor: '#2E6F40',
+  nextBtn: {
+    backgroundColor: PALETTE.sienna,
+    borderColor: PALETTE.brass,
   },
-  buttonText: {
-    color: PALETTE.parchmentLight,
-    fontWeight: 'bold',
+  completeBtn: {
+    backgroundColor: PALETTE.mutedGreen,
+    borderColor: PALETTE.signalGreen,
+  },
+  navBtnDisabled: {
+    opacity: 0.4,
+  },
+  navBtnText: {
+    fontFamily: 'Courier',
     fontSize: 11,
-    letterSpacing: 2,
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+    fontWeight: 'bold',
+    color: PALETTE.parchment,
+    letterSpacing: 0.8,
   },
-  skipButton: {
-    alignItems: 'center',
-    paddingVertical: 4,
-  },
-  skipButtonText: {
+  navBtnTextDisabled: {
     color: PALETTE.brass,
-    fontSize: 9,
-    letterSpacing: 1,
-    textDecorationLine: 'underline',
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+  },
+  nextBtnText: {
+    fontFamily: 'Courier',
+    fontSize: 11,
+    fontWeight: 'bold',
+    color: PALETTE.parchment,
+    letterSpacing: 0.8,
   },
   modalOverlay: {
     flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.75)',
+    backgroundColor: 'rgba(42, 36, 32, 0.85)',
     justifyContent: 'center',
     alignItems: 'center',
     padding: 24,
   },
-  modalBox: {
-    backgroundColor: PALETTE.forestDeep,
+  modalCard: {
+    width: '100%',
+    maxWidth: 460,
+    backgroundColor: PALETTE.parchment,
+    borderRadius: 8,
     borderWidth: 2,
     borderColor: PALETTE.brass,
-    borderRadius: 6,
     padding: 20,
-    maxWidth: 400,
-    width: '100%',
+    alignItems: 'center',
+  },
+  modalIconWrapper: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    backgroundColor: PALETTE.parchmentLight,
+    borderWidth: 1.5,
+    borderColor: PALETTE.sienna,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 10,
   },
   modalTitle: {
-    color: PALETTE.parchment,
+    fontFamily: 'Courier',
     fontSize: 14,
     fontWeight: 'bold',
-    letterSpacing: 1.5,
-    marginBottom: 10,
+    color: PALETTE.inkBlack,
+    letterSpacing: 1,
     textAlign: 'center',
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+  },
+  modalSubTitle: {
+    fontFamily: 'Courier',
+    fontSize: 10,
+    color: PALETTE.sienna,
+    letterSpacing: 0.8,
+    marginTop: 2,
+    marginBottom: 8,
+  },
+  modalDivider: {
+    width: '100%',
+    height: 1,
+    backgroundColor: PALETTE.brass,
+    marginVertical: 10,
+    opacity: 0.6,
   },
   modalDesc: {
-    color: PALETTE.parchmentLight,
+    fontFamily: 'Courier',
     fontSize: 11,
+    color: PALETTE.inkBlack,
     lineHeight: 16,
     textAlign: 'center',
     marginBottom: 16,
   },
-  modalActionRow: {
+  modalActionsRow: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
     gap: 12,
+    width: '100%',
   },
   modalCancelBtn: {
     flex: 1,
-    paddingVertical: 10,
-    borderWidth: 1,
-    borderColor: PALETTE.brass,
+    minHeight: 44,
     borderRadius: 4,
+    borderWidth: 1.5,
+    borderColor: PALETTE.brass,
+    backgroundColor: PALETTE.parchmentLight,
+    justifyContent: 'center',
     alignItems: 'center',
   },
-  modalCancelText: {
-    color: PALETTE.brass,
+  modalCancelBtnText: {
+    fontFamily: 'Courier',
     fontSize: 10,
     fontWeight: 'bold',
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+    color: PALETTE.inkBlack,
+    letterSpacing: 0.6,
   },
   modalGrantBtn: {
     flex: 1,
-    paddingVertical: 10,
-    backgroundColor: PALETTE.sienna,
+    minHeight: 44,
     borderRadius: 4,
+    borderWidth: 1.5,
+    borderColor: PALETTE.brass,
+    backgroundColor: PALETTE.sienna,
+    justifyContent: 'center',
     alignItems: 'center',
   },
-  modalGrantText: {
-    color: PALETTE.parchmentLight,
+  modalGrantBtnText: {
+    fontFamily: 'Courier',
     fontSize: 10,
     fontWeight: 'bold',
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+    color: PALETTE.parchment,
+    letterSpacing: 0.6,
   },
 });
-
-export default OnboardingScreen;

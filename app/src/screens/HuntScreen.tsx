@@ -18,6 +18,7 @@ import Animated, {
   useSharedValue,
   useAnimatedStyle,
   withSpring,
+  SharedValue,
 } from 'react-native-reanimated';
 import Svg, {
   Line,
@@ -57,9 +58,11 @@ const COLORS = {
 };
 
 interface Props {
+  route?: { params?: { treasureId?: string } };
   treasureId?: string;
-  onBack: () => void;
+  onBack?: () => void;
   onSuccess?: () => void;
+  navigation?: any;
 }
 
 function getDistanceInMeters(
@@ -99,7 +102,7 @@ const OdometerDisplay: React.FC<{ value: string }> = ({ value }) => (
   </View>
 );
 
-const CompassDialView: React.FC<{ headingValue: { value: number }; size?: number }> = ({
+const CompassDialView: React.FC<{ headingValue: SharedValue<number>; size?: number }> = ({
   headingValue,
   size = 220,
 }) => {
@@ -166,9 +169,16 @@ const CompassDialView: React.FC<{ headingValue: { value: number }; size?: number
   );
 };
 
-export const HuntScreen: React.FC<Props> = ({ treasureId, onBack, onSuccess }) => {
+export const HuntScreen: React.FC<Props> = ({
+  route,
+  treasureId,
+  onBack,
+  onSuccess,
+  navigation,
+}) => {
   const insets = useSafeAreaInsets();
   const { width: windowWidth, height: windowHeight } = useWindowDimensions();
+  const targetTreasureId = treasureId || route?.params?.treasureId;
 
   // State Declarations
   const [treasure, setTreasure] = useState<TreasureDocument | null>(null);
@@ -176,6 +186,7 @@ export const HuntScreen: React.FC<Props> = ({ treasureId, onBack, onSuccess }) =
   const [loading, setLoading] = useState(true);
   const [distance, setDistance] = useState<number | null>(null);
   const [isExcavated, setIsExcavated] = useState(false);
+  const [isArchived, setIsArchived] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [imageModalVisible, setImageModalVisible] = useState(false);
 
@@ -189,11 +200,19 @@ export const HuntScreen: React.FC<Props> = ({ treasureId, onBack, onSuccess }) =
   const isMountedRef = useRef(true);
   const lastShakeTime = useRef(0);
 
+  const handleBackNavigation = useCallback(() => {
+    if (onBack) {
+      onBack();
+    } else if (navigation && navigation.canGoBack()) {
+      navigation.goBack();
+    }
+  }, [onBack, navigation]);
+
   // 1. Initial Target Validation & User Profile Sync
   useEffect(() => {
     isMountedRef.current = true;
 
-    if (!treasureId) {
+    if (!targetTreasureId) {
       setLoading(false);
       return;
     }
@@ -203,26 +222,30 @@ export const HuntScreen: React.FC<Props> = ({ treasureId, onBack, onSuccess }) =
         if (!auth.currentUser) return;
         const currentUserId = auth.currentUser.uid;
 
-        // Fetch User Settings (Haptics configuration)
+        // Fetch User Settings (Haptics & Sensitivity configuration)
         const userSnap = await getDoc(doc(db, 'users', currentUserId));
         if (userSnap.exists() && isMountedRef.current) {
           setUserProfile(userSnap.data() as UserDocument);
         }
 
         // Fetch Target Treasure Document
-        const docRef = doc(db, 'treasures', treasureId);
+        const docRef = doc(db, 'treasures', targetTreasureId);
         const docSnap = await getDoc(docRef);
 
         if (!docSnap.exists()) {
           Alert.alert('Target Lost', 'This treasure cache no longer exists in Firestore.');
-          onBack();
+          handleBackNavigation();
           return;
         }
 
         const treasureData = { treasureId: docSnap.id, ...docSnap.data() } as TreasureDocument;
 
+        if (treasureData.isArchived) {
+          setIsArchived(true);
+        }
+
         // Check prior discovery via atomic doc ID convention
-        const discoveryRef = doc(db, 'discoveries', `${currentUserId}_${treasureId}`);
+        const discoveryRef = doc(db, 'discoveries', `${currentUserId}_${targetTreasureId}`);
         const discoverySnap = await getDoc(discoveryRef);
 
         if (isMountedRef.current) {
@@ -243,7 +266,7 @@ export const HuntScreen: React.FC<Props> = ({ treasureId, onBack, onSuccess }) =
     return () => {
       isMountedRef.current = false;
     };
-  }, [treasureId, onBack]);
+  }, [targetTreasureId, handleBackNavigation]);
 
   // 2. GPS Location Stream with Accuracy Inspection
   useEffect(() => {
@@ -295,14 +318,15 @@ export const HuntScreen: React.FC<Props> = ({ treasureId, onBack, onSuccess }) =
       }
     };
 
-    if (treasure) startLocationTracking();
+    if (treasure && !isArchived) startLocationTracking();
 
     return () => {
       if (locationSub) locationSub.remove();
     };
-  }, [treasure]);
+  }, [treasure, isArchived]);
 
   // 3. Magnetometer Sensor with Landscape Math Offset
+  const isLandscape = windowWidth > windowHeight;
   useEffect(() => {
     let subscription: ReturnType<typeof Magnetometer.addListener> | null = null;
     let prevX = 0;
@@ -325,9 +349,10 @@ export const HuntScreen: React.FC<Props> = ({ treasureId, onBack, onSuccess }) =
         prevX = filteredX;
         prevY = filteredY;
 
-        // Landscape Mathematics: Compensate +90 degrees for landscape frame shift
+        // Landscape Mathematics: Compensate orientation shift (+90deg in landscape)
         let angle = Math.atan2(filteredY, filteredX) * (180 / Math.PI);
-        angle = (angle + 90 + 360) % 360;
+        const rotationOffset = isLandscape ? 90 : 0;
+        angle = (angle + rotationOffset + 360) % 360;
 
         headingShared.value = withSpring(angle, {
           damping: 14,
@@ -341,17 +366,27 @@ export const HuntScreen: React.FC<Props> = ({ treasureId, onBack, onSuccess }) =
     return () => {
       if (subscription) subscription.remove();
     };
-  }, [headingShared]);
+  }, [headingShared, isLandscape]);
 
   // 4. Atomic Excavation Engine (Firestore Transaction + Deterministic Doc ID)
   const executeExcavation = useCallback(async () => {
-    if (isExcavated || isSubmitting || !auth.currentUser || !treasure || !treasureId) return;
+    if (isExcavated || isArchived || isSubmitting || !auth.currentUser || !treasure || !targetTreasureId) return;
+
+    if (isArchived) {
+      Alert.alert('Archived Cache', 'This treasure has been archived and cannot be excavated.');
+      return;
+    }
 
     if (distance !== null && distance > DISCOVERY_RADIUS_METRES) {
       Alert.alert(
         'Out of Range',
         `Target is ${distance} meters away. Advance within ${DISCOVERY_RADIUS_METRES} meters to dig.`
       );
+      return;
+    }
+
+    if (gpsStatus === 'DENIED' || gpsStatus === 'UNAVAILABLE') {
+      Alert.alert('GPS Error', 'Location services must be enabled and active to verify excavation.');
       return;
     }
 
@@ -363,9 +398,9 @@ export const HuntScreen: React.FC<Props> = ({ treasureId, onBack, onSuccess }) =
     setIsSubmitting(true);
     try {
       const userId = auth.currentUser.uid;
-      const userName = auth.currentUser.displayName || 'Anonymous Explorer';
-      
-      const discoveryRef = doc(db, 'discoveries', `${userId}_${treasureId}`);
+      const userName = auth.currentUser.displayName || userProfile?.username || 'Anonymous Explorer';
+
+      const discoveryRef = doc(db, 'discoveries', `${userId}_${targetTreasureId}`);
       const userRef = doc(db, 'users', userId);
       const activityRef = doc(collection(db, 'activity_feed'));
 
@@ -377,8 +412,8 @@ export const HuntScreen: React.FC<Props> = ({ treasureId, onBack, onSuccess }) =
 
         // Write deterministic discovery record
         transaction.set(discoveryRef, {
-          discoveryId: `${userId}_${treasureId}`,
-          treasureId: treasureId,
+          discoveryId: `${userId}_${targetTreasureId}`,
+          treasureId: targetTreasureId,
           hunterId: userId,
           unlockedAt: serverTimestamp(),
         });
@@ -395,13 +430,13 @@ export const HuntScreen: React.FC<Props> = ({ treasureId, onBack, onSuccess }) =
           username: userName,
           type: 'TREASURE_FOUND',
           message: `Excavated "${treasure.title}"`,
-          targetId: treasureId,
+          targetId: targetTreasureId,
           createdAt: serverTimestamp(),
         });
       });
 
-      // Conditional Haptic Feedback check based on stored user profile preference
-      if (userProfile?.hapticFeedbackEnabled) {
+      // Conditional Haptic Feedback check based on stored user profile preference (default true if not set)
+      if (userProfile?.hapticFeedbackEnabled !== false) {
         await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       }
 
@@ -417,7 +452,7 @@ export const HuntScreen: React.FC<Props> = ({ treasureId, onBack, onSuccess }) =
     } finally {
       if (isMountedRef.current) setIsSubmitting(false);
     }
-  }, [isExcavated, isSubmitting, treasure, treasureId, distance, gpsStatus, userProfile, onSuccess]);
+  }, [isExcavated, isArchived, isSubmitting, treasure, targetTreasureId, distance, gpsStatus, userProfile, onSuccess]);
 
   // 5. Accelerometer Kinetic Shake Listener
   useEffect(() => {
@@ -431,12 +466,16 @@ export const HuntScreen: React.FC<Props> = ({ treasureId, onBack, onSuccess }) =
       }
 
       Accelerometer.setUpdateInterval(100);
+
+      // Adjust threshold based on user profile motion sensitivity toggle
+      const shakeThreshold = userProfile?.motionSensitivityEnabled ? 2.0 : 2.4;
+
       accelSub = Accelerometer.addListener((data) => {
         if (!data) return;
         const gForce = Math.sqrt(data.x * data.x + data.y * data.y + data.z * data.z);
         const now = Date.now();
 
-        if (gForce > 2.4 && now - lastShakeTime.current > 2000 && !isExcavated && !isSubmitting) {
+        if (gForce > shakeThreshold && now - lastShakeTime.current > 2000 && !isExcavated && !isArchived && !isSubmitting) {
           lastShakeTime.current = now;
           executeExcavation();
         }
@@ -448,15 +487,20 @@ export const HuntScreen: React.FC<Props> = ({ treasureId, onBack, onSuccess }) =
     return () => {
       if (accelSub) accelSub.remove();
     };
-  }, [isExcavated, isSubmitting, executeExcavation]);
+  }, [isExcavated, isArchived, isSubmitting, userProfile, executeExcavation]);
 
   // Render Missing Parameter Fallback Screen
-  if (!treasureId) {
+  if (!targetTreasureId) {
     return (
       <View style={[styles.container, styles.centerContent]}>
         <Text style={styles.errorTitle}>TELEMETRY ERROR: INVALID TARGET</Text>
-        <Text style={styles.errorSub}>No treasure target ID was specified during navigation dispatch.</Text>
-        <TouchableOpacity style={styles.closeModalButton} onPress={onBack}>
+        <Text style={styles.errorSub}>Treasure target unavailable. No target ID was specified.</Text>
+        <TouchableOpacity
+          style={styles.closeModalButton}
+          onPress={handleBackNavigation}
+          accessibilityRole="button"
+          accessibilityLabel="Return to Dashboard"
+        >
           <Text style={styles.closeModalText}>RETURN TO DASHBOARD</Text>
         </TouchableOpacity>
       </View>
@@ -474,7 +518,6 @@ export const HuntScreen: React.FC<Props> = ({ treasureId, onBack, onSuccess }) =
 
   const formattedDistance =
     distance !== null ? String(distance).padStart(3, '0') + ' m' : '--- m';
-  const isLandscape = windowWidth > windowHeight;
 
   return (
     <View
@@ -494,7 +537,7 @@ export const HuntScreen: React.FC<Props> = ({ treasureId, onBack, onSuccess }) =
           {compassAvailable ? (
             <CompassDialView
               headingValue={headingShared}
-              size={Math.min(windowHeight * 0.52, 220)}
+              size={Math.min(windowHeight * (isLandscape ? 0.52 : 0.35), 220)}
             />
           ) : (
             <View style={styles.sensorFallbackBox}>
@@ -506,6 +549,12 @@ export const HuntScreen: React.FC<Props> = ({ treasureId, onBack, onSuccess }) =
             <OdometerDisplay value={formattedDistance} />
             <Text style={styles.targetSubtext}>· · TO TARGET (5m DIG RADIUS) · ·</Text>
             {gpsAccuracyMsg && <Text style={styles.gpsWarningText}>{gpsAccuracyMsg}</Text>}
+            {gpsStatus === 'DENIED' && (
+              <Text style={styles.gpsWarningText}>GPS PERMISSION DENIED</Text>
+            )}
+            {gpsStatus === 'UNAVAILABLE' && (
+              <Text style={styles.gpsWarningText}>LOCATION SERVICES DISABLED</Text>
+            )}
           </View>
         </View>
 
@@ -550,13 +599,20 @@ export const HuntScreen: React.FC<Props> = ({ treasureId, onBack, onSuccess }) =
             <TouchableOpacity
               activeOpacity={0.8}
               onPress={executeExcavation}
-              disabled={isSubmitting || isExcavated}
+              disabled={isSubmitting || isExcavated || isArchived}
               accessible={true}
               accessibilityRole="button"
-              accessibilityLabel={isExcavated ? 'Excavation Complete' : 'Tap or Shake Device to Excavate'}
+              accessibilityLabel={
+                isArchived
+                  ? 'Cache Archived'
+                  : isExcavated
+                  ? 'Excavation Complete'
+                  : 'Tap or Shake Device to Excavate'
+              }
               style={[
                 styles.alertCard,
                 isExcavated && styles.alertCardSuccess,
+                isArchived && styles.alertCardDisabled,
               ]}
             >
               <View style={styles.alertHeaderRow}>
@@ -568,6 +624,8 @@ export const HuntScreen: React.FC<Props> = ({ treasureId, onBack, onSuccess }) =
                 <Text style={styles.alertTitle}>
                   {isSubmitting
                     ? 'TRANSMITTING SIGNAL...'
+                    : isArchived
+                    ? 'CACHE ARCHIVED'
                     : isExcavated
                     ? 'EXCAVATION COMPLETE'
                     : 'DIG SITE DETECTED'}
@@ -575,7 +633,9 @@ export const HuntScreen: React.FC<Props> = ({ treasureId, onBack, onSuccess }) =
               </View>
 
               <Text style={styles.alertSub}>
-                {isExcavated
+                {isArchived
+                  ? 'THIS TREASURE IS NO LONGER ACTIVE'
+                  : isExcavated
                   ? `PAYLOAD: ${treasure?.payloadText || 'CACHE UNLOCKED (+100 PTS)'}`
                   : accelAvailable
                   ? 'SHAKE DEVICE OR TAP BOX TO EXCAVATE (WITHIN 5M)'
@@ -583,14 +643,19 @@ export const HuntScreen: React.FC<Props> = ({ treasureId, onBack, onSuccess }) =
               </Text>
             </TouchableOpacity>
 
-            <TouchableOpacity style={styles.abandonButton} onPress={onBack}>
+            <TouchableOpacity
+              style={styles.abandonButton}
+              onPress={handleBackNavigation}
+              accessibilityRole="button"
+              accessibilityLabel="Abandon Hunt and Return"
+            >
               <Text style={styles.abandonText}>ABANDON HUNT ▸</Text>
             </TouchableOpacity>
           </View>
         </View>
       </View>
 
-      {/* Modal */}
+      {/* Field Photo Evidence Modal */}
       {treasure?.imageUrl ? (
         <Modal
           visible={imageModalVisible}
@@ -601,7 +666,12 @@ export const HuntScreen: React.FC<Props> = ({ treasureId, onBack, onSuccess }) =
           <View style={styles.modalOverlay}>
             <View style={styles.modalContent}>
               <Image source={{ uri: treasure.imageUrl }} style={styles.fullEvidenceImage} resizeMode="cover" />
-              <TouchableOpacity style={styles.closeModalButton} onPress={() => setImageModalVisible(false)}>
+              <TouchableOpacity
+                style={styles.closeModalButton}
+                onPress={() => setImageModalVisible(false)}
+                accessibilityRole="button"
+                accessibilityLabel="Close Evidence Modal"
+              >
                 <Text style={styles.closeModalText}>CLOSE EVIDENCE</Text>
               </TouchableOpacity>
             </View>
@@ -647,6 +717,7 @@ const styles = StyleSheet.create({
   actionContainer: { marginTop: 10 },
   alertCard: { backgroundColor: COLORS.sienna, borderRadius: 4, padding: 10, borderWidth: 1, borderColor: COLORS.parchment, borderStyle: 'dashed', marginBottom: 6 },
   alertCardSuccess: { backgroundColor: COLORS.forestDarker, borderColor: COLORS.brass, borderStyle: 'solid' },
+  alertCardDisabled: { backgroundColor: '#4A4A4A', borderColor: '#777777', borderStyle: 'solid' },
   alertHeaderRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 2 },
   alertTitle: { color: COLORS.white, fontWeight: 'bold', fontSize: 10, letterSpacing: 1.2, marginLeft: 6, fontFamily: 'Courier' },
   alertSub: { color: COLORS.parchment, fontSize: 8.5, letterSpacing: 0.8, fontFamily: 'Courier' },

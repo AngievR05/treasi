@@ -44,6 +44,8 @@ export interface LoginScreenProps {
   onLoginSuccess: () => void;
 }
 
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 export const LoginScreen: React.FC<LoginScreenProps> = ({ 
   onNavigateSignUp, 
   onLoginSuccess 
@@ -59,7 +61,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  // Pre-flight Sensor & System Calibration Toggles (Default OFF)
+  // Pre-flight Sensor & System Calibration Toggles (Default: OFF / false)
   const [gpsEnabled, setGpsEnabled] = useState<boolean>(false);
   const [compassHapticsEnabled, setCompassHapticsEnabled] = useState<boolean>(false);
   const [motionEnabled, setMotionEnabled] = useState<boolean>(false);
@@ -80,12 +82,38 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
     buttonScale.value = withSpring(1, { damping: 12, stiffness: 200 });
   };
 
+  // Error clearing helpers on user typing
+  const handleEmailChange = (text: string) => {
+    setEmail(text);
+    if (errorMessage) setErrorMessage(null);
+  };
+
+  const handlePasswordChange = (text: string) => {
+    setPassword(text);
+    if (errorMessage) setErrorMessage(null);
+  };
+
   // Firebase Auth Login & Telemetry Synchronization Pipeline
   const handleLogin = async () => {
+    if (isLoading) return;
+
     const trimmedEmail = email.trim();
 
-    if (!trimmedEmail || !password) {
-      setErrorMessage('Field protocol requires both Explorer Email and Passcode.');
+    // 1. Empty email validation
+    if (!trimmedEmail) {
+      setErrorMessage('Please enter your Explorer Email.');
+      return;
+    }
+
+    // 2. Email format validation
+    if (!EMAIL_REGEX.test(trimmedEmail)) {
+      setErrorMessage('Please enter a valid Explorer Email address.');
+      return;
+    }
+
+    // 3. Empty password validation
+    if (!password) {
+      setErrorMessage('Please enter your Passcode.');
       return;
     }
 
@@ -93,7 +121,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
     setErrorMessage(null);
 
     try {
-      // 1. Authenticate credentials via Firebase Auth
+      // Authenticate credentials via Firebase Auth
       const userCredential = await signInWithEmailAndPassword(auth, trimmedEmail, password);
       const user = userCredential.user;
 
@@ -101,7 +129,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
         const userDocRef = doc(db, 'users', user.uid);
         const userDocSnap = await getDoc(userDocRef);
 
-        // 2. Synchronize active Pre-flight Toggles to user profile document
+        // Synchronize active Pre-flight Toggles to user profile document
         const telemetryPayload: Partial<UserDocument> = {
           telemetryEnabled: gpsEnabled,
           hapticFeedbackEnabled: compassHapticsEnabled,
@@ -113,7 +141,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
         if (userDocSnap.exists()) {
           await updateDoc(userDocRef, telemetryPayload);
         } else {
-          // Failsafe: Initialize user document if missing
+          // Failsafe: Initialize user document if missing in Firestore
           await setDoc(userDocRef, {
             uid: user.uid,
             username: trimmedEmail.split('@')[0] || 'Explorer',
@@ -130,19 +158,19 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
 
       onLoginSuccess();
     } catch (error: any) {
-      let msg = 'Authentication failed. Please check field credentials.';
+      let msg = 'Something went wrong while signing in. Please try again.';
       const errorCode = error?.code;
 
       if (errorCode === 'auth/network-request-failed') {
-        msg = 'Network connection lost. Check telemetry signal and retry.';
+        msg = 'Unable to connect. Check telemetry signal and retry.';
       } else if (errorCode === 'auth/invalid-email') {
-        msg = 'Invalid Explorer Email format. Check email syntax.';
+        msg = 'Please enter a valid Explorer Email address.';
       } else if (
         errorCode === 'auth/user-not-found' ||
         errorCode === 'auth/wrong-password' ||
         errorCode === 'auth/invalid-credential'
       ) {
-        msg = 'Unrecognized Explorer Email or Passcode. Access denied.';
+        msg = 'Incorrect Explorer Email or Passcode.';
       } else if (errorCode === 'auth/too-many-requests') {
         msg = 'Too many failed attempts. Terminal locked temporarily. Try again shortly.';
       } else if (
@@ -205,7 +233,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
                 <Text style={styles.brandSubtitle}>Hide. Explore. Stay connected.</Text>
               </View>
 
-              {/* Diagnostic Banner */}
+              {/* Diagnostic Error Banner */}
               {errorMessage && (
                 <View
                   style={styles.errorBox}
@@ -229,17 +257,18 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
                     placeholder="EXPLORER EMAIL"
                     placeholderTextColor="#8C7350"
                     value={email}
-                    onChangeText={setEmail}
+                    onChangeText={handleEmailChange}
                     autoCapitalize="none"
                     keyboardType="email-address"
                     autoCorrect={false}
+                    editable={!isLoading}
                     accessible={true}
                     accessibilityLabel="Explorer Email Input"
-                    accessibilityHint="Enter your registered email address"
+                    accessibilityHint="Enter your registered explorer email address"
                   />
                 </View>
 
-                {/* Password Input */}
+                {/* Passcode Input */}
                 <View style={styles.inputContainer}>
                   <Lock size={18} color="#2A2420" style={styles.inputIcon} />
                   <TextInput
@@ -247,19 +276,22 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
                     placeholder="PASSCODE"
                     placeholderTextColor="#8C7350"
                     value={password}
-                    onChangeText={setPassword}
+                    onChangeText={handlePasswordChange}
                     secureTextEntry={!showPassword}
                     autoCapitalize="none"
+                    editable={!isLoading}
                     accessible={true}
                     accessibilityLabel="Passcode Input"
-                    accessibilityHint="Enter your secret security code"
+                    accessibilityHint="Enter your secret security passcode"
                   />
                   <TouchableOpacity
-                    onPress={() => setShowPassword(!showPassword)}
+                    onPress={() => setShowPassword((prev) => !prev)}
                     style={styles.eyeButton}
+                    disabled={isLoading}
                     accessible={true}
                     accessibilityRole="button"
                     accessibilityLabel={showPassword ? 'Hide passcode' : 'Show passcode'}
+                    accessibilityHint="Toggles security passcode text visibility"
                   >
                     {showPassword ? (
                       <EyeOff size={18} color="#2A2420" />
@@ -295,6 +327,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
               {/* Registration Link */}
               <TouchableOpacity
                 onPress={onNavigateSignUp}
+                disabled={isLoading}
                 style={styles.linkContainer}
                 accessible={true}
                 accessibilityRole="button"
@@ -341,11 +374,13 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
                 <Switch
                   value={gpsEnabled}
                   onValueChange={setGpsEnabled}
+                  disabled={isLoading}
                   trackColor={{ false: '#1A231B', true: '#A64B2A' }}
                   thumbColor={gpsEnabled ? '#E8DCC0' : '#B08D57'}
                   accessible={true}
                   accessibilityRole="switch"
                   accessibilityLabel="Enable GPS Telemetry"
+                  accessibilityState={{ checked: gpsEnabled }}
                   style={styles.switchTarget}
                 />
               </View>
@@ -359,11 +394,13 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
                 <Switch
                   value={compassHapticsEnabled}
                   onValueChange={setCompassHapticsEnabled}
+                  disabled={isLoading}
                   trackColor={{ false: '#1A231B', true: '#A64B2A' }}
                   thumbColor={compassHapticsEnabled ? '#E8DCC0' : '#B08D57'}
                   accessible={true}
                   accessibilityRole="switch"
                   accessibilityLabel="Enable Compass Heading Haptic Pulses"
+                  accessibilityState={{ checked: compassHapticsEnabled }}
                   style={styles.switchTarget}
                 />
               </View>
@@ -377,11 +414,13 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
                 <Switch
                   value={motionEnabled}
                   onValueChange={setMotionEnabled}
+                  disabled={isLoading}
                   trackColor={{ false: '#1A231B', true: '#A64B2A' }}
                   thumbColor={motionEnabled ? '#E8DCC0' : '#B08D57'}
                   accessible={true}
                   accessibilityRole="switch"
                   accessibilityLabel="Enable Motion Sense Accelerometer"
+                  accessibilityState={{ checked: motionEnabled }}
                   style={styles.switchTarget}
                 />
               </View>
@@ -395,11 +434,13 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
                 <Switch
                   value={nightModeEnabled}
                   onValueChange={setNightModeEnabled}
+                  disabled={isLoading}
                   trackColor={{ false: '#1A231B', true: '#A64B2A' }}
                   thumbColor={nightModeEnabled ? '#E8DCC0' : '#B08D57'}
                   accessible={true}
                   accessibilityRole="switch"
                   accessibilityLabel="Enable Night Mode Interface"
+                  accessibilityState={{ checked: nightModeEnabled }}
                   style={styles.switchTarget}
                 />
               </View>
