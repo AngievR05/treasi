@@ -1,49 +1,46 @@
-import React, { useState, useEffect } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
-  View,
-  Text,
-  StyleSheet,
-  TouchableOpacity,
-  ScrollView,
-  TextInput,
-  Modal,
-  Pressable,
-  useWindowDimensions,
-  Platform,
   ActivityIndicator,
   Alert,
+  Modal,
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  useWindowDimensions,
+  View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Animated, {
+  FadeInDown,
   FadeInLeft,
   FadeInRight,
-  FadeInDown,
   useAnimatedStyle,
   useSharedValue,
   withSpring,
 } from 'react-native-reanimated';
-import Svg, { Path, Circle, Polyline } from 'react-native-svg';
+import Svg, { Circle, Path, Polyline } from 'react-native-svg';
 import {
   collection,
-  query,
-  orderBy,
+  deleteDoc,
+  doc,
+  GeoPoint,
   limit,
   onSnapshot,
-  doc,
+  orderBy,
+  query,
   setDoc,
-  addDoc,
-  deleteDoc,
+  Timestamp,
   updateDoc,
   where,
-  getDocs,
-  Timestamp,
-  GeoPoint,
 } from 'firebase/firestore';
 import { auth, db } from '../config/firebase';
 import { UserDocument, FriendshipDocument } from '../types/firestore';
 import { FieldNavBar, NavigationTab } from '../components/FieldNavBar';
 
-// Custom SVG Vector Icons (Strictly NO Emojis)
 const StarIcon = ({ color = '#A64B2A', size = 12 }: { color?: string; size?: number }) => (
   <Svg width={size} height={size} viewBox="0 0 24 24" fill={color}>
     <Path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" />
@@ -116,29 +113,49 @@ interface Props {
   userCoordinates?: { latitude: number; longitude: number } | null;
 }
 
-// 20km Haversine Distance Calculator
+const RADIUS_KM = 20;
+const MAX_LEADERBOARD_ENTRIES = 50;
+const MAX_EXPLORERS = 100;
+
+const isValidCoordinate = (latitude: unknown, longitude: unknown): boolean =>
+  typeof latitude === 'number' &&
+  typeof longitude === 'number' &&
+  Number.isFinite(latitude) &&
+  Number.isFinite(longitude) &&
+  latitude >= -90 &&
+  latitude <= 90 &&
+  longitude >= -180 &&
+  longitude <= 180;
+
 const calculateHaversineDistanceKm = (
   lat1: number,
   lon1: number,
   lat2: number,
-  lon2: number
+  lon2: number,
 ): number => {
-  const R = 6371; // Earth's radius in kilometers
+  const R = 6371;
   const dLat = ((lat2 - lat1) * Math.PI) / 180;
   const dLon = ((lon2 - lon1) * Math.PI) / 180;
   const a =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.sin(dLat / 2) ** 2 +
     Math.cos((lat1 * Math.PI) / 180) *
       Math.cos((lat2 * Math.PI) / 180) *
-      Math.sin(dLon / 2) *
-      Math.sin(dLon / 2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return R * c;
+      Math.sin(dLon / 2) ** 2;
+  return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
 };
 
-// Generates deterministic document ID to avoid duplicate relationships
-const getDeterministicFriendshipId = (uid1: string, uid2: string): string => {
-  return [uid1, uid2].sort().join('_');
+const getDeterministicFriendshipId = (uid1: string, uid2: string): string =>
+  [uid1, uid2].sort().join('_');
+
+const formatDistance = (distanceKm: number | null): string => {
+  if (distanceKm === null || !Number.isFinite(distanceKm)) return 'NO SIGNAL';
+  if (distanceKm < 1) return `${Math.round(distanceKm * 1000)} m`;
+  return `${distanceKm.toFixed(1)} km`;
+};
+
+const normaliseName = (value: unknown): string => {
+  const name = typeof value === 'string' ? value.trim() : '';
+  return name ? name.toUpperCase() : 'AGENT';
 };
 
 export const LeaderboardScreen: React.FC<Props> = ({
@@ -146,51 +163,90 @@ export const LeaderboardScreen: React.FC<Props> = ({
   userCoordinates = null,
 }) => {
   const insets = useSafeAreaInsets();
-  const { width } = useWindowDimensions();
+  const { width, height } = useWindowDimensions();
+  const isLandscape = width > height;
   const currentTab: NavigationTab = 'LEADERBOARD';
   const currentUser = auth?.currentUser;
-  const currentUserId = currentUser?.uid || '';
+  const currentUserId = currentUser?.uid ?? '';
 
-  // Modal & Input State
+  const [manifest, setManifest] = useState<ExplorerEntry[]>([]);
+  const [allUsers, setAllUsers] = useState<
+    Array<{ uid: string; name: string; location: GeoPoint | null }>
+  >([]);
+  const [outgoingFriendships, setOutgoingFriendships] = useState<
+    Array<{ docId: string; targetUid: string; status: FriendshipMeta['status'] }>
+  >([]);
+  const [incomingFriendships, setIncomingFriendships] = useState<
+    Array<{ docId: string; targetUid: string; status: FriendshipMeta['status'] }>
+  >([]);
+
+  const [loadingManifest, setLoadingManifest] = useState(true);
+  const [manifestError, setManifestError] = useState('');
+  const [loadingExplorers, setLoadingExplorers] = useState(true);
+  const [explorerError, setExplorerError] = useState('');
+
   const [telegramModalVisible, setTelegramModalVisible] = useState(false);
   const [friendModalVisible, setFriendModalVisible] = useState(false);
   const [telegramText, setTelegramText] = useState('');
   const [searchAgentTag, setSearchAgentTag] = useState('');
   const [searchError, setSearchError] = useState('');
 
-  // Firestore Realtime State
-  const [manifest, setManifest] = useState<ExplorerEntry[]>([]);
-  const [nearbyExplorers, setNearbyExplorers] = useState<NearbyExplorer[]>([]);
-  const [friendshipsMap, setFriendshipsMap] = useState<Record<string, FriendshipMeta>>({});
-  const [loadingManifest, setLoadingManifest] = useState(true);
-  const [loadingExplorers, setLoadingExplorers] = useState(true);
+  const [actionUid, setActionUid] = useState<string | null>(null);
   const [isTransmitting, setIsTransmitting] = useState(false);
+  const [isSearching, setIsSearching] = useState(false);
 
-  // Motion Springs
   const buttonScale = useSharedValue(1);
   const animatedButtonStyle = useAnimatedStyle(() => ({
     transform: [{ scale: buttonScale.value }],
   }));
 
   const handlePressIn = () => {
-    buttonScale.value = withSpring(0.95);
-  };
-  const handlePressOut = () => {
-    buttonScale.value = withSpring(1);
+    buttonScale.value = withSpring(0.95, { damping: 15 });
   };
 
-  /**
-   * 1. READ: LISTEN TO GLOBAL LEADERBOARD MANIFEST
-   */
+  const handlePressOut = () => {
+    buttonScale.value = withSpring(1, { damping: 15 });
+  };
+
+  const friendshipsMap = useMemo<Record<string, FriendshipMeta>>(() => {
+    const map: Record<string, FriendshipMeta> = {};
+
+    for (const friendship of outgoingFriendships) {
+      map[friendship.targetUid] = {
+        docId: friendship.docId,
+        status: friendship.status,
+        isRequester: true,
+      };
+    }
+
+    for (const friendship of incomingFriendships) {
+      const existing = map[friendship.targetUid];
+      if (!existing || existing.status !== 'accepted') {
+        map[friendship.targetUid] = {
+          docId: friendship.docId,
+          status: friendship.status,
+          isRequester: false,
+        };
+      }
+    }
+
+    return map;
+  }, [incomingFriendships, outgoingFriendships]);
+
   useEffect(() => {
     if (!db) {
+      setManifestError('Database connection unavailable.');
       setLoadingManifest(false);
       return;
     }
+
+    setLoadingManifest(true);
+    setManifestError('');
+
     const leaderboardQuery = query(
       collection(db, 'users'),
       orderBy('totalPoints', 'desc'),
-      limit(50)
+      limit(MAX_LEADERBOARD_ENTRIES),
     );
 
     const unsubscribe = onSnapshot(
@@ -199,73 +255,74 @@ export const LeaderboardScreen: React.FC<Props> = ({
         const entries: ExplorerEntry[] = snapshot.docs.map((docSnap, index) => {
           const data = docSnap.data() as UserDocument;
           const isUser = docSnap.id === currentUserId;
-          const rankFormatted = String(index + 1).padStart(2, '0');
-          const formattedName = isUser
-            ? `YOU - ${data.username?.toUpperCase() || 'EXPLORER'}`
-            : data.username?.toUpperCase() || 'UNKNOWN_AGENT';
+          const username = normaliseName(data.username);
+          const totalPoints =
+            typeof data.totalPoints === 'number' && Number.isFinite(data.totalPoints)
+              ? data.totalPoints
+              : 0;
 
           return {
             uid: docSnap.id,
-            rank: rankFormatted,
-            name: formattedName,
-            points: (data.totalPoints || 0).toLocaleString(),
+            rank: String(index + 1).padStart(2, '0'),
+            name: isUser ? `YOU - ${username}` : username,
+            points: totalPoints.toLocaleString(),
             isUser,
           };
         });
+
         setManifest(entries);
         setLoadingManifest(false);
       },
-      (err) => {
-        console.error('Leaderboard Snapshot Error:', err);
+      () => {
+        setManifestError('Unable to sync the explorer manifest. Please try again.');
         setLoadingManifest(false);
-      }
+      },
     );
 
-    return () => unsubscribe();
+    return unsubscribe;
   }, [currentUserId]);
 
-  /**
-   * 2. READ: LISTEN TO BIDIRECTIONAL FRIENDSHIPS
-   */
   useEffect(() => {
-    if (!db || !currentUserId) return;
+    if (!db || !currentUserId) {
+      setOutgoingFriendships([]);
+      setIncomingFriendships([]);
+      return;
+    }
 
-    const qOutgoing = query(
+    const outgoingQuery = query(
       collection(db, 'friendships'),
-      where('requesterId', '==', currentUserId)
+      where('requesterId', '==', currentUserId),
     );
 
-    const qIncoming = query(
+    const incomingQuery = query(
       collection(db, 'friendships'),
-      where('receiverId', '==', currentUserId)
+      where('receiverId', '==', currentUserId),
     );
 
-    const activeMap: Record<string, FriendshipMeta> = {};
-
-    const unsubOutgoing = onSnapshot(qOutgoing, (snap) => {
-      snap.docs.forEach((docSnap) => {
-        const data = docSnap.data() as FriendshipDocument;
-        const targetId = data.receiverId === currentUserId ? data.requesterId : data.receiverId;
-        activeMap[targetId] = {
-          docId: docSnap.id,
-          status: data.status,
-          isRequester: data.requesterId === currentUserId,
-        };
-      });
-      setFriendshipsMap({ ...activeMap });
+    const unsubOutgoing = onSnapshot(outgoingQuery, (snapshot) => {
+      setOutgoingFriendships(
+        snapshot.docs.map((docSnap) => {
+          const data = docSnap.data() as FriendshipDocument;
+          return {
+            docId: docSnap.id,
+            targetUid: data.receiverId,
+            status: data.status,
+          };
+        }),
+      );
     });
 
-    const unsubIncoming = onSnapshot(qIncoming, (snap) => {
-      snap.docs.forEach((docSnap) => {
-        const data = docSnap.data() as FriendshipDocument;
-        const targetId = data.requesterId === currentUserId ? data.receiverId : data.requesterId;
-        activeMap[targetId] = {
-          docId: docSnap.id,
-          status: data.status,
-          isRequester: data.requesterId === currentUserId,
-        };
-      });
-      setFriendshipsMap({ ...activeMap });
+    const unsubIncoming = onSnapshot(incomingQuery, (snapshot) => {
+      setIncomingFriendships(
+        snapshot.docs.map((docSnap) => {
+          const data = docSnap.data() as FriendshipDocument;
+          return {
+            docId: docSnap.id,
+            targetUid: data.requesterId,
+            status: data.status,
+          };
+        }),
+      );
     });
 
     return () => {
@@ -274,220 +331,306 @@ export const LeaderboardScreen: React.FC<Props> = ({
     };
   }, [currentUserId]);
 
-  /**
-   * 3. READ & FILTER: NEARBY EXPLORERS (STRICT VERIFIED DATA ONLY)
-   */
   useEffect(() => {
     if (!db || !currentUserId) {
+      setAllUsers([]);
       setLoadingExplorers(false);
       return;
     }
 
-    const usersQuery = query(collection(db, 'users'), limit(100));
+    setLoadingExplorers(true);
+    setExplorerError('');
+
+    const usersQuery = query(collection(db, 'users'), limit(MAX_EXPLORERS));
 
     const unsubscribe = onSnapshot(
       usersQuery,
       (snapshot) => {
-        const parsedList: NearbyExplorer[] = [];
+        const users = snapshot.docs
+          .filter((docSnap) => docSnap.id !== currentUserId)
+          .map((docSnap) => {
+            const data = docSnap.data() as UserDocument & {
+              location?: GeoPoint | { latitude: number; longitude: number } | null;
+            };
+            const rawLocation = data.location;
+            const location: GeoPoint | null = rawLocation instanceof GeoPoint
+              ? rawLocation
+              : rawLocation && typeof rawLocation === 'object' && 'latitude' in rawLocation && 'longitude' in rawLocation
+                ? isValidCoordinate(rawLocation.latitude, rawLocation.longitude)
+                  ? new GeoPoint(rawLocation.latitude, rawLocation.longitude)
+                  : null
+                : null;
 
-        snapshot.docs.forEach((docSnap) => {
-          if (docSnap.id === currentUserId) return; // Exclude self
-
-          const data = docSnap.data() as UserDocument & { location?: GeoPoint };
-          const rawName = data.username?.toUpperCase() || 'AGENT';
-
-          let distKm: number | null = null;
-          let distanceFormatted = 'NO SIGNAL';
-          let hasValidLocation = false;
-
-          // Strictly validate genuine GeoPoint coordinates without dummy fallbacks
-          if (
-            data.location &&
-            typeof data.location.latitude === 'number' &&
-            typeof data.location.longitude === 'number' &&
-            userCoordinates
-          ) {
-            hasValidLocation = true;
-            distKm = calculateHaversineDistanceKm(
-              userCoordinates.latitude,
-              userCoordinates.longitude,
-              data.location.latitude,
-              data.location.longitude
-            );
-
-            distanceFormatted =
-              distKm < 1 ? `${Math.round(distKm * 1000)} m` : `${distKm.toFixed(1)} km`;
-          }
-
-          // Retain unit if within 20km or flag location as unavailable without inventing coordinates
-          if (!hasValidLocation || (distKm !== null && distKm <= 20.0)) {
-            parsedList.push({
+            return {
               uid: docSnap.id,
-              name: rawName,
-              initial: rawName.charAt(0) || 'A',
-              distanceKm: distKm,
-              distanceFormatted,
-              hasValidLocation,
-              friendMeta: friendshipsMap[docSnap.id],
-            });
-          }
-        });
+              name: normaliseName(data.username),
+              location,
+            };
+          });
 
-        // Sort: Active spatial units within range first, followed by agents without location data
-        parsedList.sort((a, b) => {
-          if (a.hasValidLocation && b.hasValidLocation) {
-            return (a.distanceKm || 0) - (b.distanceKm || 0);
-          }
-          return a.hasValidLocation ? -1 : 1;
-        });
-
-        setNearbyExplorers(parsedList);
+        setAllUsers(users);
         setLoadingExplorers(false);
       },
-      (err) => {
-        console.error('Explorers Snapshot Error:', err);
+      () => {
+        setExplorerError('Unable to scan nearby explorer telemetry.');
         setLoadingExplorers(false);
-      }
+      },
     );
 
-    return () => unsubscribe();
-  }, [currentUserId, userCoordinates, friendshipsMap]);
+    return unsubscribe;
+  }, [currentUserId]);
 
-  /**
-   * CREATE: SEND FRIEND LINK REQUEST (DETERMINISTIC & INVARIANT ENFORCED)
-   */
+  const nearbyExplorers = useMemo<NearbyExplorer[]>(() => {
+    const canCalculateDistance =
+      !!userCoordinates &&
+      isValidCoordinate(userCoordinates.latitude, userCoordinates.longitude);
+
+    const parsed: NearbyExplorer[] = [];
+
+    for (const user of allUsers) {
+      let distanceKm: number | null = null;
+      let hasValidLocation = false;
+
+      if (canCalculateDistance && user.location && isValidCoordinate(user.location.latitude, user.location.longitude)) {
+        distanceKm = calculateHaversineDistanceKm(
+          userCoordinates!.latitude,
+          userCoordinates!.longitude,
+          user.location.latitude,
+          user.location.longitude,
+        );
+        hasValidLocation = true;
+      }
+
+      // Keep only explorers inside 20km. Users with no valid location are not
+      // treated as nearby because their distance cannot be verified.
+      if (!hasValidLocation || (distanceKm !== null && distanceKm <= RADIUS_KM)) {
+        parsed.push({
+          uid: user.uid,
+          name: user.name,
+          initial: user.name.charAt(0) || 'A',
+          distanceKm,
+          distanceFormatted: formatDistance(distanceKm),
+          hasValidLocation,
+          friendMeta: friendshipsMap[user.uid],
+        });
+      }
+    }
+
+    parsed.sort((a, b) => {
+      if (a.hasValidLocation !== b.hasValidLocation) {
+        return a.hasValidLocation ? -1 : 1;
+      }
+      return (a.distanceKm ?? Number.POSITIVE_INFINITY) - (b.distanceKm ?? Number.POSITIVE_INFINITY);
+    });
+
+    return parsed;
+  }, [allUsers, friendshipsMap, userCoordinates]);
+
+  const filteredExplorers = useMemo(() => {
+    const search = searchAgentTag.trim().toLowerCase();
+    if (!search) return nearbyExplorers;
+
+    return nearbyExplorers.filter((explorer) =>
+      explorer.name.toLowerCase().includes(search),
+    );
+  }, [nearbyExplorers, searchAgentTag]);
+
   const handleSendFriendRequest = async (targetUid: string) => {
-    if (!db || !currentUserId || targetUid === currentUserId) return;
+    if (!db || !currentUserId || !targetUid || targetUid === currentUserId) {
+      if (targetUid === currentUserId) {
+        Alert.alert('CANNOT LINK SELF', 'You cannot create a friendship request with your own account.');
+      }
+      return;
+    }
 
-    try {
-      const friendshipId = getDeterministicFriendshipId(currentUserId, targetUid);
+    if (actionUid) return;
 
-      // Verify no duplicate pending or accepted relationship exists
-      const existingMeta = friendshipsMap[targetUid];
-      if (existingMeta && (existingMeta.status === 'pending' || existingMeta.status === 'accepted')) {
-        Alert.alert('LINK ACTIVE', 'A friendship or pending request already exists with this explorer.');
+    const existingMeta = friendshipsMap[targetUid];
+
+    if (existingMeta) {
+      if (existingMeta.status === 'accepted') {
+        Alert.alert('LINK ACTIVE', 'You are already linked with this explorer.');
         return;
       }
 
-      await setDoc(doc(db, 'friendships', friendshipId), {
-        friendshipId,
-        requesterId: currentUserId,
-        receiverId: targetUid,
-        status: 'pending',
-        createdAt: Timestamp.now(),
-        updatedAt: Timestamp.now(),
-      } as FriendshipDocument);
-    } catch (err) {
-      console.error('Error creating friendship request:', err);
-      Alert.alert('TRANSMISSION ERROR', 'Failed to issue friend link request.');
+      if (existingMeta.status === 'pending') {
+        Alert.alert('REQUEST ACTIVE', 'A pending link request already exists with this explorer.');
+        return;
+      }
+
+      if (existingMeta.status === 'blocked') {
+        Alert.alert('LINK BLOCKED', 'This explorer cannot currently be linked.');
+        return;
+      }
+    }
+
+    try {
+      setActionUid(targetUid);
+
+      const friendshipId = getDeterministicFriendshipId(currentUserId, targetUid);
+
+      await setDoc(
+        doc(db, 'friendships', friendshipId),
+        {
+          friendshipId,
+          requesterId: currentUserId,
+          receiverId: targetUid,
+          status: 'pending',
+          createdAt: Timestamp.now(),
+          updatedAt: Timestamp.now(),
+        } as FriendshipDocument,
+        { merge: false },
+      );
+    } catch {
+      Alert.alert('TRANSMISSION ERROR', 'Failed to issue the friend link request.');
+    } finally {
+      setActionUid(null);
     }
   };
 
-  /**
-   * UPDATE: ACCEPT FRIEND LINK REQUEST
-   */
-  const handleAcceptFriendRequest = async (docId: string) => {
-    if (!db) return;
+  const handleAcceptFriendRequest = async (friendship: FriendshipMeta) => {
+    if (!db || !currentUserId || actionUid) return;
+
     try {
-      await updateDoc(doc(db, 'friendships', docId), {
+      setActionUid(friendship.docId);
+
+      await updateDoc(doc(db, 'friendships', friendship.docId), {
         status: 'accepted',
         updatedAt: Timestamp.now(),
       });
-    } catch (err) {
-      console.error('Error accepting friendship:', err);
+    } catch {
+      Alert.alert('LINK ERROR', 'Unable to accept the explorer link request.');
+    } finally {
+      setActionUid(null);
     }
   };
 
-  /**
-   * DELETE: CANCEL OR UNLINK FRIENDSHIP
-   */
-  const handleRemoveFriendship = async (docId: string, agentName: string) => {
-    if (!db) return;
+  const handleRemoveFriendship = (friendship: FriendshipMeta, agentName: string) => {
+    if (!db || !currentUserId) return;
+
     Alert.alert(
-      'TERMINATE LINK',
-      `Are you sure you want to disconnect telemetry link with ${agentName}?`,
+      friendship.status === 'pending' && friendship.isRequester
+        ? 'CANCEL REQUEST'
+        : 'TERMINATE LINK',
+      friendship.status === 'pending' && friendship.isRequester
+        ? `Cancel the pending link request to ${agentName}?`
+        : `Disconnect telemetry link with ${agentName}?`,
       [
         { text: 'CANCEL', style: 'cancel' },
         {
-          text: 'UNLINK',
+          text: friendship.status === 'pending' && friendship.isRequester ? 'CANCEL REQUEST' : 'UNLINK',
           style: 'destructive',
           onPress: async () => {
+            if (actionUid) return;
+
             try {
-              await deleteDoc(doc(db, 'friendships', docId));
-            } catch (err) {
-              console.error('Error deleting friendship:', err);
+              setActionUid(friendship.docId);
+              await deleteDoc(doc(db, 'friendships', friendship.docId));
+            } catch {
+              Alert.alert('LINK ERROR', 'Unable to update the friendship record.');
+            } finally {
+              setActionUid(null);
             }
           },
         },
-      ]
+      ],
     );
   };
 
-  /**
-   * SEARCH & LINK AGENT CALLSIGN
-   */
   const handleSearchAndLinkAgent = async () => {
-    if (!db || !searchAgentTag.trim() || !currentUserId) return;
+    if (!db || !currentUserId || isSearching) return;
+
+    const searchTag = searchAgentTag.trim().toLowerCase();
+
+    if (!searchTag) {
+      setSearchError('ENTER AN AGENT CALLSIGN');
+      return;
+    }
+
     setSearchError('');
+    setIsSearching(true);
 
     try {
-      const searchTag = searchAgentTag.trim().toLowerCase();
-      const q = query(collection(db, 'users'), where('username', '==', searchTag));
-      const querySnap = await getDocs(q);
+      const matchingExplorer = allUsers.find(
+        (user) => user.name.toLowerCase() === searchTag,
+      );
 
-      if (querySnap.empty) {
-        setSearchError('AGENT CALLSIGN NOT FOUND IN SECTOR');
+      if (!matchingExplorer) {
+        setSearchError('AGENT CALLSIGN NOT FOUND');
         return;
       }
 
-      const targetDoc = querySnap.docs[0];
-      const targetUid = targetDoc.id;
-
-      if (targetUid === currentUserId) {
+      if (matchingExplorer.uid === currentUserId) {
         setSearchError('CANNOT LINK SELF CALLSIGN');
         return;
       }
 
-      await handleSendFriendRequest(targetUid);
-      setSearchAgentTag('');
-      setFriendModalVisible(false);
-    } catch (err) {
-      console.error('Error searching agent:', err);
+      await handleSendFriendRequest(matchingExplorer.uid);
+
+      if (!actionUid) {
+        setFriendModalVisible(false);
+        setSearchAgentTag('');
+      }
+    } catch {
       setSearchError('TRANSMISSION FAILED');
+    } finally {
+      setIsSearching(false);
     }
   };
 
-  /**
-   * DISPATCH TELEGRAM SIGNAL
+  /*
+   * Treasi currently implements TELEGRAM as a global dispatch/broadcast,
+   * not as a one-to-one chat system. The existing messages schema contains
+   * sender/text/timestamp fields but no recipient field, so this screen keeps
+   * the feature as a reliable sector-wide dispatch rather than inventing a
+   * second private-chat data model.
    */
   const handleDispatchTelegram = async () => {
-    if (!db || !telegramText.trim() || !currentUserId || isTransmitting) return;
+    if (!db || !currentUserId || !telegramText.trim() || isTransmitting) {
+      if (!telegramText.trim()) {
+        Alert.alert('EMPTY TELEGRAM', 'Enter a message before transmitting the signal.');
+      }
+      return;
+    }
+
     setIsTransmitting(true);
 
     try {
-      const senderName = currentUser?.displayName || 'FIELD_EXPLORER';
+      const senderName = normaliseName(currentUser?.displayName || currentUser?.email || 'FIELD EXPLORER');
+      const message = telegramText.trim();
 
-      await addDoc(collection(db, 'messages'), {
-        senderId: currentUserId,
-        senderName,
-        text: telegramText.trim(),
-        createdAt: Timestamp.now(),
-      });
+      await setDoc(
+        doc(collection(db, 'messages')),
+        {
+          senderId: currentUserId,
+          senderName,
+          text: message,
+          createdAt: Timestamp.now(),
+          type: 'GLOBAL_DISPATCH',
+        },
+      );
 
-      await addDoc(collection(db, 'activity_feed'), {
-        userId: currentUserId,
-        username: senderName,
-        type: 'TREASURE_HIDDEN',
-        message: `DISPATCHED TELEGRAM: "${telegramText.trim().substring(0, 30)}..."`,
-        targetId: 'global',
-        createdAt: Timestamp.now(),
-      });
+      await setDoc(
+        doc(collection(db, 'activity_feed')),
+        {
+          userId: currentUserId,
+          username: senderName,
+          type: 'TELEGRAM_DISPATCH',
+          message: `DISPATCHED TELEGRAM: "${message.length > 30 ? `${message.substring(0, 30)}...` : message}"`,
+          targetId: 'global',
+          createdAt: Timestamp.now(),
+        },
+      );
 
       setTelegramText('');
-      setIsTransmitting(false);
       setTelegramModalVisible(false);
-    } catch (err) {
-      console.error('Error dispatching telegram:', err);
+      Alert.alert('SIGNAL TRANSMITTED', 'Telegram broadcast dispatched to the active sector.');
+    } catch {
+      Alert.alert(
+        'TRANSMISSION FAILED',
+        'The Telegram could not be dispatched. Check your connection and try again.',
+      );
+    } finally {
       setIsTransmitting(false);
     }
   };
@@ -504,13 +647,13 @@ export const LeaderboardScreen: React.FC<Props> = ({
         },
       ]}
     >
-      {/* LEFT VIEWPORT (60%): FIELD MANIFEST */}
       <Animated.View entering={FadeInLeft.duration(500)} style={styles.leftViewport}>
         <View style={styles.ledgerHeader}>
           <StarIcon color="#A64B2A" size={14} />
           <Text style={styles.header}>FIELD MANIFEST</Text>
           <StarIcon color="#A64B2A" size={14} />
         </View>
+
         <Text style={styles.subHeader}>EXCAVATION POINTS LEDGER · SHASTA SECTOR</Text>
 
         <View style={styles.tableHeader}>
@@ -524,26 +667,73 @@ export const LeaderboardScreen: React.FC<Props> = ({
             <ActivityIndicator size="small" color="#2A2420" />
             <Text style={styles.loadingText}>SYNCING MANIFEST DATA...</Text>
           </View>
+        ) : manifestError ? (
+          <View style={styles.loadingBox}>
+            <Text style={styles.errorText}>{manifestError}</Text>
+            <TouchableOpacity
+              style={styles.inlineRetryButton}
+              onPress={() => {
+                setLoadingManifest(true);
+                setManifestError('');
+              }}
+              accessibilityRole="button"
+              accessibilityLabel="Retry leaderboard sync"
+            >
+              <Text style={styles.inlineRetryText}>RETRY</Text>
+            </TouchableOpacity>
+          </View>
+        ) : manifest.length === 0 ? (
+          <View style={styles.loadingBox}>
+            <Text style={styles.emptyText}>NO EXPLORERS IN THE MANIFEST</Text>
+          </View>
         ) : (
-          <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.ledgerList}>
+          <ScrollView
+            showsVerticalScrollIndicator={false}
+            contentContainerStyle={styles.ledgerList}
+            accessibilityLabel="Explorer leaderboard"
+          >
             {manifest.map((item, index) => (
               <Animated.View
                 key={item.uid}
                 entering={FadeInDown.delay(index * 30).duration(250)}
                 style={[styles.rowContainer, item.isUser && styles.rowHighlight]}
+                accessible
+                accessibilityLabel={`Rank ${Number(item.rank)}. ${item.name}. ${item.points} points.`}
               >
-                <Text style={[styles.rowText, item.isUser && styles.rowHighlightText, { flex: 0.15 }]}>
+                <Text
+                  style={[
+                    styles.rowText,
+                    item.isUser && styles.rowHighlightText,
+                    { flex: 0.15 },
+                  ]}
+                >
                   {item.rank}
                 </Text>
-                <Text style={[styles.rowText, item.isUser && styles.rowHighlightText, { flex: 0.55 }]} numberOfLines={1}>
+
+                <Text
+                  style={[
+                    styles.rowText,
+                    item.isUser && styles.rowHighlightText,
+                    { flex: 0.55 },
+                  ]}
+                  numberOfLines={1}
+                >
                   {item.name}
                 </Text>
+
                 <View style={styles.dotLeaderContainer}>
                   <Text style={styles.dotLeader} numberOfLines={1}>
                     ...................................
                   </Text>
                 </View>
-                <Text style={[styles.rowText, item.isUser && styles.rowHighlightText, { flex: 0.3, textAlign: 'right' }]}>
+
+                <Text
+                  style={[
+                    styles.rowText,
+                    item.isUser && styles.rowHighlightText,
+                    { flex: 0.3, textAlign: 'right' },
+                  ]}
+                >
                   {item.points}
                 </Text>
               </Animated.View>
@@ -552,68 +742,124 @@ export const LeaderboardScreen: React.FC<Props> = ({
         )}
       </Animated.View>
 
-      {/* RIGHT VIEWPORT (40%): NEARBY EXPLORERS & CONTROL CONSOLE */}
       <Animated.View entering={FadeInRight.duration(500)} style={styles.rightViewport}>
         <View style={styles.rightHeaderRow}>
-          <View>
+          <View style={{ flex: 1 }}>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
               <StarIcon color="#B08D57" size={10} />
               <Text style={styles.panelTitle}>NEARBY AGENTS</Text>
             </View>
             <Text style={styles.subText}>Active Units Within 20km Radius</Text>
           </View>
+
           <TouchableOpacity
             style={styles.iconAddButton}
-            onPress={() => setFriendModalVisible(true)}
-            accessibilityLabel="Link New Explorer Callsign"
+            onPress={() => {
+              setSearchError('');
+              setSearchAgentTag('');
+              setFriendModalVisible(true);
+            }}
+            accessibilityLabel="Link new explorer callsign"
+            accessibilityHint="Opens the explorer linking form"
             accessibilityRole="button"
           >
             <UserPlusIcon color="#B08D57" size={16} />
           </TouchableOpacity>
         </View>
 
-        {/* Nearby Cards Stream */}
         {loadingExplorers ? (
           <View style={styles.loadingBox}>
             <ActivityIndicator size="small" color="#E8DCC0" />
+            <Text style={styles.loadingTextDark}>SCANNING EXPLORER TELEMETRY...</Text>
           </View>
-        ) : nearbyExplorers.length === 0 ? (
+        ) : explorerError ? (
           <View style={styles.loadingBox}>
-            <Text style={styles.emptyText}>NO AGENTS DETECTED IN 20KM RADIUS</Text>
+            <Text style={styles.errorTextDark}>{explorerError}</Text>
+            <Text style={styles.loadingTextDark}>RECONNECT TO RETRY</Text>
+          </View>
+        ) : !userCoordinates ? (
+          <View style={styles.loadingBox}>
+            <Text style={styles.emptyText}>YOUR LOCATION IS UNAVAILABLE</Text>
+            <Text style={styles.loadingTextDark}>
+              Nearby range cannot be verified without a valid GPS position.
+            </Text>
+          </View>
+        ) : filteredExplorers.length === 0 ? (
+          <View style={styles.loadingBox}>
+            <Text style={styles.emptyText}>
+              {searchAgentTag.trim()
+                ? 'NO MATCHING AGENTS IN 20KM RADIUS'
+                : 'NO AGENTS DETECTED IN 20KM RADIUS'}
+            </Text>
           </View>
         ) : (
-          <ScrollView style={styles.cardsContainer} showsVerticalScrollIndicator={false}>
-            {nearbyExplorers.map((item, idx) => {
+          <ScrollView
+            style={styles.cardsContainer}
+            showsVerticalScrollIndicator={false}
+            accessibilityLabel="Nearby explorers"
+          >
+            {filteredExplorers.map((item, idx) => {
               const friendMeta = item.friendMeta;
               const isPending = friendMeta?.status === 'pending';
               const isAccepted = friendMeta?.status === 'accepted';
               const isIncomingRequest = isPending && !friendMeta?.isRequester;
+              const isActing = actionUid === item.uid || actionUid === friendMeta?.docId;
 
               return (
-                <Animated.View key={item.uid} entering={FadeInRight.delay(idx * 50).duration(250)} style={styles.explorerCard}>
+                <Animated.View
+                  key={item.uid}
+                  entering={FadeInRight.delay(idx * 50).duration(250)}
+                  style={styles.explorerCard}
+                  accessible
+                  accessibilityLabel={`${item.name}. Range ${item.distanceFormatted}. ${
+                    isAccepted
+                      ? 'Friends'
+                      : isIncomingRequest
+                        ? 'Friend request received'
+                        : isPending
+                          ? 'Friend request pending'
+                          : 'Not linked'
+                  }`}
+                >
                   <View style={styles.cardLeft}>
                     <View style={styles.avatarCircle}>
                       <Text style={styles.avatarText}>{item.initial}</Text>
                     </View>
-                    <View>
+
+                    <View style={{ flex: 1 }}>
                       <Text style={styles.explorerName}>{item.name}</Text>
-                      <Text style={[styles.explorerMeta, !item.hasValidLocation && styles.metaUnlinked]}>
+                      <Text
+                        style={[
+                          styles.explorerMeta,
+                          !item.hasValidLocation && styles.metaUnlinked,
+                        ]}
+                      >
                         RANGE: {item.distanceFormatted}
                       </Text>
                     </View>
                   </View>
 
                   <View style={styles.cardRight}>
-                    <View style={[styles.onlineDot, !item.hasValidLocation && { backgroundColor: '#8A7B66' }]} />
+                    <View
+                      style={[
+                        styles.onlineDot,
+                        !item.hasValidLocation && { backgroundColor: '#8A7B66' },
+                      ]}
+                    />
 
-                    {/* Friend Action States */}
                     {!friendMeta && (
                       <TouchableOpacity
-                        style={styles.friendActionButton}
+                        style={[styles.friendActionButton, isActing && { opacity: 0.5 }]}
                         onPress={() => handleSendFriendRequest(item.uid)}
+                        disabled={isActing}
                         accessibilityLabel={`Send link request to ${item.name}`}
+                        accessibilityRole="button"
                       >
-                        <UserPlusIcon color="#2C3B2E" size={14} />
+                        {isActing ? (
+                          <ActivityIndicator size="small" color="#2C3B2E" />
+                        ) : (
+                          <UserPlusIcon color="#2C3B2E" size={14} />
+                        )}
                       </TouchableOpacity>
                     )}
 
@@ -621,13 +867,24 @@ export const LeaderboardScreen: React.FC<Props> = ({
                       <View style={{ flexDirection: 'row', gap: 4 }}>
                         <TouchableOpacity
                           style={[styles.friendActionButton, { backgroundColor: '#4CAF50' }]}
-                          onPress={() => handleAcceptFriendRequest(friendMeta.docId)}
+                          onPress={() => handleAcceptFriendRequest(friendMeta)}
+                          disabled={isActing}
+                          accessibilityLabel={`Accept friend request from ${item.name}`}
+                          accessibilityRole="button"
                         >
-                          <UserCheckIcon color="#FFFFFF" size={12} />
+                          {isActing ? (
+                            <ActivityIndicator size="small" color="#FFFFFF" />
+                          ) : (
+                            <UserCheckIcon color="#FFFFFF" size={12} />
+                          )}
                         </TouchableOpacity>
+
                         <TouchableOpacity
                           style={[styles.friendActionButton, { backgroundColor: '#A64B2A' }]}
-                          onPress={() => handleRemoveFriendship(friendMeta.docId, item.name)}
+                          onPress={() => handleRemoveFriendship(friendMeta, item.name)}
+                          disabled={isActing}
+                          accessibilityLabel={`Decline friend request from ${item.name}`}
+                          accessibilityRole="button"
                         >
                           <UserXIcon color="#FFFFFF" size={12} />
                         </TouchableOpacity>
@@ -636,20 +893,50 @@ export const LeaderboardScreen: React.FC<Props> = ({
 
                     {isPending && friendMeta?.isRequester && (
                       <TouchableOpacity
-                        style={[styles.friendActionButton, { backgroundColor: '#D9B98A' }]}
-                        onPress={() => handleRemoveFriendship(friendMeta.docId, item.name)}
+                        style={[
+                          styles.friendActionButton,
+                          { backgroundColor: '#D9B98A' },
+                          isActing && { opacity: 0.5 },
+                        ]}
+                        onPress={() => handleRemoveFriendship(friendMeta, item.name)}
+                        disabled={isActing}
+                        accessibilityLabel={`Cancel pending friend request to ${item.name}`}
+                        accessibilityRole="button"
                       >
-                        <Text style={styles.pendingText}>PENDING</Text>
+                        {isActing ? (
+                          <ActivityIndicator size="small" color="#2A2420" />
+                        ) : (
+                          <Text style={styles.pendingText}>PENDING</Text>
+                        )}
                       </TouchableOpacity>
                     )}
 
                     {isAccepted && (
                       <TouchableOpacity
-                        style={[styles.friendActionButton, { backgroundColor: '#CBBBA0' }]}
-                        onPress={() => handleRemoveFriendship(friendMeta.docId, item.name)}
+                        style={[
+                          styles.friendActionButton,
+                          { backgroundColor: '#CBBBA0' },
+                          isActing && { opacity: 0.5 },
+                        ]}
+                        onPress={() => handleRemoveFriendship(friendMeta, item.name)}
+                        disabled={isActing}
+                        accessibilityLabel={`Remove friendship with ${item.name}`}
+                        accessibilityRole="button"
                       >
-                        <UserCheckIcon color="#2C3B2E" size={14} />
+                        {isActing ? (
+                          <ActivityIndicator size="small" color="#2C3B2E" />
+                        ) : (
+                          <UserCheckIcon color="#2C3B2E" size={14} />
+                        )}
                       </TouchableOpacity>
+                    )}
+
+                    {friendMeta?.status === 'declined' && (
+                      <Text style={styles.statusText}>DECLINED</Text>
+                    )}
+
+                    {friendMeta?.status === 'blocked' && (
+                      <Text style={styles.statusText}>BLOCKED</Text>
                     )}
                   </View>
                 </Animated.View>
@@ -658,15 +945,19 @@ export const LeaderboardScreen: React.FC<Props> = ({
           </ScrollView>
         )}
 
-        {/* Telegram Dispatch Trigger */}
         <Animated.View style={[animatedButtonStyle, { marginBottom: 6 }]}>
           <TouchableOpacity
             activeOpacity={0.88}
             onPressIn={handlePressIn}
             onPressOut={handlePressOut}
             style={styles.dispatchButton}
-            onPress={() => setTelegramModalVisible(true)}
-            accessibilityLabel="Dispatch Telegram Signal"
+            onPress={() => {
+              setTelegramText('');
+              setTelegramModalVisible(true);
+            }}
+            accessibilityLabel="Dispatch Telegram signal"
+            accessibilityHint="Opens the broadcast message composer"
+            accessibilityRole="button"
           >
             <Text style={styles.dispatchText}>DISPATCH TELEGRAM</Text>
           </TouchableOpacity>
@@ -675,32 +966,73 @@ export const LeaderboardScreen: React.FC<Props> = ({
         <FieldNavBar currentTab={currentTab} onNavigate={onNavigate} />
       </Animated.View>
 
-      {/* MODAL 1: DISPATCH TELEGRAM */}
-      <Modal visible={telegramModalVisible} transparent animationType="fade">
-        <Pressable style={styles.modalOverlay} onPress={() => setTelegramModalVisible(false)}>
-          <Pressable style={styles.modalCard} onPress={(e) => e.stopPropagation()}>
+      <Modal
+        visible={telegramModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => {
+          if (!isTransmitting) setTelegramModalVisible(false);
+        }}
+      >
+        <Pressable
+          style={styles.modalOverlay}
+          onPress={() => {
+            if (!isTransmitting) setTelegramModalVisible(false);
+          }}
+          accessibilityRole="button"
+          accessibilityLabel="Close Telegram dialog"
+        >
+          <Pressable
+            style={[styles.modalCard, !isLandscape && styles.modalCardPortrait]}
+            onPress={(event) => event.stopPropagation()}
+          >
             <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>BROADCAST TELEGRAM</Text>
-              <TouchableOpacity onPress={() => setTelegramModalVisible(false)}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.modalTitle}>BROADCAST TELEGRAM</Text>
+                <Text style={styles.modalSub}>
+                  Sector-wide dispatch. This feature is a broadcast signal, not a private chat.
+                </Text>
+              </View>
+
+              <TouchableOpacity
+                onPress={() => {
+                  if (!isTransmitting) setTelegramModalVisible(false);
+                }}
+                disabled={isTransmitting}
+                accessibilityLabel="Close Telegram dialog"
+                accessibilityRole="button"
+                style={styles.closeButton}
+              >
                 <CloseIcon color="#B08D57" size={18} />
               </TouchableOpacity>
             </View>
-            <Text style={styles.modalSub}>Send encrypted signal note to active sector agents.</Text>
+
             <TextInput
               style={styles.telegramInput}
               placeholder="Type dispatch message..."
               placeholderTextColor="#8A7B66"
               multiline
               value={telegramText}
+              maxLength={500}
               onChangeText={setTelegramText}
+              accessibilityLabel="Telegram message"
+              accessibilityHint="Enter the broadcast message you want to dispatch"
             />
+
+            <Text style={styles.charCount}>{telegramText.length}/500</Text>
+
             <TouchableOpacity
               style={[styles.sendButton, isTransmitting && { opacity: 0.6 }]}
               onPress={handleDispatchTelegram}
               disabled={isTransmitting}
+              accessibilityLabel={isTransmitting ? 'Transmitting Telegram' : 'Transmit Telegram'}
+              accessibilityRole="button"
             >
               {isTransmitting ? (
-                <ActivityIndicator size="small" color="#F3ECD8" />
+                <>
+                  <ActivityIndicator size="small" color="#F3ECD8" />
+                  <Text style={styles.sendButtonText}>TRANSMITTING...</Text>
+                </>
               ) : (
                 <>
                   <SendIcon color="#F3ECD8" size={16} />
@@ -712,32 +1044,90 @@ export const LeaderboardScreen: React.FC<Props> = ({
         </Pressable>
       </Modal>
 
-      {/* MODAL 2: LINK NEW EXPLORER */}
-      <Modal visible={friendModalVisible} transparent animationType="fade">
-        <Pressable style={styles.modalOverlay} onPress={() => setFriendModalVisible(false)}>
-          <Pressable style={styles.modalCard} onPress={(e) => e.stopPropagation()}>
+      <Modal
+        visible={friendModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => {
+          if (!isSearching && !actionUid) setFriendModalVisible(false);
+        }}
+      >
+        <Pressable
+          style={styles.modalOverlay}
+          onPress={() => {
+            if (!isSearching && !actionUid) setFriendModalVisible(false);
+          }}
+          accessibilityRole="button"
+          accessibilityLabel="Close explorer linking dialog"
+        >
+          <Pressable
+            style={[styles.modalCard, !isLandscape && styles.modalCardPortrait]}
+            onPress={(event) => event.stopPropagation()}
+          >
             <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>LINK NEW EXPLORER</Text>
-              <TouchableOpacity onPress={() => setFriendModalVisible(false)}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.modalTitle}>LINK NEW EXPLORER</Text>
+                <Text style={styles.modalSub}>
+                  Enter an exact explorer callsign to issue a link request.
+                </Text>
+              </View>
+
+              <TouchableOpacity
+                onPress={() => {
+                  if (!isSearching && !actionUid) setFriendModalVisible(false);
+                }}
+                disabled={isSearching || !!actionUid}
+                accessibilityLabel="Close explorer linking dialog"
+                accessibilityRole="button"
+                style={styles.closeButton}
+              >
                 <CloseIcon color="#B08D57" size={18} />
               </TouchableOpacity>
             </View>
-            <Text style={styles.modalSub}>Enter agent callsign tag (e.g., wilder_wren)</Text>
-            {searchError ? <Text style={styles.errorText}>{searchError}</Text> : null}
+
+            {searchError ? (
+              <Text
+                style={styles.errorText}
+                accessibilityLiveRegion="polite"
+                accessibilityRole="alert"
+              >
+                {searchError}
+              </Text>
+            ) : null}
+
             <TextInput
               style={styles.tagInput}
               placeholder="AGENT_CALLSIGN"
               placeholderTextColor="#8A7B66"
               autoCapitalize="none"
+              autoCorrect={false}
               value={searchAgentTag}
               onChangeText={(txt) => {
                 setSearchAgentTag(txt);
                 setSearchError('');
               }}
+              accessibilityLabel="Explorer callsign"
+              accessibilityHint="Enter the exact username of the explorer you want to link"
             />
-            <TouchableOpacity style={styles.sendButton} onPress={handleSearchAndLinkAgent}>
-              <UserPlusIcon color="#F3ECD8" size={16} />
-              <Text style={styles.sendButtonText}>SEND LINK REQUEST</Text>
+
+            <TouchableOpacity
+              style={[styles.sendButton, isSearching && { opacity: 0.6 }]}
+              onPress={handleSearchAndLinkAgent}
+              disabled={isSearching}
+              accessibilityLabel={isSearching ? 'Searching for explorer' : 'Send link request'}
+              accessibilityRole="button"
+            >
+              {isSearching ? (
+                <>
+                  <ActivityIndicator size="small" color="#F3ECD8" />
+                  <Text style={styles.sendButtonText}>SEARCHING...</Text>
+                </>
+              ) : (
+                <>
+                  <UserPlusIcon color="#F3ECD8" size={16} />
+                  <Text style={styles.sendButtonText}>SEND LINK REQUEST</Text>
+                </>
+              )}
             </TouchableOpacity>
           </Pressable>
         </Pressable>
@@ -802,12 +1192,28 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     gap: 8,
+    paddingHorizontal: 16,
   },
   loadingText: {
     color: '#2A2420',
     fontSize: 10,
     fontWeight: 'bold',
     letterSpacing: 1,
+    textAlign: 'center',
+  },
+  loadingTextDark: {
+    color: '#B08D57',
+    fontSize: 9,
+    fontWeight: 'bold',
+    letterSpacing: 0.5,
+    textAlign: 'center',
+  },
+  errorTextDark: {
+    color: '#E8DCC0',
+    fontSize: 9,
+    fontWeight: 'bold',
+    textAlign: 'center',
+    marginBottom: 6,
   },
   emptyText: {
     color: '#B08D57',
@@ -816,10 +1222,25 @@ const styles = StyleSheet.create({
     letterSpacing: 1,
     textAlign: 'center',
   },
+  inlineRetryButton: {
+    backgroundColor: '#A64B2A',
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    minHeight: 40,
+    borderRadius: 4,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  inlineRetryText: {
+    color: '#F3ECD8',
+    fontSize: 9,
+    fontWeight: 'bold',
+    letterSpacing: 1,
+  },
   rowContainer: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 5,
+    paddingVertical: 7,
     paddingHorizontal: 6,
     borderRadius: 4,
     marginBottom: 2,
@@ -879,8 +1300,8 @@ const styles = StyleSheet.create({
     borderColor: '#B08D57',
     padding: 6,
     borderRadius: 4,
-    minWidth: 36,
-    minHeight: 36,
+    minWidth: 40,
+    minHeight: 40,
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: '#202C22',
@@ -897,17 +1318,20 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
+    minHeight: 52,
   },
   cardLeft: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
+    flex: 1,
+    minWidth: 0,
   },
   avatarCircle: {
-    width: 26,
-    height: 26,
-    borderRadius: 13,
-    backgroundColor: '#2C3B2E',
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    backgroundColor: '#2C3B3E',
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -935,6 +1359,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
+    marginLeft: 4,
   },
   onlineDot: {
     width: 6,
@@ -946,14 +1371,19 @@ const styles = StyleSheet.create({
     backgroundColor: '#CBBBA0',
     paddingVertical: 4,
     paddingHorizontal: 8,
-    minWidth: 32,
-    minHeight: 32,
+    minWidth: 38,
+    minHeight: 38,
     borderRadius: 4,
     alignItems: 'center',
     justifyContent: 'center',
   },
   pendingText: {
     color: '#2A2420',
+    fontSize: 8,
+    fontWeight: 'bold',
+  },
+  statusText: {
+    color: '#B08D57',
     fontSize: 8,
     fontWeight: 'bold',
   },
@@ -965,7 +1395,7 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     borderRadius: 4,
     alignItems: 'center',
-    minHeight: 40,
+    minHeight: 44,
     justifyContent: 'center',
   },
   dispatchText: {
@@ -983,16 +1413,21 @@ const styles = StyleSheet.create({
   },
   modalCard: {
     width: '60%',
+    maxWidth: 600,
     backgroundColor: '#E8DCC0',
     borderRadius: 8,
     borderWidth: 2,
     borderColor: '#B08D57',
     padding: 16,
   },
+  modalCardPortrait: {
+    width: '90%',
+  },
   modalHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'center',
+    alignItems: 'flex-start',
+    gap: 12,
   },
   modalTitle: {
     color: '#2A2420',
@@ -1003,7 +1438,15 @@ const styles = StyleSheet.create({
   modalSub: {
     color: '#6E6152',
     fontSize: 10,
+    marginTop: 4,
     marginBottom: 12,
+    lineHeight: 15,
+  },
+  closeButton: {
+    minWidth: 40,
+    minHeight: 40,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   errorText: {
     color: '#A64B2A',
@@ -1020,10 +1463,16 @@ const styles = StyleSheet.create({
     padding: 10,
     color: '#2A2420',
     fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-    height: 70,
+    minHeight: 90,
     textAlignVertical: 'top',
     fontSize: 12,
-    marginBottom: 12,
+    marginBottom: 4,
+  },
+  charCount: {
+    color: '#8A7B66',
+    fontSize: 8,
+    textAlign: 'right',
+    marginBottom: 10,
   },
   tagInput: {
     backgroundColor: '#F3ECD8',
@@ -1035,6 +1484,7 @@ const styles = StyleSheet.create({
     fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
     fontSize: 12,
     marginBottom: 12,
+    minHeight: 44,
   },
   sendButton: {
     backgroundColor: '#2C3B2E',

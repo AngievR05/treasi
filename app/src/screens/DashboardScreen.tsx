@@ -12,7 +12,7 @@ import {
   Modal,
   Image,
 } from 'react-native';
-import MapView, { Marker, PROVIDER_DEFAULT, Region } from 'react-native-maps';
+import type { Region } from 'react-native-maps';
 import * as Location from 'expo-location';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Animated, {
@@ -139,7 +139,9 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
   const { width, height } = useWindowDimensions();
   const isLandscape = width > height;
   const insets = useSafeAreaInsets();
-  const mapRef = useRef<MapView | null>(null);
+  const mapRef = useRef<any>(null);
+  const webMapRef = useRef<any>(null);
+  const webMapReadyRef = useRef(false);
 
   const isNavigatingRef = useRef(false);
   const hasInitialCenteredRef = useRef(false);
@@ -279,6 +281,81 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
     setLocationError(null);
 
     try {
+      // Expo Location on native devices.
+      // Expo Web can use the browser Geolocation API directly for a more reliable
+      // web build and avoids relying on a native-only location watcher.
+      if (Platform.OS === 'web') {
+        if (typeof navigator === 'undefined' || !navigator.geolocation) {
+          setLocationError('BROWSER GPS IS NOT AVAILABLE ON THIS DEVICE.');
+          setIsInitializingLocation(false);
+          return null;
+        }
+
+        const applyBrowserPosition = (position: GeolocationPosition) => {
+          const { latitude, longitude, accuracy } = position.coords;
+          const locationObject = {
+            coords: {
+              latitude,
+              longitude,
+              altitude: null,
+              accuracy: typeof accuracy === 'number' ? accuracy : null,
+              altitudeAccuracy: null,
+              heading: null,
+              speed: null,
+            },
+            timestamp: position.timestamp || Date.now(),
+          } as Location.LocationObject;
+
+          setUserLocation(locationObject);
+          setLocationError(null);
+
+          if (!hasInitialCenteredRef.current) {
+            hasInitialCenteredRef.current = true;
+            const newRegion = {
+              latitude,
+              longitude,
+              latitudeDelta: 0.08,
+              longitudeDelta: 0.08,
+            };
+            setRegion(newRegion);
+          }
+        };
+
+        const handleBrowserError = (error: GeolocationPositionError) => {
+          switch (error.code) {
+            case error.PERMISSION_DENIED:
+              setLocationError('GPS PERMISSION DENIED. ENABLE LOCATION IN YOUR BROWSER SETTINGS.');
+              break;
+            case error.POSITION_UNAVAILABLE:
+              setLocationError('BROWSER GPS POSITION UNAVAILABLE.');
+              break;
+            case error.TIMEOUT:
+              setLocationError('BROWSER GPS FIX TIMED OUT. RETRY POSITIONAL TELEMETRY.');
+              break;
+            default:
+              setLocationError('BROWSER GPS TELEMETRY UNAVAILABLE.');
+          }
+        };
+
+        navigator.geolocation.getCurrentPosition(
+          applyBrowserPosition,
+          handleBrowserError,
+          { enableHighAccuracy: true, timeout: 15000, maximumAge: 10000 },
+        );
+
+        const watchId = navigator.geolocation.watchPosition(
+          applyBrowserPosition,
+          handleBrowserError,
+          { enableHighAccuracy: true, maximumAge: 10000, timeout: 15000 },
+        );
+
+        setIsInitializingLocation(false);
+
+        return {
+          remove: () => navigator.geolocation.clearWatch(watchId),
+        } as unknown as Location.LocationSubscription;
+      }
+
       const { status } = await Location.requestForegroundPermissionsAsync();
       if (status !== 'granted') {
         setLocationError('GPS PERMISSION DENIED. ENABLE LOCATION IN SYSTEM SETTINGS.');
@@ -286,7 +363,6 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
         return null;
       }
 
-      // Initial Position Fix
       const initialPosition = await Location.getCurrentPositionAsync({
         accuracy: Location.Accuracy.Balanced,
       }).catch(() => null);
@@ -303,7 +379,7 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
 
         if (!hasInitialCenteredRef.current) {
           hasInitialCenteredRef.current = true;
-          if (Platform.OS !== 'web' && mapRef.current) {
+          if (mapRef.current) {
             mapRef.current.animateToRegion(newRegion, 1200);
           }
         }
@@ -311,7 +387,6 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
         setLocationError('SATELLITE FIX TIMEOUT. RETRYING POSITIONAL TELEMETRY...');
       }
 
-      // Continuous Positional Watcher
       const subscription = await Location.watchPositionAsync(
         {
           accuracy: Location.Accuracy.Balanced,
@@ -321,13 +396,17 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
         (newLocation) => {
           setUserLocation(newLocation);
           setLocationError(null);
-        }
+        },
       );
 
       setIsInitializingLocation(false);
       return subscription;
     } catch {
-      setLocationError('HARDWARE GPS TELEMETRY UNAVAILABLE');
+      setLocationError(
+        Platform.OS === 'web'
+          ? 'BROWSER GPS TELEMETRY UNAVAILABLE.'
+          : 'HARDWARE GPS TELEMETRY UNAVAILABLE',
+      );
       setIsInitializingLocation(false);
       return null;
     }
@@ -398,7 +477,12 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
       longitudeDelta: 0.04,
     };
     setRegion(targetRegion);
-    if (Platform.OS !== 'web' && mapRef.current) {
+    if (Platform.OS === 'web') {
+      webMapRef.current?.contentWindow?.postMessage(
+        { type: 'TREASI_SET_VIEW', latitude: targetRegion.latitude, longitude: targetRegion.longitude, zoom: 15 },
+        '*'
+      );
+    } else if (mapRef.current) {
       mapRef.current.animateToRegion(targetRegion, 1000);
     }
   };
@@ -472,13 +556,138 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
     return (item.username || 'FIELD EXPLORER').toUpperCase();
   };
 
-  // OpenStreetMap Web Frame Embed URL
-  const webOsmUrl = useMemo(() => {
-    const lat = region.latitude;
-    const lon = region.longitude;
-    const bbox = `${lon - 0.03},${lat - 0.03},${lon + 0.03},${lat + 0.03}`;
-    return `https://www.openstreetmap.org/export/embed.html?bbox=${bbox}&layer=mapnik&marker=${lat},${lon}`;
-  }, [region]);
+  // Leaflet/OpenStreetMap web map. This avoids react-native-maps on Expo Web while
+  // preserving interactive markers, the user's location, the 20km operational radius,
+  // and treasure selection. The iframe communicates with DashboardScreen through postMessage.
+  const webMapHtml = useMemo(() => `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
+<style>
+html,body,#map{height:100%;width:100%;margin:0;padding:0;background:#E8DCC0;}
+body{overflow:hidden;font-family:Arial,sans-serif;}
+.leaflet-container{background:#E8DCC0;}
+.leaflet-tile-pane{filter:sepia(.20) saturate(.72) contrast(.95);}
+.leaflet-control-zoom a{background:#F3ECD8;color:#2A2420;border-color:#B08D57;}
+.leaflet-control-attribution{background:rgba(243,236,216,.88)!important;color:#2A2420!important;font-size:9px!important;}
+.leaflet-popup-content-wrapper,.leaflet-popup-tip{background:#F3ECD8;color:#2A2420;border:1px solid #B08D57;}
+.leaflet-popup-content{font-size:12px;line-height:1.35;}
+</style>
+</head>
+<body>
+<div id="map"></div>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+<script>
+(function(){
+  const DEFAULT_CENTER = [-25.7479, 28.2293];
+  const map = L.map('map', { zoomControl: true, attributionControl: true }).setView(DEFAULT_CENTER, 13);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap contributors' }).addTo(map);
+  const treasureLayer = L.layerGroup().addTo(map);
+  let userMarker = null;
+  let radiusCircle = null;
+
+  function post(message){
+    try { window.parent.postMessage(message, '*'); } catch(e) {}
+  }
+
+  function clearTreasureLayer(){ treasureLayer.clearLayers(); }
+
+  function drawTreasureMarkers(treasures){
+    clearTreasureLayer();
+    (treasures || []).forEach(function(t){
+      if (typeof t.latitude !== 'number' || typeof t.longitude !== 'number') return;
+      const marker = L.circleMarker([t.latitude, t.longitude], {
+        radius: 9,
+        color: '#F3ECD8',
+        weight: 2,
+        fillColor: '#A64B2A',
+        fillOpacity: 1
+      }).addTo(treasureLayer);
+      marker.bindPopup('<strong>' + escapeHtml(t.title || 'TREASURE CACHE') + '</strong><br/>Tap marker for details.');
+      marker.on('click', function(){ post({ type: 'TREASURE_MARKER_PRESS', treasureId: t.id }); });
+    });
+  }
+
+  function drawUser(lat, lon){
+    if (typeof lat !== 'number' || typeof lon !== 'number') return;
+    if (userMarker) userMarker.setLatLng([lat, lon]);
+    else {
+      userMarker = L.circleMarker([lat, lon], {
+        radius: 7,
+        color: '#F3ECD8',
+        weight: 2,
+        fillColor: '#2C3B2E',
+        fillOpacity: 1
+      }).addTo(map).bindTooltip('YOUR POSITION');
+    }
+    if (radiusCircle) radiusCircle.setLatLng([lat, lon]);
+    else {
+      radiusCircle = L.circle([lat, lon], { radius: 20000, color: '#B08D57', weight: 1, fillColor: '#B08D57', fillOpacity: 0.06 }).addTo(map);
+    }
+  }
+
+  function escapeHtml(value){
+    return String(value).replace(/[&<>'\"]/g, function(c){ return ({'&':'&amp;','<':'&lt;','>':'&gt;',\"'\":'&#39;',\"\\\"\":'&quot;'}[c]); });
+  }
+
+  window.addEventListener('message', function(event){
+    const data = event.data || {};
+    if (data.type === 'TREASI_UPDATE_MAP') {
+      if (data.user && typeof data.user.latitude === 'number' && typeof data.user.longitude === 'number') {
+        drawUser(data.user.latitude, data.user.longitude);
+      }
+      drawTreasureMarkers(data.treasures || []);
+    }
+    if (data.type === 'TREASI_SET_VIEW' && typeof data.latitude === 'number' && typeof data.longitude === 'number') {
+      map.setView([data.latitude, data.longitude], data.zoom || 14, { animate: true });
+    }
+  });
+
+  post({ type: 'TREASI_WEB_MAP_READY' });
+})();
+</script>
+</body>
+</html>`, []);
+
+  useEffect(() => {
+    if (Platform.OS !== 'web') return;
+
+    const handleWebMapMessage = (event: MessageEvent) => {
+      const data = event.data || {};
+      if (data.type === 'TREASI_WEB_MAP_READY') {
+        webMapReadyRef.current = true;
+        setIsMapReady(true);
+      }
+      if (data.type === 'TREASURE_MARKER_PRESS' && typeof data.treasureId === 'string') {
+        const treasure = allRawTreasures.find((item) => item.treasureId === data.treasureId);
+        if (treasure) setSelectedTreasure(treasure);
+      }
+    };
+
+    window.addEventListener('message', handleWebMapMessage);
+    return () => window.removeEventListener('message', handleWebMapMessage);
+  }, [allRawTreasures]);
+
+  useEffect(() => {
+    if (Platform.OS !== 'web' || !webMapReadyRef.current) return;
+
+    const payload = {
+      type: 'TREASI_UPDATE_MAP',
+      user: userLocation
+        ? { latitude: userLocation.coords.latitude, longitude: userLocation.coords.longitude }
+        : null,
+      treasures: nearbyTreasures.map((treasure) => ({
+        id: treasure.treasureId,
+        title: treasure.title,
+        latitude: treasure.location.latitude,
+        longitude: treasure.location.longitude,
+      })),
+    };
+
+    webMapRef.current?.contentWindow?.postMessage(payload, '*');
+  }, [isMapReady, nearbyTreasures, userLocation]);
 
   const selectedDistance = useMemo(() => {
     if (!selectedTreasure || !userLocation) return null;
@@ -509,42 +718,54 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
       <View style={isLandscape ? styles.leftViewportLandscape : styles.leftViewportPortrait}>
         {Platform.OS === 'web' ? (
           <View style={styles.webMapContainer}>
-            <iframe
-              title="Treasi Field Map"
-              src={webOsmUrl}
-              style={{ width: '100%', height: '100%', border: 'none' }}
-            />
+            {React.createElement('iframe', {
+              ref: webMapRef,
+              title: 'Treasi Field Map',
+              srcDoc: webMapHtml,
+              style: { width: '100%', height: '100%', border: '0', display: 'block' },
+              loading: 'eager',
+            })}
+            {!isMapReady && (
+              <View style={styles.webMapLoadingOverlay} pointerEvents="none">
+                <ActivityIndicator size="small" color="#A64B2A" />
+                <Text style={styles.webMapLoadingText}>LOADING FIELD MAP...</Text>
+              </View>
+            )}
           </View>
-        ) : (
-          <MapView
-            ref={mapRef}
-            provider={PROVIDER_DEFAULT}
-            style={StyleSheet.absoluteFillObject}
-            initialRegion={region}
-            customMapStyle={VINTAGE_MAP_STYLE}
-            showsUserLocation={true}
-            showsCompass={false}
-            onMapReady={() => setIsMapReady(true)}
-            accessibilityLabel="Scavenger Hunt Field Map Canvas"
-          >
-            {nearbyTreasures.map((treasure, index) => (
-              <Marker
-                key={treasure.treasureId || `treasure-marker-${index}`}
-                coordinate={{
-                  latitude: treasure.location.latitude,
-                  longitude: treasure.location.longitude,
-                }}
-                title={treasure.title}
-                description={`Hidden by ${treasure.creatorName}`}
-                onPress={() => handleMarkerPress(treasure)}
-              >
-                <View style={styles.customMarker}>
-                  <MaterialCommunityIcons name="treasure-chest" size={14} color="#F3ECD8" />
-                </View>
-              </Marker>
-            ))}
-          </MapView>
-        )}
+        ) : (() => {
+          const NativeMapView = require('react-native-maps').default;
+          const { Marker: NativeMarker, PROVIDER_DEFAULT: nativeProviderDefault } = require('react-native-maps');
+          return (
+            <NativeMapView
+              ref={mapRef}
+              provider={nativeProviderDefault}
+              style={StyleSheet.absoluteFillObject}
+              initialRegion={region}
+              customMapStyle={VINTAGE_MAP_STYLE}
+              showsUserLocation={true}
+              showsCompass={false}
+              onMapReady={() => setIsMapReady(true)}
+              accessibilityLabel="Scavenger Hunt Field Map Canvas"
+            >
+              {nearbyTreasures.map((treasure, index) => (
+                <NativeMarker
+                  key={treasure.treasureId || `treasure-marker-${index}`}
+                  coordinate={{
+                    latitude: treasure.location.latitude,
+                    longitude: treasure.location.longitude,
+                  }}
+                  title={treasure.title}
+                  description={`Hidden by ${treasure.creatorName || 'Unknown explorer'}`}
+                  onPress={() => handleMarkerPress(treasure)}
+                >
+                  <View style={styles.customMarker}>
+                    <MaterialCommunityIcons name="treasure-chest" size={14} color="#F3ECD8" />
+                  </View>
+                </NativeMarker>
+              ))}
+            </NativeMapView>
+          );
+        })()}
 
         {/* Compass Banner */}
         <View style={styles.compassOverlay} aria-hidden={true}>
@@ -603,7 +824,7 @@ export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
           </View>
         )}
 
-        {(isInitializingLocation || !isMapReady) && Platform.OS !== 'web' && (
+        {(isInitializingLocation || (!isMapReady && Platform.OS !== 'web')) && (
           <View style={styles.loadingContainer}>
             <ActivityIndicator size="small" color="#A64B2A" />
           </View>
@@ -867,7 +1088,22 @@ const styles = StyleSheet.create({
     width: '100%',
     height: '100%',
     backgroundColor: '#E8DCC0',
+    overflow: 'hidden',
   },
+  webMapLoadingOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(232,220,192,0.82)',
+    gap: 8,
+  },
+  webMapLoadingText: {
+    color: '#2A2420',
+    fontSize: 9,
+    fontWeight: 'bold',
+    letterSpacing: 1,
+  },
+
   loadingContainer: {
     position: 'absolute',
     bottom: 16,
