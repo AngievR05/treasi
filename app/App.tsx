@@ -56,6 +56,7 @@ export interface NavigationParams {
   mode?: 'hunt' | 'create';
   latitude?: number;
   longitude?: number;
+  [key: string]: unknown;
 }
 
 /**

@@ -2,6 +2,8 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Animated,
+  KeyboardAvoidingView,
   Modal,
   Platform,
   Pressable,
@@ -14,14 +16,6 @@ import {
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import Animated, {
-  FadeInDown,
-  FadeInLeft,
-  FadeInRight,
-  useAnimatedStyle,
-  useSharedValue,
-  withSpring,
-} from 'react-native-reanimated';
 import Svg, { Circle, Path, Polyline } from 'react-native-svg';
 import {
   collection,
@@ -194,19 +188,8 @@ export const LeaderboardScreen: React.FC<Props> = ({
   const [actionUid, setActionUid] = useState<string | null>(null);
   const [isTransmitting, setIsTransmitting] = useState(false);
   const [isSearching, setIsSearching] = useState(false);
-
-  const buttonScale = useSharedValue(1);
-  const animatedButtonStyle = useAnimatedStyle(() => ({
-    transform: [{ scale: buttonScale.value }],
-  }));
-
-  const handlePressIn = () => {
-    buttonScale.value = withSpring(0.95, { damping: 15 });
-  };
-
-  const handlePressOut = () => {
-    buttonScale.value = withSpring(1, { damping: 15 });
-  };
+  const [manifestRetryKey, setManifestRetryKey] = useState(0);
+  const [explorerRetryKey, setExplorerRetryKey] = useState(0);
 
   const friendshipsMap = useMemo<Record<string, FriendshipMeta>>(() => {
     const map: Record<string, FriendshipMeta> = {};
@@ -280,7 +263,7 @@ export const LeaderboardScreen: React.FC<Props> = ({
     );
 
     return unsubscribe;
-  }, [currentUserId]);
+  }, [currentUserId, manifestRetryKey]);
 
   useEffect(() => {
     if (!db || !currentUserId) {
@@ -299,31 +282,71 @@ export const LeaderboardScreen: React.FC<Props> = ({
       where('receiverId', '==', currentUserId),
     );
 
-    const unsubOutgoing = onSnapshot(outgoingQuery, (snapshot) => {
-      setOutgoingFriendships(
-        snapshot.docs.map((docSnap) => {
-          const data = docSnap.data() as FriendshipDocument;
-          return {
-            docId: docSnap.id,
-            targetUid: data.receiverId,
-            status: data.status,
-          };
-        }),
-      );
-    });
+    const unsubOutgoing = onSnapshot(
+      outgoingQuery,
+      (snapshot) => {
+        setOutgoingFriendships(
+          snapshot.docs
+            .map((docSnap) => {
+              const data = docSnap.data() as Partial<FriendshipDocument>;
+              if (typeof data.receiverId !== 'string' || typeof data.status !== 'string') {
+                return null;
+              }
 
-    const unsubIncoming = onSnapshot(incomingQuery, (snapshot) => {
-      setIncomingFriendships(
-        snapshot.docs.map((docSnap) => {
-          const data = docSnap.data() as FriendshipDocument;
-          return {
-            docId: docSnap.id,
-            targetUid: data.requesterId,
-            status: data.status,
-          };
-        }),
-      );
-    });
+              return {
+                docId: docSnap.id,
+                targetUid: data.receiverId,
+                status: data.status as FriendshipMeta['status'],
+              };
+            })
+            .filter(
+              (
+                item,
+              ): item is {
+                docId: string;
+                targetUid: string;
+                status: FriendshipMeta['status'];
+              } => item !== null,
+            ),
+        );
+      },
+      () => {
+        setOutgoingFriendships([]);
+      },
+    );
+
+    const unsubIncoming = onSnapshot(
+      incomingQuery,
+      (snapshot) => {
+        setIncomingFriendships(
+          snapshot.docs
+            .map((docSnap) => {
+              const data = docSnap.data() as Partial<FriendshipDocument>;
+              if (typeof data.requesterId !== 'string' || typeof data.status !== 'string') {
+                return null;
+              }
+
+              return {
+                docId: docSnap.id,
+                targetUid: data.requesterId,
+                status: data.status as FriendshipMeta['status'],
+              };
+            })
+            .filter(
+              (
+                item,
+              ): item is {
+                docId: string;
+                targetUid: string;
+                status: FriendshipMeta['status'];
+              } => item !== null,
+            ),
+        );
+      },
+      () => {
+        setIncomingFriendships([]);
+      },
+    );
 
     return () => {
       unsubOutgoing();
@@ -353,12 +376,18 @@ export const LeaderboardScreen: React.FC<Props> = ({
               location?: GeoPoint | { latitude: number; longitude: number } | null;
             };
             const rawLocation = data.location;
-            const location: GeoPoint | null = rawLocation instanceof GeoPoint
-              ? rawLocation
-              : rawLocation && typeof rawLocation === 'object' && 'latitude' in rawLocation && 'longitude' in rawLocation
-                ? isValidCoordinate(rawLocation.latitude, rawLocation.longitude)
-                  ? new GeoPoint(rawLocation.latitude, rawLocation.longitude)
-                  : null
+            const rawLatitude =
+              rawLocation && typeof rawLocation === 'object' && 'latitude' in rawLocation
+                ? Number(rawLocation.latitude)
+                : NaN;
+            const rawLongitude =
+              rawLocation && typeof rawLocation === 'object' && 'longitude' in rawLocation
+                ? Number(rawLocation.longitude)
+                : NaN;
+
+            const location: GeoPoint | null =
+              isValidCoordinate(rawLatitude, rawLongitude)
+                ? new GeoPoint(rawLatitude, rawLongitude)
                 : null;
 
             return {
@@ -378,7 +407,7 @@ export const LeaderboardScreen: React.FC<Props> = ({
     );
 
     return unsubscribe;
-  }, [currentUserId]);
+  }, [currentUserId, explorerRetryKey]);
 
   const nearbyExplorers = useMemo<NearbyExplorer[]>(() => {
     const canCalculateDistance =
@@ -401,9 +430,8 @@ export const LeaderboardScreen: React.FC<Props> = ({
         hasValidLocation = true;
       }
 
-      // Keep only explorers inside 20km. Users with no valid location are not
-      // treated as nearby because their distance cannot be verified.
-      if (!hasValidLocation || (distanceKm !== null && distanceKm <= RADIUS_KM)) {
+      // Only show explorers whose distance can actually be verified.
+      if (hasValidLocation && distanceKm !== null && distanceKm <= RADIUS_KM) {
         parsed.push({
           uid: user.uid,
           name: user.name,
@@ -566,11 +594,8 @@ export const LeaderboardScreen: React.FC<Props> = ({
       }
 
       await handleSendFriendRequest(matchingExplorer.uid);
-
-      if (!actionUid) {
-        setFriendModalVisible(false);
-        setSearchAgentTag('');
-      }
+      setFriendModalVisible(false);
+      setSearchAgentTag('');
     } catch {
       setSearchError('TRANSMISSION FAILED');
     } finally {
@@ -596,8 +621,17 @@ export const LeaderboardScreen: React.FC<Props> = ({
     setIsTransmitting(true);
 
     try {
-      const senderName = normaliseName(currentUser?.displayName || currentUser?.email || 'FIELD EXPLORER');
-      const message = telegramText.trim();
+      const senderName = normaliseName(
+        currentUser?.displayName?.trim() ||
+          currentUser?.email?.trim() ||
+          'FIELD EXPLORER',
+      );
+      const message = telegramText.trim().slice(0, 500);
+
+      if (!message) {
+        setIsTransmitting(false);
+        return;
+      }
 
       await setDoc(
         doc(collection(db, 'messages')),
@@ -647,7 +681,7 @@ export const LeaderboardScreen: React.FC<Props> = ({
         },
       ]}
     >
-      <Animated.View entering={FadeInLeft.duration(500)} style={styles.leftViewport}>
+      <View style={styles.leftViewport}>
         <View style={styles.ledgerHeader}>
           <StarIcon color="#A64B2A" size={14} />
           <Text style={styles.header}>FIELD MANIFEST</Text>
@@ -673,8 +707,9 @@ export const LeaderboardScreen: React.FC<Props> = ({
             <TouchableOpacity
               style={styles.inlineRetryButton}
               onPress={() => {
-                setLoadingManifest(true);
                 setManifestError('');
+                setLoadingManifest(true);
+                setManifestRetryKey((value) => value + 1);
               }}
               accessibilityRole="button"
               accessibilityLabel="Retry leaderboard sync"
@@ -693,9 +728,8 @@ export const LeaderboardScreen: React.FC<Props> = ({
             accessibilityLabel="Explorer leaderboard"
           >
             {manifest.map((item, index) => (
-              <Animated.View
+              <View
                 key={item.uid}
-                entering={FadeInDown.delay(index * 30).duration(250)}
                 style={[styles.rowContainer, item.isUser && styles.rowHighlight]}
                 accessible
                 accessibilityLabel={`Rank ${Number(item.rank)}. ${item.name}. ${item.points} points.`}
@@ -736,13 +770,13 @@ export const LeaderboardScreen: React.FC<Props> = ({
                 >
                   {item.points}
                 </Text>
-              </Animated.View>
+              </View>
             ))}
           </ScrollView>
         )}
-      </Animated.View>
+      </View>
 
-      <Animated.View entering={FadeInRight.duration(500)} style={styles.rightViewport}>
+      <View style={styles.rightViewport}>
         <View style={styles.rightHeaderRow}>
           <View style={{ flex: 1 }}>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
@@ -775,7 +809,18 @@ export const LeaderboardScreen: React.FC<Props> = ({
         ) : explorerError ? (
           <View style={styles.loadingBox}>
             <Text style={styles.errorTextDark}>{explorerError}</Text>
-            <Text style={styles.loadingTextDark}>RECONNECT TO RETRY</Text>
+            <TouchableOpacity
+              style={styles.darkRetryButton}
+              onPress={() => {
+                setExplorerError('');
+                setLoadingExplorers(true);
+                setExplorerRetryKey((value) => value + 1);
+              }}
+              accessibilityRole="button"
+              accessibilityLabel="Retry nearby explorer scan"
+            >
+              <Text style={styles.darkRetryText}>RECONNECT</Text>
+            </TouchableOpacity>
           </View>
         ) : !userCoordinates ? (
           <View style={styles.loadingBox}>
@@ -806,9 +851,8 @@ export const LeaderboardScreen: React.FC<Props> = ({
               const isActing = actionUid === item.uid || actionUid === friendMeta?.docId;
 
               return (
-                <Animated.View
+                <View
                   key={item.uid}
-                  entering={FadeInRight.delay(idx * 50).duration(250)}
                   style={styles.explorerCard}
                   accessible
                   accessibilityLabel={`${item.name}. Range ${item.distanceFormatted}. ${
@@ -939,17 +983,15 @@ export const LeaderboardScreen: React.FC<Props> = ({
                       <Text style={styles.statusText}>BLOCKED</Text>
                     )}
                   </View>
-                </Animated.View>
+                </View>
               );
             })}
           </ScrollView>
         )}
 
-        <Animated.View style={[animatedButtonStyle, { marginBottom: 6 }]}>
+        <View style={{ marginBottom: 6 }}>
           <TouchableOpacity
             activeOpacity={0.88}
-            onPressIn={handlePressIn}
-            onPressOut={handlePressOut}
             style={styles.dispatchButton}
             onPress={() => {
               setTelegramText('');
@@ -961,30 +1003,36 @@ export const LeaderboardScreen: React.FC<Props> = ({
           >
             <Text style={styles.dispatchText}>DISPATCH TELEGRAM</Text>
           </TouchableOpacity>
-        </Animated.View>
+        </View>
 
         <FieldNavBar currentTab={currentTab} onNavigate={onNavigate} />
-      </Animated.View>
+      </View>
 
       <Modal
         visible={telegramModalVisible}
         transparent
         animationType="fade"
+        presentationStyle="overFullScreen"
+        statusBarTranslucent
         onRequestClose={() => {
           if (!isTransmitting) setTelegramModalVisible(false);
         }}
       >
-        <Pressable
+        <KeyboardAvoidingView
           style={styles.modalOverlay}
-          onPress={() => {
-            if (!isTransmitting) setTelegramModalVisible(false);
-          }}
-          accessibilityRole="button"
-          accessibilityLabel="Close Telegram dialog"
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
         >
           <Pressable
+            style={StyleSheet.absoluteFill}
+            onPress={() => {
+              if (!isTransmitting) setTelegramModalVisible(false);
+            }}
+            accessibilityRole="button"
+            accessibilityLabel="Close Telegram dialog"
+          />
+          <View
             style={[styles.modalCard, !isLandscape && styles.modalCardPortrait]}
-            onPress={(event) => event.stopPropagation()}
+            onStartShouldSetResponder={() => true}
           >
             <View style={styles.modalHeader}>
               <View style={{ flex: 1 }}>
@@ -1040,29 +1088,35 @@ export const LeaderboardScreen: React.FC<Props> = ({
                 </>
               )}
             </TouchableOpacity>
-          </Pressable>
-        </Pressable>
+          </View>
+        </KeyboardAvoidingView>
       </Modal>
 
       <Modal
         visible={friendModalVisible}
         transparent
         animationType="fade"
+        presentationStyle="overFullScreen"
+        statusBarTranslucent
         onRequestClose={() => {
           if (!isSearching && !actionUid) setFriendModalVisible(false);
         }}
       >
-        <Pressable
+        <KeyboardAvoidingView
           style={styles.modalOverlay}
-          onPress={() => {
-            if (!isSearching && !actionUid) setFriendModalVisible(false);
-          }}
-          accessibilityRole="button"
-          accessibilityLabel="Close explorer linking dialog"
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
         >
           <Pressable
+            style={StyleSheet.absoluteFill}
+            onPress={() => {
+              if (!isSearching && !actionUid) setFriendModalVisible(false);
+            }}
+            accessibilityRole="button"
+            accessibilityLabel="Close explorer linking dialog"
+          />
+          <View
             style={[styles.modalCard, !isLandscape && styles.modalCardPortrait]}
-            onPress={(event) => event.stopPropagation()}
+            onStartShouldSetResponder={() => true}
           >
             <View style={styles.modalHeader}>
               <View style={{ flex: 1 }}>
@@ -1129,8 +1183,8 @@ export const LeaderboardScreen: React.FC<Props> = ({
                 </>
               )}
             </TouchableOpacity>
-          </Pressable>
-        </Pressable>
+          </View>
+        </KeyboardAvoidingView>
       </Modal>
     </View>
   );
@@ -1144,6 +1198,7 @@ const styles = StyleSheet.create({
   },
   leftViewport: {
     flex: 0.6,
+    minWidth: 0,
     backgroundColor: '#E8DCC0',
     padding: 16,
     borderTopLeftRadius: 12,
@@ -1237,6 +1292,22 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     letterSpacing: 1,
   },
+  darkRetryButton: {
+    backgroundColor: '#A64B2A',
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    minHeight: 40,
+    borderRadius: 4,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginTop: 8,
+  },
+  darkRetryText: {
+    color: '#F3ECD8',
+    fontSize: 9,
+    fontWeight: 'bold',
+    letterSpacing: 1,
+  },
   rowContainer: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1270,6 +1341,7 @@ const styles = StyleSheet.create({
   },
   rightViewport: {
     flex: 0.4,
+    minWidth: 0,
     backgroundColor: '#2C3B2E',
     padding: 14,
     borderLeftWidth: 2,
@@ -1412,13 +1484,14 @@ const styles = StyleSheet.create({
     padding: 20,
   },
   modalCard: {
-    width: '60%',
+    width: '90%',
     maxWidth: 600,
     backgroundColor: '#E8DCC0',
     borderRadius: 8,
     borderWidth: 2,
     borderColor: '#B08D57',
     padding: 16,
+    maxHeight: '90%',
   },
   modalCardPortrait: {
     width: '90%',
