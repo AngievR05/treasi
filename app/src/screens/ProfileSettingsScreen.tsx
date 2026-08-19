@@ -1,23 +1,33 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  View,
-  Text,
-  StyleSheet,
-  TouchableOpacity,
-  TextInput,
-  Switch,
-  ScrollView,
-  Platform,
-  Animated,
-  Easing,
-  useWindowDimensions,
   ActivityIndicator,
   Alert,
+  Animated,
+  Easing,
+  Platform,
+  ScrollView,
+  StyleSheet,
+  Switch,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  useWindowDimensions,
+  View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { doc, updateDoc, serverTimestamp } from 'firebase/firestore';
-import { signOut, updateProfile } from 'firebase/auth';
+import {
+  doc,
+  getDoc,
+  onSnapshot,
+  serverTimestamp,
+  updateDoc,
+} from 'firebase/firestore';
+import {
+  signOut,
+  updateProfile,
+  User,
+} from 'firebase/auth';
 import { db, auth } from '../config/firebase';
 import { FieldNavBar, NavigationTab } from '../components/FieldNavBar';
 import { UserDocument } from '../types/firestore';
@@ -31,11 +41,131 @@ interface ProfileSettingsScreenProps {
   onUpdateUserSettings?: (updatedFields: Partial<UserDocument>) => Promise<void>;
 }
 
+type SettingKey =
+  | 'hapticFeedbackEnabled'
+  | 'motionSensitivityEnabled'
+  | 'batteryOptimizerEnabled'
+  | 'nightModeEnabled'
+  | 'telemetryEnabled'
+  | 'skipOnboardingAuthFlow';
+
+interface SettingConfig {
+  key: SettingKey;
+  label: string;
+  icon: keyof typeof Ionicons.glyphMap;
+  description: string;
+}
+
+const SETTINGS: SettingConfig[] = [
+  {
+    key: 'hapticFeedbackEnabled',
+    label: 'HAPTIC TRIGGERS',
+    icon: 'radio-outline',
+    description: 'Enable tactile feedback for supported interactions.',
+  },
+  {
+    key: 'motionSensitivityEnabled',
+    label: 'SENSOR SENSITIVITY',
+    icon: 'flash-outline',
+    description: 'Enable the motion sensitivity preference used by supported sensor interactions.',
+  },
+  {
+    key: 'batteryOptimizerEnabled',
+    label: 'BATTERY OPTIMIZE',
+    icon: 'battery-charging-outline',
+    description: 'Enable the battery optimisation preference used by supported location polling.',
+  },
+  {
+    key: 'nightModeEnabled',
+    label: 'NIGHT FIELD MODE',
+    icon: 'moon-outline',
+    description: 'Enable the saved night-mode preference for supported UI.',
+  },
+  {
+    key: 'telemetryEnabled',
+    label: 'TELEMETRY LOGS',
+    icon: 'stats-chart-outline',
+    description: 'Enable the saved telemetry preference for supported location/sensor features.',
+  },
+  {
+    key: 'skipOnboardingAuthFlow',
+    label: 'BYPASS ONBOARDING',
+    icon: 'caret-forward-outline',
+    description: 'Persist the preference used by the app startup flow to bypass onboarding where supported.',
+  },
+];
+
+const safeString = (value: unknown, fallback = ''): string => {
+  return typeof value === 'string' ? value : fallback;
+};
+
+const sanitiseUsername = (value: string): string => value.trim().replace(/\s+/g, ' ');
+
+const buildHandle = (username: string): string => {
+  const clean = username.trim().toLowerCase();
+  return clean ? `@${clean.replace(/\s+/g, '_')}` : '@unregistered';
+};
+
+const getFriendlyAuthError = (error: unknown, fallback: string): string => {
+  const code =
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    typeof (error as { code?: unknown }).code === 'string'
+      ? (error as { code: string }).code
+      : '';
+
+  switch (code) {
+    case 'auth/network-request-failed':
+      return 'Network connection failed. Please check your connection and try again.';
+    case 'auth/requires-recent-login':
+      return 'Please sign in again before making this profile change.';
+    case 'auth/user-disabled':
+      return 'This Firebase account has been disabled.';
+    default:
+      return fallback;
+  }
+};
+
+const formatMemberSince = (createdAt: unknown): string => {
+  if (!createdAt) return 'N/A';
+
+  try {
+    const maybeTimestamp = createdAt as {
+      toDate?: () => Date;
+    };
+
+    const date =
+      typeof maybeTimestamp.toDate === 'function'
+        ? maybeTimestamp.toDate()
+        : createdAt instanceof Date
+          ? createdAt
+          : new Date(createdAt as string | number);
+
+    if (Number.isNaN(date.getTime())) return 'N/A';
+
+    return `${date.toLocaleString('default', {
+      month: 'short',
+    }).toUpperCase()} ${date.getFullYear()}`;
+  } catch {
+    return 'N/A';
+  }
+};
+
+const calculateBadgeRank = (points: number): string => {
+  if (points >= 500) return 'COMMANDER I';
+  if (points >= 250) return 'PATHFINDER II';
+  if (points >= 100) return 'TRAILBLAZER III';
+  return 'RECON SCOUT';
+};
+
+const normaliseBoolean = (value: unknown): boolean => value === true;
+
 export const ProfileSettingsScreen: React.FC<ProfileSettingsScreenProps> = ({
   onBack,
   onSignOut,
   onNavigate,
-  userData,
+  userData: parentUserData = null,
   isLoadingUserData = false,
   onUpdateUserSettings,
 }) => {
@@ -43,151 +173,317 @@ export const ProfileSettingsScreen: React.FC<ProfileSettingsScreenProps> = ({
   const { width, height } = useWindowDimensions();
   const isLandscape = width > height;
 
-  // Operational States
-  const [isSaving, setIsSaving] = useState<boolean>(false);
+  const [localUserData, setLocalUserData] = useState<UserDocument | null>(parentUserData);
+  const [isLoadingProfile, setIsLoadingProfile] = useState<boolean>(
+    isLoadingUserData && !parentUserData,
+  );
+  const [profileError, setProfileError] = useState<string>('');
+
+  const [isSavingProfile, setIsSavingProfile] = useState<boolean>(false);
+  const [isSavingSetting, setIsSavingSetting] = useState<SettingKey | null>(null);
   const [isLoggingOut, setIsLoggingOut] = useState<boolean>(false);
   const [isEditing, setIsEditing] = useState<boolean>(false);
 
-  // Calibration Array Toggles - Strictly Synced from User Document (Default: OFF / false)
-  const [hapticTriggers, setHapticTriggers] = useState<boolean>(false);
-  const [sensorSensitivity, setSensorSensitivity] = useState<boolean>(false);
-  const [batteryOptimize, setBatteryOptimize] = useState<boolean>(false);
-  const [nightFieldMode, setNightFieldMode] = useState<boolean>(false);
-  const [telemetryEnabled, setTelemetryEnabled] = useState<boolean>(false);
-  const [skipOnboardingAuthFlow, setSkipOnboardingAuthFlow] = useState<boolean>(false);
+  const [hapticTriggers, setHapticTriggers] = useState(false);
+  const [sensorSensitivity, setSensorSensitivity] = useState(false);
+  const [batteryOptimize, setBatteryOptimize] = useState(false);
+  const [nightFieldMode, setNightFieldMode] = useState(false);
+  const [telemetryEnabled, setTelemetryEnabled] = useState(false);
+  const [skipOnboardingAuthFlow, setSkipOnboardingAuthFlow] = useState(false);
 
-  // Identity Editing State
-  const [agentName, setAgentName] = useState<string>('');
-  const [handle, setHandle] = useState<string>('');
+  const [agentName, setAgentName] = useState('');
+  const [editingOriginalName, setEditingOriginalName] = useState('');
 
-  // Micro-interaction Tactile Animation References
   const editBtnScale = useRef(new Animated.Value(1)).current;
   const signOutBtnScale = useRef(new Animated.Value(1)).current;
 
-  // Dynamic state synchronization directly from authenticated user profile source
+  const currentFirebaseUser = auth.currentUser;
+  const currentUid = currentFirebaseUser?.uid ?? localUserData?.uid ?? 'N/A';
+
+  const applyUserDataToLocalState = useCallback((data: UserDocument | null) => {
+    setLocalUserData(data);
+
+    if (!data) return;
+
+    const username =
+      safeString(data.username) ||
+      safeString(auth.currentUser?.displayName) ||
+      'UNREGISTERED_AGENT';
+
+    setAgentName(username);
+    setHapticTriggers(normaliseBoolean(data.hapticFeedbackEnabled));
+    setSensorSensitivity(normaliseBoolean(data.motionSensitivityEnabled));
+    setBatteryOptimize(normaliseBoolean(data.batteryOptimizerEnabled));
+    setNightFieldMode(normaliseBoolean(data.nightModeEnabled));
+    setTelemetryEnabled(normaliseBoolean(data.telemetryEnabled));
+    setSkipOnboardingAuthFlow(normaliseBoolean(data.skipOnboardingAuthFlow));
+  }, []);
+
   useEffect(() => {
-    if (userData) {
-      setHapticTriggers(userData.hapticFeedbackEnabled ?? false);
-      setSensorSensitivity(userData.motionSensitivityEnabled ?? false);
-      setBatteryOptimize(userData.batteryOptimizerEnabled ?? false);
-      setNightFieldMode(userData.nightModeEnabled ?? false);
-      setTelemetryEnabled(userData.telemetryEnabled ?? false);
-      setSkipOnboardingAuthFlow(userData.skipOnboardingAuthFlow ?? false);
+    applyUserDataToLocalState(parentUserData);
+  }, [applyUserDataToLocalState, parentUserData]);
 
-      const activeName = userData.username || auth.currentUser?.displayName || 'UNREGISTERED_AGENT';
-      setAgentName(activeName);
-      setHandle(`@${activeName.toLowerCase().replace(/\s+/g, '_')}`);
-    }
-  }, [userData]);
-
-  // Tactile Spring & Bounce Animation Trigger
-  const triggerPressAnimation = (animValue: Animated.Value, callback?: () => void) => {
-    Animated.sequence([
-      Animated.timing(animValue, {
-        toValue: 0.94,
-        duration: 80,
-        easing: Easing.out(Easing.ease),
-        useNativeDriver: true,
-      }),
-      Animated.spring(animValue, {
-        toValue: 1,
-        friction: 4,
-        tension: 40,
-        useNativeDriver: true,
-      }),
-    ]).start(() => {
-      if (callback) callback();
-    });
-  };
-
-  /**
-   * Unified Firestore Settings Mutation
-   * Executes parent callback or directly updates current user document in Firestore
+  /*
+   * The profile can fetch its own Firestore document so it remains correct even
+   * when App.tsx does not pass userData. A real-time listener keeps the profile
+   * in sync after excavation points/settings changes elsewhere in the app.
    */
-  const persistUserFields = useCallback(
-    async (fields: Partial<UserDocument>) => {
-      try {
-        setIsSaving(true);
-        if (onUpdateUserSettings) {
-          await onUpdateUserSettings(fields);
-        } else {
-          const currentUid = userData?.uid || auth.currentUser?.uid;
-          if (!currentUid) {
-            throw new Error('No authenticated Firebase user session found.');
-          }
-          const userRef = doc(db, 'users', currentUid);
-          await updateDoc(userRef, {
-            ...fields,
-            updatedAt: serverTimestamp(),
-          });
-        }
-      } catch (error: any) {
-        console.error('[SETTINGS PERSISTENCE ERROR]', error);
-        Alert.alert(
-          'CALIBRATION ERROR',
-          error?.message || 'Failed to synchronize telemetry settings with Firestore.'
-        );
-      } finally {
-        setIsSaving(false);
+  useEffect(() => {
+    const uid = auth.currentUser?.uid;
+
+    if (!db || !uid) {
+      setIsLoadingProfile(false);
+      if (!parentUserData) {
+        setLocalUserData(null);
+        setProfileError('No authenticated Firebase user was found.');
       }
+      return;
+    }
+
+    setIsLoadingProfile(true);
+    setProfileError('');
+
+    const userRef = doc(db, 'users', uid);
+
+    const unsubscribe = onSnapshot(
+      userRef,
+      (snapshot) => {
+        if (!snapshot.exists()) {
+          // Keep any valid parent-provided data while we report the missing document.
+          setProfileError(
+            'Your Firebase authentication is active, but your profile document could not be found.',
+          );
+          setIsLoadingProfile(false);
+          return;
+        }
+
+        applyUserDataToLocalState(snapshot.data() as UserDocument);
+        setProfileError('');
+        setIsLoadingProfile(false);
+      },
+      () => {
+        setIsLoadingProfile(false);
+
+        // Fall back to a one-time get if the listener fails and parent data is absent.
+        if (!localUserData) {
+          getDoc(userRef)
+            .then((snapshot) => {
+              if (snapshot.exists()) {
+                applyUserDataToLocalState(snapshot.data() as UserDocument);
+                setProfileError('');
+              } else {
+                setProfileError('Unable to find your Treasi profile document.');
+              }
+            })
+            .catch(() => {
+              setProfileError('Unable to load your profile. Please try again.');
+            });
+        }
+      },
+    );
+
+    return unsubscribe;
+  }, [applyUserDataToLocalState, localUserData, parentUserData]);
+
+  const triggerPressAnimation = useCallback(
+    (animValue: Animated.Value, callback?: () => void) => {
+      Animated.sequence([
+        Animated.timing(animValue, {
+          toValue: 0.94,
+          duration: 80,
+          easing: Easing.out(Easing.ease),
+          useNativeDriver: true,
+        }),
+        Animated.spring(animValue, {
+          toValue: 1,
+          friction: 4,
+          tension: 40,
+          useNativeDriver: true,
+        }),
+      ]).start(() => {
+        callback?.();
+      });
     },
-    [onUpdateUserSettings, userData?.uid]
+    [],
   );
 
-  /**
-   * Real-time Switch Toggle Handler with Immediate Persistence & Optimistic UI
-   */
-  const handleToggleChange = async (
-    key: keyof UserDocument,
-    value: boolean,
-    setter: (val: boolean) => void
-  ) => {
-    setter(value);
-    try {
-      await persistUserFields({ [key]: value });
-    } catch {
-      setter(!value);
-    }
-  };
+  const persistUserFields = useCallback(
+    async (fields: Partial<UserDocument>): Promise<void> => {
+      const uid = auth.currentUser?.uid ?? localUserData?.uid;
 
-  /**
-   * Identity Record Persistence Handler
-   */
-  const handleSaveProfile = () => {
+      if (!uid) {
+        throw new Error('No authenticated Firebase user session found.');
+      }
+
+      if (onUpdateUserSettings) {
+        await onUpdateUserSettings(fields);
+      } else {
+        if (!db) throw new Error('Firebase database is unavailable.');
+
+        await updateDoc(doc(db, 'users', uid), {
+          ...fields,
+          updatedAt: serverTimestamp(),
+        });
+      }
+
+      setLocalUserData((previous) =>
+        previous
+          ? {
+              ...previous,
+              ...fields,
+            }
+          : previous,
+      );
+    },
+    [localUserData?.uid, onUpdateUserSettings],
+  );
+
+  const handleToggleChange = useCallback(
+    async (
+      key: SettingKey,
+      value: boolean,
+      setter: React.Dispatch<React.SetStateAction<boolean>>,
+    ) => {
+      if (isSavingSetting) return;
+
+      const previousValue =
+        key === 'hapticFeedbackEnabled'
+          ? hapticTriggers
+          : key === 'motionSensitivityEnabled'
+            ? sensorSensitivity
+            : key === 'batteryOptimizerEnabled'
+              ? batteryOptimize
+              : key === 'nightModeEnabled'
+                ? nightFieldMode
+                : key === 'telemetryEnabled'
+                  ? telemetryEnabled
+                  : skipOnboardingAuthFlow;
+
+      setter(value);
+      setIsSavingSetting(key);
+      setProfileError('');
+
+      try {
+        await persistUserFields({ [key]: value } as Partial<UserDocument>);
+      } catch (error) {
+        setter(previousValue);
+        const message =
+          error instanceof Error
+            ? error.message
+            : 'Failed to save this preference to Firestore.';
+        Alert.alert('CALIBRATION ERROR', message);
+      } finally {
+        setIsSavingSetting(null);
+      }
+    },
+    [
+      batteryOptimize,
+      hapticTriggers,
+      isSavingSetting,
+      nightFieldMode,
+      persistUserFields,
+      sensorSensitivity,
+      skipOnboardingAuthFlow,
+      telemetryEnabled,
+    ],
+  );
+
+  const handleStartEditing = useCallback(() => {
+    triggerPressAnimation(editBtnScale, () => {
+      setEditingOriginalName(agentName);
+      setIsEditing(true);
+    });
+  }, [agentName, editBtnScale, triggerPressAnimation]);
+
+  const handleCancelEditing = useCallback(() => {
+    setAgentName(editingOriginalName);
+    setIsEditing(false);
+  }, [editingOriginalName]);
+
+  const handleSaveProfile = useCallback(() => {
     triggerPressAnimation(editBtnScale, async () => {
-      const cleanUsername = agentName.trim();
-      if (cleanUsername.length === 0) {
+      if (isSavingProfile) return;
+
+      const cleanUsername = sanitiseUsername(agentName);
+
+      if (!cleanUsername) {
         Alert.alert('INVALID CALLSIGN', 'Agent callsign cannot be empty.');
         return;
       }
 
+      if (cleanUsername.length < 2) {
+        Alert.alert(
+          'INVALID CALLSIGN',
+          'Agent callsign must contain at least 2 characters.',
+        );
+        return;
+      }
+
+      const currentUser: User | null = auth.currentUser;
+
       try {
-        setIsSaving(true);
-        // Sync Firebase Auth profile display name if user is authenticated
-        if (auth.currentUser) {
-          await updateProfile(auth.currentUser, { displayName: cleanUsername });
+        setIsSavingProfile(true);
+        setProfileError('');
+
+        // Update Firebase Authentication displayName when available.
+        if (currentUser && currentUser.displayName !== cleanUsername) {
+          await updateProfile(currentUser, {
+            displayName: cleanUsername,
+          });
         }
-        await persistUserFields({ username: cleanUsername });
-        setHandle(`@${cleanUsername.toLowerCase().replace(/\s+/g, '_')}`);
+
+        // Keep the Firestore username and Auth display name aligned.
+        await persistUserFields({
+          username: cleanUsername,
+        });
+
+        setAgentName(cleanUsername);
+        setEditingOriginalName(cleanUsername);
         setIsEditing(false);
-      } catch (error: any) {
-        Alert.alert('PROFILE UPDATE ERROR', error.message || 'Failed to update user profile.');
+      } catch (error) {
+        const friendlyMessage = getFriendlyAuthError(
+          error,
+          'Failed to update the user profile.',
+        );
+
+        setAgentName(editingOriginalName || agentName);
+        Alert.alert('PROFILE UPDATE ERROR', friendlyMessage);
       } finally {
-        setIsSaving(false);
+        setIsSavingProfile(false);
       }
     });
-  };
+  }, [
+    agentName,
+    editBtnScale,
+    editingOriginalName,
+    isSavingProfile,
+    persistUserFields,
+    triggerPressAnimation,
+  ]);
 
-  const handleStartEditing = () => {
-    triggerPressAnimation(editBtnScale, () => {
-      setIsEditing(true);
+  const handleLogoutConfirmed = useCallback(() => {
+    if (isLoggingOut) return;
+
+    triggerPressAnimation(signOutBtnScale, async () => {
+      try {
+        setIsLoggingOut(true);
+
+        await signOut(auth);
+
+        // App.tsx remains responsible for changing the global screen state.
+        onSignOut();
+      } catch (error) {
+        Alert.alert(
+          'LOGOUT FAILED',
+          getFriendlyAuthError(error, 'Could not sign out of the current session.'),
+        );
+      } finally {
+        setIsLoggingOut(false);
+      }
     });
-  };
+  }, [isLoggingOut, onSignOut, signOutBtnScale, triggerPressAnimation]);
 
-  /**
-   * Firebase Authentication Logout Process
-   */
-  const handleSignOutPress = () => {
+  const handleSignOutPress = useCallback(() => {
     if (isLoggingOut) return;
 
     Alert.alert(
@@ -198,58 +494,113 @@ export const ProfileSettingsScreen: React.FC<ProfileSettingsScreenProps> = ({
         {
           text: 'LOGOUT',
           style: 'destructive',
-          onPress: () => {
-            triggerPressAnimation(signOutBtnScale, async () => {
-              try {
-                setIsLoggingOut(true);
-                await signOut(auth);
-                onSignOut();
-              } catch (error: any) {
-                console.error('[SIGNOUT ERROR]', error);
-                Alert.alert('LOGOUT FAILED', error.message || 'Could not sign out user.');
-              } finally {
-                setIsLoggingOut(false);
-              }
-            });
-          },
+          onPress: handleLogoutConfirmed,
         },
-      ]
+      ],
+    );
+  }, [handleLogoutConfirmed, isLoggingOut]);
+
+  const currentEmail = safeString(
+    localUserData?.email,
+    auth.currentUser?.email ?? 'N/A',
+  );
+
+  const currentUsername =
+    safeString(localUserData?.username) ||
+    safeString(auth.currentUser?.displayName) ||
+    agentName ||
+    'UNREGISTERED_AGENT';
+
+  const handle = useMemo(() => buildHandle(currentUsername), [currentUsername]);
+
+  const totalPoints =
+    typeof localUserData?.totalPoints === 'number' &&
+    Number.isFinite(localUserData.totalPoints)
+      ? localUserData.totalPoints
+      : 0;
+
+  const rank = calculateBadgeRank(totalPoints);
+  const memberSince = formatMemberSince(localUserData?.createdAt);
+
+  const accountStatus = currentFirebaseUser
+    ? 'ACTIVE'
+    : 'SIGNED OUT';
+
+  const onboardingStatus = localUserData?.hasCompletedOnboarding
+    ? 'ACTIVE'
+    : 'PENDING';
+
+  const isProfileLoading = isLoadingProfile || (isLoadingUserData && !localUserData);
+
+  const renderSetting = (
+    config: SettingConfig,
+    value: boolean,
+    setter: React.Dispatch<React.SetStateAction<boolean>>,
+  ) => {
+    const saving = isSavingSetting === config.key;
+
+    return (
+      <View
+        key={config.key}
+        style={styles.toggleCard}
+        accessible
+        accessibilityLabel={`${config.label}. ${value ? 'On' : 'Off'}. ${config.description}`}
+      >
+        <View style={styles.toggleLabelGroup}>
+          <Ionicons name={config.icon} size={12} color="#B08D57" />
+          <View style={styles.toggleTextGroup}>
+            <Text style={styles.toggleText}>{config.label}</Text>
+            <Text style={styles.toggleDescription}>{config.description}</Text>
+          </View>
+        </View>
+
+        {saving ? (
+          <ActivityIndicator size="small" color="#A64B2A" />
+        ) : (
+          <Switch
+            trackColor={{ false: '#161E17', true: '#A64B2A' }}
+            thumbColor={value ? '#F3ECD8' : '#7A6B58'}
+            ios_backgroundColor="#161E17"
+            onValueChange={(nextValue) =>
+              void handleToggleChange(config.key, nextValue, setter)
+            }
+            value={value}
+            accessible
+            accessibilityRole="switch"
+            accessibilityLabel={config.label}
+            accessibilityState={{ checked: value, disabled: !!isSavingSetting }}
+          />
+        )}
+      </View>
     );
   };
 
-  // Live Firestore Metadata Formatting
-  const formatMemberSince = (): string => {
-    if (!userData?.createdAt) return 'N/A';
-    try {
-      const date =
-        typeof userData.createdAt.toDate === 'function'
-          ? userData.createdAt.toDate()
-          : new Date(userData.createdAt as any);
-      if (isNaN(date.getTime())) return 'N/A';
-      const month = date.toLocaleString('default', { month: 'short' }).toUpperCase();
-      const year = date.getFullYear();
-      return `${month} ${year}`;
-    } catch {
-      return 'N/A';
-    }
-  };
-
-  const calculateBadgeRank = (points: number = 0): string => {
-    if (points >= 500) return 'COMMANDER I';
-    if (points >= 250) return 'PATHFINDER II';
-    if (points >= 100) return 'TRAILBLAZER III';
-    return 'RECON SCOUT';
-  };
-
-  const currentEmail = userData?.email || auth.currentUser?.email || 'N/A';
-  const currentUid = userData?.uid || auth.currentUser?.uid || 'N/A';
-
-  // Loading state guard preventing rendering of unauthenticated or fake profile views
-  if (isLoadingUserData && !userData) {
+  if (isProfileLoading && !localUserData) {
     return (
       <View style={[styles.safeAreaContainer, styles.centeredLoading]}>
         <ActivityIndicator size="large" color="#B08D57" />
         <Text style={styles.loadingText}>FETCHING AGENT PROFILE...</Text>
+      </View>
+    );
+  }
+
+  if (!localUserData && !currentFirebaseUser) {
+    return (
+      <View style={[styles.safeAreaContainer, styles.centeredLoading]}>
+        <Ionicons name="person-circle-outline" size={52} color="#B08D57" />
+        <Text style={styles.loadingText}>NO ACTIVE AGENT SESSION</Text>
+
+        {onBack && (
+          <TouchableOpacity
+            style={styles.backButtonStandalone}
+            onPress={onBack}
+            accessibilityRole="button"
+            accessibilityLabel="Back to Dashboard"
+          >
+            <Ionicons name="chevron-back-sharp" size={11} color="#B08D57" />
+            <Text style={styles.backText}>DASHBOARD</Text>
+          </TouchableOpacity>
+        )}
       </View>
     );
   }
@@ -267,7 +618,6 @@ export const ProfileSettingsScreen: React.FC<ProfileSettingsScreenProps> = ({
       ]}
     >
       <View style={[styles.splitWrapper, !isLandscape && styles.portraitWrapper]}>
-        {/* LEFT VIEWPORT: FIELD IDENTITY LOG CARD */}
         <View style={styles.leftViewport}>
           <View style={styles.cardInnerBorder}>
             <View style={styles.cardHeader}>
@@ -275,8 +625,12 @@ export const ProfileSettingsScreen: React.FC<ProfileSettingsScreenProps> = ({
                 <Ionicons name="document-text-outline" size={13} color="#2A2420" />
                 <Text style={styles.headerTitle}> FIELD IDENTITY LOG</Text>
               </View>
+
               <Text style={styles.headerTag}>
-                UID: {currentUid !== 'N/A' ? currentUid.substring(0, 6).toUpperCase() : 'N/A'}
+                UID:{' '}
+                {currentUid !== 'N/A'
+                  ? currentUid.substring(0, 8).toUpperCase()
+                  : 'N/A'}
               </Text>
             </View>
 
@@ -284,6 +638,7 @@ export const ProfileSettingsScreen: React.FC<ProfileSettingsScreenProps> = ({
               <View style={styles.avatarBox}>
                 <Ionicons name="person" size={32} color="#E8DCC0" />
               </View>
+
               <View style={styles.identityDetails}>
                 {isEditing ? (
                   <View style={styles.editInputGroup}>
@@ -293,246 +648,273 @@ export const ProfileSettingsScreen: React.FC<ProfileSettingsScreenProps> = ({
                       onChangeText={setAgentName}
                       placeholder="AGENT CALLSIGN"
                       placeholderTextColor="#8C7A6B"
-                      autoCapitalize="characters"
-                      accessible={true}
+                      autoCapitalize="words"
+                      autoCorrect={false}
+                      editable={!isSavingProfile}
+                      accessibilityRole="none"
                       accessibilityLabel="Agent Callsign Input"
+                      accessibilityHint="Enter the username that will be displayed across Treasi"
                     />
+                    <Text style={styles.editHint}>
+                      Use 2 or more characters. Spaces are allowed.
+                    </Text>
                   </View>
                 ) : (
                   <>
                     <Text style={styles.agentName} numberOfLines={1}>
-                      {agentName || 'UNREGISTERED_AGENT'}
+                      {currentUsername}
                     </Text>
                     <Text style={styles.handleText} numberOfLines={1}>
-                      {handle || '@unregistered'}
+                      {handle}
                     </Text>
                   </>
                 )}
+
                 <View style={styles.badgeContainer}>
-                  <Ionicons name="shield-checkmark" size={10} color="#F3ECD8" style={styles.badgeIcon} />
-                  <Text style={styles.badgeText}>
-                    {calculateBadgeRank(userData?.totalPoints ?? 0)}
-                  </Text>
+                  <Ionicons
+                    name="shield-checkmark"
+                    size={10}
+                    color="#F3ECD8"
+                    style={styles.badgeIcon}
+                  />
+                  <Text style={styles.badgeText}>{rank}</Text>
                 </View>
               </View>
             </View>
 
             <View style={styles.dashedDivider} />
 
+            {profileError ? (
+              <View
+                style={styles.profileErrorBox}
+                accessible
+                accessibilityRole="alert"
+                accessibilityLiveRegion="polite"
+              >
+                <Ionicons name="warning-outline" size={13} color="#A64B2A" />
+                <Text style={styles.profileErrorText}>{profileError}</Text>
+              </View>
+            ) : null}
+
             <View style={styles.metaGrid}>
               <View style={styles.metaRow}>
                 <Text style={styles.metaKey}>MEMBER SINCE</Text>
-                <Text style={styles.metaVal}>{formatMemberSince()}</Text>
+                <Text style={styles.metaVal}>{memberSince}</Text>
               </View>
+
+              <View style={styles.metaRow}>
+                <Text style={styles.metaKey}>ACCOUNT STATUS</Text>
+                <Text style={styles.metaVal}>{accountStatus}</Text>
+              </View>
+
               <View style={styles.metaRow}>
                 <Text style={styles.metaKey}>FIELD PERMIT</Text>
                 <View style={styles.permitStarRow}>
                   <Ionicons name="star" size={9} color="#2A2420" />
                   <Ionicons name="star" size={9} color="#2A2420" />
                   <Ionicons name="star" size={9} color="#2A2420" />
-                  <Text style={styles.metaVal}>
-                    {' '}
-                    {userData?.hasCompletedOnboarding ? 'ACTIVE' : 'PENDING'}
-                  </Text>
+                  <Text style={styles.metaVal}> {onboardingStatus}</Text>
                 </View>
               </View>
+
               <View style={styles.metaRow}>
                 <Text style={styles.metaKey}>EXP POINTS</Text>
-                <Text style={styles.metaVal}>{userData?.totalPoints ?? 0} PTS</Text>
+                <Text style={styles.metaVal}>{totalPoints.toLocaleString()} PTS</Text>
               </View>
+
+              <View style={styles.metaRow}>
+                <Text style={styles.metaKey}>RANK</Text>
+                <Text style={styles.metaVal}>{rank}</Text>
+              </View>
+
               <View style={styles.metaRow}>
                 <Text style={styles.metaKey}>EMAIL</Text>
-                <Text style={styles.metaVal} numberOfLines={1}>
+                <Text
+                  style={styles.metaVal}
+                  numberOfLines={1}
+                  ellipsizeMode="tail"
+                >
                   {currentEmail}
+                </Text>
+              </View>
+
+              <View style={styles.metaRow}>
+                <Text style={styles.metaKey}>FIREBASE UID</Text>
+                <Text
+                  style={styles.metaVal}
+                  numberOfLines={1}
+                  ellipsizeMode="middle"
+                >
+                  {currentUid}
                 </Text>
               </View>
             </View>
 
-            <Animated.View style={{ transform: [{ scale: editBtnScale }] }}>
-              <TouchableOpacity
-                style={styles.editProfileButton}
-                activeOpacity={0.8}
-                disabled={isSaving}
-                onPress={isEditing ? handleSaveProfile : handleStartEditing}
-                accessible={true}
-                accessibilityRole="button"
-                accessibilityLabel={isEditing ? 'Save identity record' : 'Edit identity details'}
-              >
-                {isSaving ? (
-                  <ActivityIndicator size="small" color="#2A2420" />
-                ) : (
-                  <>
-                    <Ionicons
-                      name={isEditing ? 'checkmark-sharp' : 'create-outline'}
-                      size={13}
-                      color="#2A2420"
-                      style={styles.btnIcon}
-                    />
-                    <Text style={styles.editProfileText}>
-                      {isEditing ? 'SAVE IDENTITY RECORD' : 'EDIT IDENTITY DETAILS'}
-                    </Text>
-                  </>
-                )}
-              </TouchableOpacity>
-            </Animated.View>
+            {isEditing ? (
+              <View style={styles.editActionsRow}>
+                <Animated.View
+                  style={{ flex: 1, transform: [{ scale: editBtnScale }] }}
+                >
+                  <TouchableOpacity
+                    style={styles.editProfileButton}
+                    activeOpacity={0.8}
+                    disabled={isSavingProfile}
+                    onPress={handleSaveProfile}
+                    accessibilityRole="button"
+                    accessibilityLabel="Save identity record"
+                  >
+                    {isSavingProfile ? (
+                      <ActivityIndicator size="small" color="#2A2420" />
+                    ) : (
+                      <>
+                        <Ionicons
+                          name="checkmark-sharp"
+                          size={13}
+                          color="#2A2420"
+                          style={styles.btnIcon}
+                        />
+                        <Text style={styles.editProfileText}>SAVE IDENTITY</Text>
+                      </>
+                    )}
+                  </TouchableOpacity>
+                </Animated.View>
+
+                <TouchableOpacity
+                  style={styles.cancelEditButton}
+                  activeOpacity={0.8}
+                  disabled={isSavingProfile}
+                  onPress={handleCancelEditing}
+                  accessibilityRole="button"
+                  accessibilityLabel="Cancel identity editing"
+                >
+                  <Ionicons name="close-outline" size={13} color="#2A2420" />
+                  <Text style={styles.editProfileText}>CANCEL</Text>
+                </TouchableOpacity>
+              </View>
+            ) : (
+              <Animated.View style={{ transform: [{ scale: editBtnScale }] }}>
+                <TouchableOpacity
+                  style={styles.editProfileButton}
+                  activeOpacity={0.8}
+                  disabled={isSavingProfile}
+                  onPress={handleStartEditing}
+                  accessibilityRole="button"
+                  accessibilityLabel="Edit identity details"
+                  accessibilityHint="Opens the callsign editing form"
+                >
+                  <Ionicons
+                    name="create-outline"
+                    size={13}
+                    color="#2A2420"
+                    style={styles.btnIcon}
+                  />
+                  <Text style={styles.editProfileText}>EDIT IDENTITY DETAILS</Text>
+                </TouchableOpacity>
+              </Animated.View>
+            )}
           </View>
         </View>
 
-        {/* RIGHT VIEWPORT: SYSTEM CALIBRATION CONSOLE */}
         <View style={styles.rightViewport}>
           <ScrollView
             showsVerticalScrollIndicator={false}
             contentContainerStyle={styles.scrollContent}
           >
             <View style={styles.panelHeaderRow}>
-              <Ionicons name="hardware-chip-outline" size={11} color="#A64B2A" />
+              <Ionicons
+                name="hardware-chip-outline"
+                size={11}
+                color="#A64B2A"
+              />
               <Text style={styles.panelTitle}> CALIBRATION ARRAY</Text>
-              {isSaving && <ActivityIndicator size="small" color="#A64B2A" style={{ marginLeft: 6 }} />}
+              {(isSavingProfile || !!isSavingSetting) && (
+                <ActivityIndicator
+                  size="small"
+                  color="#A64B2A"
+                  style={{ marginLeft: 6 }}
+                />
+              )}
             </View>
+
             <View style={styles.panelDivider} />
 
-            {/* TOGGLE 1: HAPTIC TRIGGERS */}
-            <View style={styles.toggleCard}>
-              <View style={styles.toggleLabelGroup}>
-                <Ionicons name="radio-outline" size={12} color="#B08D57" />
-                <Text style={styles.toggleText}>HAPTIC TRIGGERS</Text>
-              </View>
-              <Switch
-                trackColor={{ false: '#161E17', true: '#A64B2A' }}
-                thumbColor={hapticTriggers ? '#F3ECD8' : '#7A6B58'}
-                ios_backgroundColor="#161E17"
-                onValueChange={(val) =>
-                  handleToggleChange('hapticFeedbackEnabled', val, setHapticTriggers)
-                }
-                value={hapticTriggers}
-                accessible={true}
-                accessibilityRole="switch"
-                accessibilityLabel="Haptic Triggers Toggle"
-                accessibilityState={{ checked: hapticTriggers }}
+            {renderSetting(
+              SETTINGS[0],
+              hapticTriggers,
+              setHapticTriggers,
+            )}
+
+            {renderSetting(
+              SETTINGS[1],
+              sensorSensitivity,
+              setSensorSensitivity,
+            )}
+
+            {renderSetting(
+              SETTINGS[2],
+              batteryOptimize,
+              setBatteryOptimize,
+            )}
+
+            {renderSetting(
+              SETTINGS[3],
+              nightFieldMode,
+              setNightFieldMode,
+            )}
+
+            {renderSetting(
+              SETTINGS[4],
+              telemetryEnabled,
+              setTelemetryEnabled,
+            )}
+
+            {renderSetting(
+              SETTINGS[5],
+              skipOnboardingAuthFlow,
+              setSkipOnboardingAuthFlow,
+            )}
+
+            <View style={styles.behaviourNote}>
+              <Ionicons
+                name="information-circle-outline"
+                size={12}
+                color="#B08D57"
               />
+              <Text style={styles.behaviourNoteText}>
+                Preferences are saved to your Firestore profile and remain available
+                to supported application features. A setting can only change another
+                screen's runtime behaviour when that feature reads the same saved value.
+              </Text>
             </View>
 
-            {/* TOGGLE 2: SENSOR SENSITIVITY */}
-            <View style={styles.toggleCard}>
-              <View style={styles.toggleLabelGroup}>
-                <Ionicons name="flash-outline" size={12} color="#B08D57" />
-                <Text style={styles.toggleText}>SENSOR SENSITIVITY</Text>
-              </View>
-              <Switch
-                trackColor={{ false: '#161E17', true: '#A64B2A' }}
-                thumbColor={sensorSensitivity ? '#F3ECD8' : '#7A6B58'}
-                ios_backgroundColor="#161E17"
-                onValueChange={(val) =>
-                  handleToggleChange('motionSensitivityEnabled', val, setSensorSensitivity)
-                }
-                value={sensorSensitivity}
-                accessible={true}
-                accessibilityRole="switch"
-                accessibilityLabel="Sensor Sensitivity Toggle"
-                accessibilityState={{ checked: sensorSensitivity }}
-              />
-            </View>
-
-            {/* TOGGLE 3: BATTERY OPTIMIZE */}
-            <View style={styles.toggleCard}>
-              <View style={styles.toggleLabelGroup}>
-                <Ionicons name="battery-charging-outline" size={12} color="#B08D57" />
-                <Text style={styles.toggleText}>BATTERY OPTIMIZE</Text>
-              </View>
-              <Switch
-                trackColor={{ false: '#161E17', true: '#A64B2A' }}
-                thumbColor={batteryOptimize ? '#F3ECD8' : '#7A6B58'}
-                ios_backgroundColor="#161E17"
-                onValueChange={(val) =>
-                  handleToggleChange('batteryOptimizerEnabled', val, setBatteryOptimize)
-                }
-                value={batteryOptimize}
-                accessible={true}
-                accessibilityRole="switch"
-                accessibilityLabel="Battery Optimize Toggle"
-                accessibilityState={{ checked: batteryOptimize }}
-              />
-            </View>
-
-            {/* TOGGLE 4: NIGHT FIELD MODE */}
-            <View style={styles.toggleCard}>
-              <View style={styles.toggleLabelGroup}>
-                <Ionicons name="moon-outline" size={12} color="#B08D57" />
-                <Text style={styles.toggleText}>NIGHT FIELD MODE</Text>
-              </View>
-              <Switch
-                trackColor={{ false: '#161E17', true: '#A64B2A' }}
-                thumbColor={nightFieldMode ? '#F3ECD8' : '#7A6B58'}
-                ios_backgroundColor="#161E17"
-                onValueChange={(val) =>
-                  handleToggleChange('nightModeEnabled', val, setNightFieldMode)
-                }
-                value={nightFieldMode}
-                accessible={true}
-                accessibilityRole="switch"
-                accessibilityLabel="Night Field Mode Toggle"
-                accessibilityState={{ checked: nightFieldMode }}
-              />
-            </View>
-
-            {/* TOGGLE 5: TELEMETRY LOGS */}
-            <View style={styles.toggleCard}>
-              <View style={styles.toggleLabelGroup}>
-                <Ionicons name="stats-chart-outline" size={12} color="#B08D57" />
-                <Text style={styles.toggleText}>TELEMETRY LOGS</Text>
-              </View>
-              <Switch
-                trackColor={{ false: '#161E17', true: '#A64B2A' }}
-                thumbColor={telemetryEnabled ? '#F3ECD8' : '#7A6B58'}
-                ios_backgroundColor="#161E17"
-                onValueChange={(val) =>
-                  handleToggleChange('telemetryEnabled', val, setTelemetryEnabled)
-                }
-                value={telemetryEnabled}
-                accessible={true}
-                accessibilityRole="switch"
-                accessibilityLabel="Telemetry Logging Toggle"
-                accessibilityState={{ checked: telemetryEnabled }}
-              />
-            </View>
-
-            {/* TOGGLE 6: BYPASS ONBOARDING FLOW */}
-            <View style={styles.toggleCard}>
-              <View style={styles.toggleLabelGroup}>
-                <Ionicons name="caret-forward-outline" size={12} color="#B08D57" />
-                <Text style={styles.toggleText}>BYPASS ONBOARDING</Text>
-              </View>
-              <Switch
-                trackColor={{ false: '#161E17', true: '#A64B2A' }}
-                thumbColor={skipOnboardingAuthFlow ? '#F3ECD8' : '#7A6B58'}
-                ios_backgroundColor="#161E17"
-                onValueChange={(val) =>
-                  handleToggleChange('skipOnboardingAuthFlow', val, setSkipOnboardingAuthFlow)
-                }
-                value={skipOnboardingAuthFlow}
-                accessible={true}
-                accessibilityRole="switch"
-                accessibilityLabel="Bypass Onboarding Flow Toggle"
-                accessibilityState={{ checked: skipOnboardingAuthFlow }}
-              />
-            </View>
-
-            {/* LOGOUT SESSION BUTTON */}
-            <Animated.View style={{ transform: [{ scale: signOutBtnScale }] }}>
+            <Animated.View
+              style={{
+                transform: [{ scale: signOutBtnScale }],
+              }}
+            >
               <TouchableOpacity
                 style={styles.signOutButton}
                 activeOpacity={0.8}
                 disabled={isLoggingOut}
                 onPress={handleSignOutPress}
-                accessible={true}
                 accessibilityRole="button"
-                accessibilityLabel="Logout Session"
+                accessibilityLabel={
+                  isLoggingOut ? 'Logging out' : 'Logout Session'
+                }
+                accessibilityState={{ disabled: isLoggingOut }}
               >
                 {isLoggingOut ? (
-                  <ActivityIndicator size="small" color="#F3ECD8" />
+                  <>
+                    <ActivityIndicator size="small" color="#F3ECD8" />
+                    <Text style={styles.signOutText}>ENDING SESSION...</Text>
+                  </>
                 ) : (
                   <>
-                    <Ionicons name="log-out-outline" size={13} color="#F3ECD8" />
+                    <Ionicons
+                      name="log-out-outline"
+                      size={13}
+                      color="#F3ECD8"
+                    />
                     <Text style={styles.signOutText}>LOGOUT SESSION</Text>
                   </>
                 )}
@@ -543,17 +925,19 @@ export const ProfileSettingsScreen: React.FC<ProfileSettingsScreenProps> = ({
               <TouchableOpacity
                 style={styles.backButton}
                 onPress={onBack}
-                accessible={true}
                 accessibilityRole="button"
                 accessibilityLabel="Back to Dashboard"
               >
-                <Ionicons name="chevron-back-sharp" size={11} color="#B08D57" />
+                <Ionicons
+                  name="chevron-back-sharp"
+                  size={11}
+                  color="#B08D57"
+                />
                 <Text style={styles.backText}> DASHBOARD</Text>
               </TouchableOpacity>
             )}
           </ScrollView>
 
-          {/* Integrated Field Navigation Bar */}
           <View style={styles.navBarContainer}>
             <FieldNavBar
               currentTab="PROFILE"
@@ -576,6 +960,7 @@ const styles = StyleSheet.create({
   centeredLoading: {
     justifyContent: 'center',
     alignItems: 'center',
+    paddingHorizontal: 24,
   },
   loadingText: {
     fontFamily: fontMonospace,
@@ -583,6 +968,7 @@ const styles = StyleSheet.create({
     fontSize: 11,
     marginTop: 10,
     letterSpacing: 1,
+    textAlign: 'center',
   },
   splitWrapper: {
     flex: 1,
@@ -599,6 +985,7 @@ const styles = StyleSheet.create({
     flex: 0.58,
     backgroundColor: '#E8DCC0',
     padding: 8,
+    minHeight: 0,
   },
   cardInnerBorder: {
     flex: 1,
@@ -606,15 +993,18 @@ const styles = StyleSheet.create({
     borderColor: '#2A2420',
     padding: 8,
     justifyContent: 'space-between',
+    minHeight: 0,
   },
   cardHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
+    gap: 8,
   },
   headerTitleGroup: {
     flexDirection: 'row',
     alignItems: 'center',
+    flex: 1,
   },
   headerTitle: {
     fontFamily: fontMonospace,
@@ -647,6 +1037,7 @@ const styles = StyleSheet.create({
   },
   identityDetails: {
     flex: 1,
+    minWidth: 0,
   },
   agentName: {
     fontFamily: fontMonospace,
@@ -664,6 +1055,12 @@ const styles = StyleSheet.create({
   editInputGroup: {
     marginBottom: 2,
   },
+  editHint: {
+    color: '#6E6152',
+    fontFamily: fontMonospace,
+    fontSize: 7,
+    marginTop: 2,
+  },
   textInput: {
     fontFamily: fontMonospace,
     backgroundColor: '#F3ECD8',
@@ -671,10 +1068,11 @@ const styles = StyleSheet.create({
     borderColor: '#2A2420',
     borderRadius: 3,
     paddingHorizontal: 5,
-    paddingVertical: 2,
+    paddingVertical: 4,
     fontSize: 10,
     color: '#2A2420',
     marginBottom: 2,
+    minHeight: 34,
   },
   badgeContainer: {
     flexDirection: 'row',
@@ -702,6 +1100,24 @@ const styles = StyleSheet.create({
     marginVertical: 4,
     opacity: 0.4,
   },
+  profileErrorBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    borderWidth: 1,
+    borderColor: '#A64B2A',
+    backgroundColor: '#F3ECD8',
+    padding: 6,
+    borderRadius: 4,
+    marginBottom: 5,
+  },
+  profileErrorText: {
+    flex: 1,
+    color: '#A64B2A',
+    fontFamily: fontMonospace,
+    fontSize: 7.5,
+    fontWeight: 'bold',
+  },
   metaGrid: {
     marginVertical: 2,
   },
@@ -709,7 +1125,8 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 2.5,
+    gap: 8,
+    marginBottom: 4,
   },
   metaKey: {
     fontFamily: fontMonospace,
@@ -717,17 +1134,24 @@ const styles = StyleSheet.create({
     fontSize: 8.5,
     fontWeight: '600',
     letterSpacing: 0.5,
+    flexShrink: 0,
   },
   metaVal: {
     fontFamily: fontMonospace,
     color: '#2A2420',
     fontSize: 8.5,
     fontWeight: 'bold',
-    maxWidth: '55%',
+    maxWidth: '58%',
+    textAlign: 'right',
   },
   permitStarRow: {
     flexDirection: 'row',
     alignItems: 'center',
+  },
+  editActionsRow: {
+    flexDirection: 'row',
+    gap: 5,
+    marginTop: 3,
   },
   editProfileButton: {
     flexDirection: 'row',
@@ -738,8 +1162,19 @@ const styles = StyleSheet.create({
     backgroundColor: '#F3ECD8',
     paddingVertical: 5,
     borderRadius: 3,
-    marginTop: 2,
-    minHeight: 28,
+    minHeight: 30,
+  },
+  cancelEditButton: {
+    flex: 0.42,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#8A7B66',
+    backgroundColor: '#D9C8A9',
+    paddingVertical: 5,
+    borderRadius: 3,
+    minHeight: 30,
   },
   btnIcon: {
     marginRight: 4,
@@ -758,9 +1193,10 @@ const styles = StyleSheet.create({
     borderColor: '#B08D57',
     padding: 6,
     justifyContent: 'space-between',
+    minHeight: 0,
   },
   scrollContent: {
-    paddingBottom: 4,
+    paddingBottom: 5,
   },
   panelHeaderRow: {
     flexDirection: 'row',
@@ -788,13 +1224,20 @@ const styles = StyleSheet.create({
     borderColor: '#B08D57',
     borderRadius: 4,
     paddingHorizontal: 5,
-    paddingVertical: 2,
+    paddingVertical: 3,
     marginBottom: 4,
-    minHeight: 28,
+    minHeight: 44,
   },
   toggleLabelGroup: {
     flexDirection: 'row',
     alignItems: 'center',
+    flex: 1,
+    minWidth: 0,
+  },
+  toggleTextGroup: {
+    flex: 1,
+    marginLeft: 4,
+    paddingRight: 6,
   },
   toggleText: {
     fontFamily: fontMonospace,
@@ -802,7 +1245,32 @@ const styles = StyleSheet.create({
     fontSize: 7.5,
     fontWeight: 'bold',
     letterSpacing: 0.5,
-    marginLeft: 4,
+  },
+  toggleDescription: {
+    fontFamily: fontMonospace,
+    color: '#B08D57',
+    fontSize: 6.5,
+    marginTop: 1,
+    lineHeight: 9,
+  },
+  behaviourNote: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 5,
+    backgroundColor: '#1E281F',
+    borderWidth: 1,
+    borderColor: '#3A4B3C',
+    padding: 6,
+    borderRadius: 4,
+    marginTop: 2,
+    marginBottom: 4,
+  },
+  behaviourNoteText: {
+    flex: 1,
+    fontFamily: fontMonospace,
+    color: '#B08D57',
+    fontSize: 6.5,
+    lineHeight: 9,
   },
   signOutButton: {
     flexDirection: 'row',
@@ -811,10 +1279,11 @@ const styles = StyleSheet.create({
     backgroundColor: '#A64B2A',
     borderWidth: 1,
     borderColor: '#B08D57',
-    paddingVertical: 5,
+    paddingVertical: 6,
     borderRadius: 4,
     marginTop: 3,
-    minHeight: 30,
+    minHeight: 36,
+    gap: 4,
   },
   signOutText: {
     fontFamily: fontMonospace,
@@ -822,24 +1291,35 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     fontSize: 8.5,
     letterSpacing: 0.8,
-    marginLeft: 4,
   },
   backButton: {
     flexDirection: 'row',
     borderWidth: 1,
     borderColor: '#B08D57',
-    paddingVertical: 4,
+    paddingVertical: 5,
     borderRadius: 4,
     alignItems: 'center',
     justifyContent: 'center',
     marginTop: 3,
-    minHeight: 24,
+    minHeight: 30,
   },
   backText: {
     fontFamily: fontMonospace,
     color: '#B08D57',
     fontSize: 8,
     fontWeight: 'bold',
+  },
+  backButtonStandalone: {
+    flexDirection: 'row',
+    borderWidth: 1,
+    borderColor: '#B08D57',
+    paddingVertical: 7,
+    paddingHorizontal: 18,
+    borderRadius: 4,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 16,
+    minHeight: 42,
   },
   navBarContainer: {
     marginTop: 3,
