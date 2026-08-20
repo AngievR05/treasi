@@ -28,7 +28,7 @@ import {
   getDoc,
 } from 'firebase/firestore';
 
-import { auth, db } from './src/config/firebase';
+import { auth, db } from '../app/src/config/firebase';
 
 /* -------------------------------------------------------------------------- */
 /* Screens                                                                    */

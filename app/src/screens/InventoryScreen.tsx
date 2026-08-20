@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AccessibilityInfo,
   ActivityIndicator,
   Alert,
   ScrollView,
@@ -9,6 +10,8 @@ import {
   TouchableOpacity,
   useWindowDimensions,
   View,
+  type StyleProp,
+  type ViewStyle,
 } from 'react-native';
 import Animated, {
   FadeIn,
@@ -50,7 +53,7 @@ import {
   writeBatch,
 } from 'firebase/firestore';
 import { auth, db } from '../config/firebase';
-import { ActivityFeedDocument, TreasureDocument } from '../types/firestore';
+import { TreasureDocument } from '../types/firestore';
 import { FieldNavBar, NavigationTab } from '../components/FieldNavBar';
 
 export type IconType = 'map-pin' | 'target' | 'compass' | 'trophy' | 'book';
@@ -96,6 +99,25 @@ const INVENTORY_RADIUS_KM = 20;
 const MIN_TITLE_LENGTH = 3;
 const LOCATION_UPDATE_INTERVAL_MS = 10_000;
 const LOCATION_UPDATE_DISTANCE_M = 10;
+const MIN_TOUCH_TARGET = 48;
+const FIRESTORE_SAFE_BATCH_SIZE = 450;
+
+const COLORS = {
+  forest: '#2C3B2E',
+  forestDark: '#1C2A20',
+  parchment: '#E8DCC0',
+  parchmentLight: '#F3ECD8',
+  sienna: '#8B3E24',
+  brass: '#B08D57',
+  brassLight: '#E2C792',
+  ink: '#2A2420',
+  inkMuted: '#5F5748',
+  white: '#FFFFFF',
+};
+
+const announce = (message: string): void => {
+  AccessibilityInfo.announceForAccessibility(message);
+};
 
 const isValidCoordinate = (latitude: number, longitude: number): boolean =>
   Number.isFinite(latitude) &&
@@ -149,39 +171,47 @@ const getFriendlyFirestoreError = (error: unknown, fallback: string): string => 
   return fallback;
 };
 
-const ItemIcon: React.FC<{ type: IconType; size?: number; color?: string }> = ({
+const ItemIcon: React.FC<{ type: IconType; size?: number; stroke?: string }> = ({
   type,
   size = 22,
-  color = '#A64B2A',
+  stroke = COLORS.sienna,
 }) => {
+  const commonProps = { size, stroke, strokeWidth: 2.1 };
+
   switch (type) {
     case 'map-pin':
-      return <MapPin size={size} color={color} />;
+      return <MapPin {...commonProps} />;
     case 'target':
-      return <Target size={size} color={color} />;
+      return <Target {...commonProps} />;
     case 'compass':
-      return <Compass size={size} color={color} />;
+      return <Compass {...commonProps} />;
     case 'trophy':
-      return <Trophy size={size} color={color} />;
+      return <Trophy {...commonProps} />;
     case 'book':
-      return <BookOpen size={size} color={color} />;
+      return <BookOpen {...commonProps} />;
     default:
-      return <Package size={size} color={color} />;
+      return <Package {...commonProps} />;
   }
 };
 
-const AnimatedTouchableOpacity: React.FC<{
+interface AnimatedTouchableOpacityProps {
   onPress: () => void;
-  style?: any;
+  style?: StyleProp<ViewStyle>;
   children: React.ReactNode;
   disabled?: boolean;
+  selected?: boolean;
+  reduceMotion?: boolean;
   accessibilityLabel: string;
   accessibilityHint?: string;
-}> = ({
+}
+
+const AnimatedTouchableOpacity: React.FC<AnimatedTouchableOpacityProps> = ({
   onPress,
   style,
   children,
   disabled = false,
+  selected = false,
+  reduceMotion = false,
   accessibilityLabel,
   accessibilityHint,
 }) => {
@@ -190,18 +220,27 @@ const AnimatedTouchableOpacity: React.FC<{
     transform: [{ scale: scale.value }],
   }));
 
+  const handlePressIn = () => {
+    scale.value = reduceMotion ? 1 : withSpring(0.97, { damping: 16, stiffness: 220 });
+  };
+
+  const handlePressOut = () => {
+    scale.value = reduceMotion ? 1 : withSpring(1, { damping: 16, stiffness: 220 });
+  };
+
   return (
     <TouchableOpacity
-      activeOpacity={0.8}
+      activeOpacity={0.82}
       disabled={disabled}
       onPress={onPress}
-      onPressIn={() => (scale.value = withSpring(0.96, { damping: 15 }))}
-      onPressOut={() => (scale.value = withSpring(1, { damping: 15 }))}
+      onPressIn={handlePressIn}
+      onPressOut={handlePressOut}
+      hitSlop={4}
       accessible
       accessibilityRole="button"
       accessibilityLabel={accessibilityLabel}
       accessibilityHint={accessibilityHint}
-      accessibilityState={{ disabled }}
+      accessibilityState={{ disabled, selected }}
     >
       <Animated.View style={[style, animatedStyle]}>{children}</Animated.View>
     </TouchableOpacity>
@@ -215,6 +254,25 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({
   const { width, height } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const isLandscape = width > height;
+  const [reduceMotionEnabled, setReduceMotionEnabled] = useState(false);
+
+  useEffect(() => {
+    let mounted = true;
+
+    AccessibilityInfo.isReduceMotionEnabled().then((enabled) => {
+      if (mounted) setReduceMotionEnabled(enabled);
+    });
+
+    const subscription = AccessibilityInfo.addEventListener(
+      'reduceMotionChanged',
+      setReduceMotionEnabled
+    );
+
+    return () => {
+      mounted = false;
+      subscription.remove();
+    };
+  }, []);
 
   const initialCoordinates: Coordinates | null =
     isValidCoordinate(
@@ -336,6 +394,11 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({
 
             setUserCoords(nextCoordinates);
             setLocationError(null);
+
+            if (!coordinateInputsTouchedRef.current) {
+              setNewLat(nextCoordinates.latitude.toFixed(6));
+              setNewLng(nextCoordinates.longitude.toFixed(6));
+            }
           }
         );
       } catch {
@@ -507,6 +570,10 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({
     }
 
     setFieldErrors(errors);
+
+    const firstError = Object.values(errors)[0];
+    if (firstError) announce(firstError);
+
     return Object.keys(errors).length === 0;
   };
 
@@ -539,7 +606,10 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({
     if (latitude === null || longitude === null) return;
 
     const userId = auth.currentUser.uid;
-    const creatorName = auth.currentUser.displayName?.trim() || 'EXPLORER';
+    const creatorName =
+      auth.currentUser.displayName?.trim() ||
+      auth.currentUser.email?.split('@')[0]?.trim() ||
+      'EXPLORER';
     const title = newTitle.trim().toUpperCase();
     const hint = newHint.trim() || 'No explicit clue recorded.';
     const payloadText = newPayload.trim() || 'Field secret stored.';
@@ -550,7 +620,7 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({
       const treasureRef = doc(collection(db, 'treasures'));
       const activityRef = doc(collection(db, 'activity_feed'));
 
-      const treasureData: Omit<TreasureDocument, 'treasureId'> = {
+      const treasureData = {
         creatorId: userId,
         creatorName,
         title,
@@ -558,16 +628,16 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({
         payloadText,
         location: new GeoPoint(latitude, longitude),
         isArchived: false,
-        createdAt: serverTimestamp() as any,
+        createdAt: serverTimestamp(),
       };
 
-      const activityData: Omit<ActivityFeedDocument, 'activityId'> = {
+      const activityData = {
         userId,
         username: creatorName,
         type: 'TREASURE_HIDDEN',
         message: `Planted new cache [${title}] in sector.`,
         targetId: treasureRef.id,
-        createdAt: serverTimestamp() as any,
+        createdAt: serverTimestamp(),
       };
 
       const batch = writeBatch(db);
@@ -702,10 +772,20 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({
                 query(collection(db, 'discoveries'), where('treasureId', '==', treasureId))
               );
 
-              const batch = writeBatch(db);
-              batch.delete(doc(db, 'treasures', treasureId));
-              discoverySnapshot.forEach((discovery) => batch.delete(discovery.ref));
-              await batch.commit();
+              // Firestore batches are capped at 500 writes. Delete discovery records in
+              // conservative chunks first, then remove the treasure document last. If a
+              // chunk fails, the treasure remains available and the operation can be retried.
+              for (let start = 0; start < discoverySnapshot.docs.length; start += FIRESTORE_SAFE_BATCH_SIZE) {
+                const discoveryBatch = writeBatch(db);
+                discoverySnapshot.docs
+                  .slice(start, start + FIRESTORE_SAFE_BATCH_SIZE)
+                  .forEach((discovery) => discoveryBatch.delete(discovery.ref));
+                await discoveryBatch.commit();
+              }
+
+              const treasureBatch = writeBatch(db);
+              treasureBatch.delete(doc(db, 'treasures', treasureId));
+              await treasureBatch.commit();
 
               // Activity feed entries are intentionally retained as historical field signals.
               setSelectedId(null);
@@ -737,8 +817,13 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({
   const safePaddingRight = Math.max(insets.right, 12);
 
   const renderErrorState = () => (
-    <View style={styles.stateContainer}>
-      <ShieldAlert size={28} color="#A64B2A" />
+    <View
+      style={styles.stateContainer}
+      accessible
+      accessibilityRole="alert"
+      accessibilityLiveRegion="polite"
+    >
+      <ShieldAlert size={28} stroke={COLORS.sienna} strokeWidth={2.2} />
       <Text style={styles.stateTitle}>FIELD CACHE SYNC FAILED</Text>
       <Text style={styles.stateText}>{firestoreError}</Text>
       <Text style={styles.stateHint}>
@@ -748,8 +833,13 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({
   );
 
   const renderLocationUnavailable = () => (
-    <View style={styles.stateContainer}>
-      <Navigation size={28} color="#A64B2A" />
+    <View
+      style={styles.stateContainer}
+      accessible
+      accessibilityRole="alert"
+      accessibilityLiveRegion="polite"
+    >
+      <Navigation size={28} stroke={COLORS.sienna} strokeWidth={2.2} />
       <Text style={styles.stateTitle}>LOCATION UNAVAILABLE</Text>
       <Text style={styles.stateText}>
         {locationError || 'Your current coordinates are unavailable, so the 20 km cache filter cannot be calculated.'}
@@ -766,12 +856,21 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({
         style={[
           styles.splitWrapper,
           {
-            paddingLeft: isLandscape ? safePaddingLeft : 0,
-            paddingRight: isLandscape ? safePaddingRight : 0,
+            flexDirection: isLandscape ? 'row' : 'column',
+            paddingLeft: isLandscape ? safePaddingLeft : Math.max(insets.left, 8),
+            paddingRight: isLandscape ? safePaddingRight : Math.max(insets.right, 8),
+            paddingTop: Math.max(insets.top, 8),
+            paddingBottom: Math.max(insets.bottom, 8),
           },
         ]}
       >
-        <View style={styles.leftViewport}>
+        <View
+          style={[
+            styles.leftViewport,
+            { flex: isLandscape ? 0.6 : 1 },
+            !isLandscape && styles.leftViewportPortrait,
+          ]}
+        >
           <View style={styles.tabHeaderRow}>
             <TouchableOpacity
               style={[styles.tabButton, styles.tabActive]}
@@ -792,7 +891,7 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({
 
           <View style={styles.leftSubHeader}>
             <View style={styles.sectionHeaderRow}>
-              <FileSearch size={14} color="#2A2420" />
+              <FileSearch size={18} stroke={COLORS.ink} strokeWidth={2.1} />
               <Text style={styles.sectionTitle}>
                 {isBurying ? 'FABRICATE & BURY NEW CACHE' : 'RADIAL CACHE MESH (20KM)'}
               </Text>
@@ -811,12 +910,12 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({
               <View style={styles.btnInnerRow}>
                 {isBurying ? (
                   <>
-                    <ChevronLeft size={12} color="#E8DCC0" />
+                    <ChevronLeft size={16} stroke={COLORS.parchmentLight} strokeWidth={2.1} />
                     <Text style={styles.buryToggleText}>CANCEL</Text>
                   </>
                 ) : (
                   <>
-                    <Plus size={12} color="#E8DCC0" />
+                    <Plus size={16} stroke={COLORS.parchmentLight} strokeWidth={2.1} />
                     <Text style={styles.buryToggleText}>BURY NEW CACHE</Text>
                   </>
                 )}
@@ -826,9 +925,9 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({
 
           {isBurying ? (
             <Animated.View
-              entering={FadeIn.duration(200)}
-              exiting={FadeOut.duration(150)}
-              style={{ flex: 1 }}
+              entering={reduceMotionEnabled ? undefined : FadeIn.duration(200)}
+              exiting={reduceMotionEnabled ? undefined : FadeOut.duration(150)}
+              style={styles.flexOne}
             >
               <ScrollView
                 style={styles.formContainer}
@@ -848,10 +947,11 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({
                     }
                   }}
                   maxLength={80}
+                  returnKeyType="next"
                   accessibilityLabel="Cache title"
                   accessibilityHint="Enter a title of at least three characters."
                 />
-                {fieldErrors.title ? <Text style={styles.errorText}>{fieldErrors.title}</Text> : null}
+                {fieldErrors.title ? <Text style={styles.errorText} accessibilityLiveRegion="assertive">{fieldErrors.title}</Text> : null}
 
                 <Text style={styles.label}>CLUE / RIDDLE HINT</Text>
                 <TextInput
@@ -889,7 +989,7 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({
                 </View>
 
                 <View style={styles.coordsRow}>
-                  <View style={{ flex: 1 }}>
+                  <View style={styles.flexOne}>
                     <Text style={styles.label}>LATITUDE (-90 TO 90)</Text>
                     <TextInput
                       style={[styles.input, fieldErrors.latitude ? styles.inputError : null]}
@@ -903,12 +1003,13 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({
                       }}
                       keyboardType="numbers-and-punctuation"
                       accessibilityLabel="Cache latitude"
+                    accessibilityHint="Enter a latitude from minus 90 to 90 degrees."
                     />
                     {fieldErrors.latitude ? (
-                      <Text style={styles.errorText}>{fieldErrors.latitude}</Text>
+                      <Text style={styles.errorText} accessibilityLiveRegion="assertive">{fieldErrors.latitude}</Text>
                     ) : null}
                   </View>
-                  <View style={{ flex: 1 }}>
+                  <View style={styles.flexOne}>
                     <Text style={styles.label}>LONGITUDE (-180 TO 180)</Text>
                     <TextInput
                       style={[styles.input, fieldErrors.longitude ? styles.inputError : null]}
@@ -922,9 +1023,10 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({
                       }}
                       keyboardType="numbers-and-punctuation"
                       accessibilityLabel="Cache longitude"
+                    accessibilityHint="Enter a longitude from minus 180 to 180 degrees."
                     />
                     {fieldErrors.longitude ? (
-                      <Text style={styles.errorText}>{fieldErrors.longitude}</Text>
+                      <Text style={styles.errorText} accessibilityLiveRegion="assertive">{fieldErrors.longitude}</Text>
                     ) : null}
                   </View>
                 </View>
@@ -941,6 +1043,7 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({
                   disabled={isSubmitting}
                   accessibilityLabel="Seal and bury cache"
                   accessibilityHint="Creates the cache and its activity record in Firestore."
+                  reduceMotion={reduceMotionEnabled}
                 >
                   {isSubmitting ? (
                     <ActivityIndicator size="small" color="#F3ECD8" />
@@ -964,7 +1067,10 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({
               contentContainerStyle={styles.gridContainer}
               showsVerticalScrollIndicator={false}
             >
-              <Animated.View layout={Layout.springify()} style={styles.grid}>
+              <Animated.View
+                layout={reduceMotionEnabled ? undefined : Layout.springify()}
+                style={styles.grid}
+              >
                 {nearbyCaches.map((item) => {
                   const isSelected = selectedItem?.id === item.id;
                   const isOwner = item.creatorId === currentUserId;
@@ -985,15 +1091,17 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({
                         isOwner ? 'Planted by you.' : `Created by ${getSafeCreatorName(item.creatorName)}.`
                       }`}
                       accessibilityHint="Selects this cache to view its details."
+                      selected={isSelected}
+                      reduceMotion={reduceMotionEnabled}
                     >
                       <View style={styles.cardHeaderRow}>
                         <ItemIcon
                           type={item.iconType}
                           size={18}
-                          color={isSelected ? '#A64B2A' : '#2A2420'}
+                          stroke={isSelected ? COLORS.sienna : COLORS.ink}
                         />
                         <View style={styles.distBadge}>
-                          <Navigation size={8} color="#2A2420" />
+                          <Navigation size={12} stroke={COLORS.ink} strokeWidth={2.1} />
                           <Text style={styles.distBadgeText}>{item.distanceKm} km</Text>
                         </View>
                       </View>
@@ -1009,7 +1117,7 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({
 
                 {nearbyCaches.length === 0 && (
                   <View style={styles.emptyState}>
-                    <Radio size={28} color="#8A7E6B" />
+                    <Radio size={30} stroke={COLORS.inkMuted} strokeWidth={2.1} />
                     <Text style={styles.emptyTitle}>NO ACTIVE CACHES DETECTED</Text>
                     <Text style={styles.emptyText}>
                       There are no active field caches within {INVENTORY_RADIUS_KM} km of your current coordinates.
@@ -1024,10 +1132,16 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({
           )}
         </View>
 
-        <View style={styles.rightViewport}>
+        <View
+          style={[
+            styles.rightViewport,
+            { flex: isLandscape ? 0.4 : 1 },
+            !isLandscape && styles.rightViewportPortrait,
+          ]}
+        >
           <View style={styles.telemetryPanel}>
             <View style={styles.panelHeaderRow}>
-              <ShieldAlert size={14} color="#E8DCC0" />
+              <ShieldAlert size={18} stroke={COLORS.parchmentLight} strokeWidth={2.1} />
               <Text style={styles.panelTitle}>INSPECTION TELEMETRY</Text>
             </View>
             <View style={styles.divider} />
@@ -1075,7 +1189,7 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({
                       accessibilityLabel="Save cache changes"
                     >
                       {isSubmitting ? (
-                        <ActivityIndicator size="small" color="#E8DCC0" />
+                        <ActivityIndicator size="small" stroke={COLORS.parchmentLight} />
                       ) : (
                         <Text style={styles.smallBtnText}>SAVE</Text>
                       )}
@@ -1092,13 +1206,14 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({
                   </View>
                 </ScrollView>
               ) : (
-                <Animated.View
-                  entering={FadeIn.duration(200)}
+                <ScrollView
                   key={selectedItem.id}
-                  style={styles.detailsBody}
+                  style={styles.detailsScroll}
+                  contentContainerStyle={styles.detailsBody}
+                  showsVerticalScrollIndicator={false}
                 >
                   <View style={styles.iconCircle}>
-                    <ItemIcon type={selectedItem.iconType} size={22} color="#E8DCC0" />
+                    <ItemIcon type={selectedItem.iconType} size={22} stroke={COLORS.parchmentLight} />
                   </View>
                   <Text style={styles.itemHeaderTitle}>{selectedItem.title}</Text>
                   <Text style={styles.itemReference}>{selectedItem.dbRef}</Text>
@@ -1133,7 +1248,7 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({
                       <Text style={styles.hintText}>{selectedItem.payloadText}</Text>
                     </View>
                   ) : null}
-                </Animated.View>
+                </ScrollView>
               )
             ) : (
               <View style={styles.detailsBody}>
@@ -1151,9 +1266,10 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({
                   disabled={isSubmitting}
                   accessibilityLabel={`Edit ${selectedItem.title}`}
                   accessibilityHint="Opens the cache metadata editing form."
+                  reduceMotion={reduceMotionEnabled}
                 >
                   <View style={styles.btnInnerRow}>
-                    <Edit3 size={10} color="#E8DCC0" />
+                    <Edit3 size={16} stroke={COLORS.parchmentLight} strokeWidth={2.1} />
                     <Text style={styles.actionBtnText}>EDIT</Text>
                   </View>
                 </AnimatedTouchableOpacity>
@@ -1164,9 +1280,10 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({
                   disabled={isSubmitting}
                   accessibilityLabel={`Archive ${selectedItem.title}`}
                   accessibilityHint="Removes this cache from active maps and inventory."
+                  reduceMotion={reduceMotionEnabled}
                 >
                   <View style={styles.btnInnerRow}>
-                    <Archive size={10} color="#E8DCC0" />
+                    <Archive size={16} stroke={COLORS.parchmentLight} strokeWidth={2.1} />
                     <Text style={styles.actionBtnText}>ARCHIVE</Text>
                   </View>
                 </AnimatedTouchableOpacity>
@@ -1177,9 +1294,10 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({
                   disabled={isSubmitting}
                   accessibilityLabel={`Permanently delete ${selectedItem.title}`}
                   accessibilityHint="Permanently deletes this cache and its discovery records."
+                  reduceMotion={reduceMotionEnabled}
                 >
                   <View style={styles.btnInnerRow}>
-                    <Trash2 size={10} color="#F3ECD8" />
+                    <Trash2 size={16} stroke={COLORS.parchmentLight} strokeWidth={2.1} />
                     <Text style={styles.deleteBtnText}>DELETE</Text>
                   </View>
                 </AnimatedTouchableOpacity>
@@ -1200,299 +1318,336 @@ export const InventoryScreen: React.FC<InventoryScreenProps> = ({
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#2A2420',
+    backgroundColor: COLORS.ink,
   },
   splitWrapper: {
     flex: 1,
-    flexDirection: 'row',
+    gap: 0,
+  },
+  flexOne: {
+    flex: 1,
   },
   leftViewport: {
-    flex: 0.6,
     minWidth: 0,
-    backgroundColor: '#E8DCC0',
-    padding: 12,
+    minHeight: 0,
+    backgroundColor: COLORS.parchment,
+    padding: 14,
     borderRightWidth: 3,
-    borderColor: '#B08D57',
+    borderColor: COLORS.brass,
+  },
+  leftViewportPortrait: {
+    borderRightWidth: 0,
+    borderBottomWidth: 3,
   },
   tabHeaderRow: {
     flexDirection: 'row',
     gap: 8,
-    marginBottom: 8,
+    marginBottom: 10,
   },
   tabButton: {
     flex: 1,
-    paddingVertical: 8,
+    minHeight: MIN_TOUCH_TARGET,
+    paddingHorizontal: 10,
+    paddingVertical: 10,
     alignItems: 'center',
-    borderRadius: 4,
+    justifyContent: 'center',
+    borderRadius: 6,
     borderWidth: 1,
-    borderColor: '#B08D57',
+    borderColor: COLORS.brass,
   },
   tabActive: {
-    backgroundColor: '#A64B2A',
+    backgroundColor: COLORS.sienna,
   },
   tabText: {
-    fontSize: 9,
-    fontWeight: 'bold',
+    fontSize: 12,
+    fontWeight: '700',
     letterSpacing: 0.5,
+    textAlign: 'center',
   },
   tabTextActive: {
-    color: '#F3ECD8',
+    color: COLORS.parchmentLight,
   },
   leftSubHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    gap: 8,
-    marginBottom: 8,
+    gap: 10,
+    marginBottom: 10,
   },
   sectionHeaderRow: {
     flex: 1,
     minWidth: 0,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
+    gap: 8,
   },
   sectionTitle: {
     flexShrink: 1,
-    fontSize: 10,
-    fontWeight: 'bold',
-    color: '#2A2420',
+    fontSize: 12,
+    lineHeight: 17,
+    fontWeight: '800',
+    color: COLORS.ink,
     letterSpacing: 0.5,
   },
   buryToggleButton: {
-    backgroundColor: '#2C3B2E',
-    paddingHorizontal: 8,
-    paddingVertical: 5,
-    borderRadius: 3,
+    minHeight: MIN_TOUCH_TARGET,
+    minWidth: MIN_TOUCH_TARGET,
+    backgroundColor: COLORS.forest,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    justifyContent: 'center',
+    borderRadius: 6,
     borderWidth: 1,
-    borderColor: '#B08D57',
+    borderColor: COLORS.brass,
   },
   btnInnerRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 4,
+    gap: 6,
   },
   buryToggleText: {
-    color: '#E8DCC0',
-    fontSize: 8,
-    fontWeight: 'bold',
+    color: COLORS.parchmentLight,
+    fontSize: 11,
+    fontWeight: '800',
   },
   loadingContainer: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    gap: 8,
+    gap: 10,
+    padding: 24,
   },
   loadingText: {
-    color: '#A64B2A',
-    fontSize: 9,
-    fontWeight: 'bold',
+    color: COLORS.sienna,
+    fontSize: 12,
+    lineHeight: 18,
+    fontWeight: '800',
     letterSpacing: 1,
+    textAlign: 'center',
   },
   gridContainer: {
     flexGrow: 1,
-    paddingBottom: 20,
+    paddingBottom: 24,
   },
   grid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: 10,
+    gap: 12,
     alignItems: 'flex-start',
   },
   itemCard: {
-    width: 115,
-    minHeight: 88,
-    backgroundColor: '#F3ECD8',
+    width: 150,
+    minHeight: 112,
+    backgroundColor: COLORS.parchmentLight,
     borderWidth: 1,
-    borderColor: '#B08D57',
-    borderRadius: 4,
+    borderColor: COLORS.brass,
+    borderRadius: 7,
     justifyContent: 'space-between',
-    padding: 7,
+    padding: 10,
   },
   itemCardSelected: {
     backgroundColor: '#D9C8A9',
-    borderWidth: 2,
-    borderColor: '#A64B2A',
+    borderWidth: 3,
+    borderColor: COLORS.sienna,
   },
   itemCardOwner: {
-    borderLeftWidth: 4,
-    borderLeftColor: '#2C3B2E',
+    borderLeftWidth: 5,
+    borderLeftColor: COLORS.forest,
   },
   cardHeaderRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    gap: 4,
+    gap: 6,
   },
   distBadge: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 2,
-    backgroundColor: '#E8DCC0',
-    paddingHorizontal: 4,
-    paddingVertical: 1,
-    borderRadius: 2,
+    gap: 4,
+    backgroundColor: COLORS.parchment,
+    paddingHorizontal: 7,
+    paddingVertical: 4,
+    borderRadius: 4,
   },
   distBadgeText: {
-    fontSize: 7,
-    fontWeight: 'bold',
-    color: '#2A2420',
+    fontSize: 10,
+    fontWeight: '800',
+    color: COLORS.ink,
   },
   itemText: {
-    color: '#2A2420',
-    fontSize: 9,
-    fontWeight: 'bold',
+    color: COLORS.ink,
+    fontSize: 13,
+    lineHeight: 17,
+    fontWeight: '800',
+    marginVertical: 6,
   },
   itemSubtext: {
-    color: '#8A7E6B',
-    fontSize: 7,
-    fontWeight: 'bold',
+    color: COLORS.inkMuted,
+    fontSize: 11,
+    lineHeight: 15,
+    fontWeight: '700',
   },
   emptyState: {
-    padding: 24,
+    padding: 28,
     alignItems: 'center',
     width: '100%',
-    gap: 8,
+    gap: 10,
   },
   emptyTitle: {
-    color: '#2A2420',
-    fontSize: 10,
-    fontWeight: 'bold',
+    color: COLORS.ink,
+    fontSize: 14,
+    lineHeight: 20,
+    fontWeight: '800',
     textAlign: 'center',
     letterSpacing: 0.6,
   },
   emptyText: {
-    color: '#8A7E6B',
-    fontSize: 10,
+    color: COLORS.inkMuted,
+    fontSize: 12,
     fontStyle: 'italic',
     textAlign: 'center',
-    lineHeight: 14,
+    lineHeight: 18,
+    maxWidth: 480,
   },
   emptyHint: {
-    color: '#A64B2A',
-    fontSize: 8,
-    fontWeight: 'bold',
+    color: COLORS.sienna,
+    fontSize: 12,
+    lineHeight: 17,
+    fontWeight: '800',
     textAlign: 'center',
   },
   stateContainer: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    padding: 24,
-    gap: 8,
+    padding: 28,
+    gap: 10,
   },
   stateTitle: {
-    color: '#2A2420',
-    fontSize: 10,
-    fontWeight: 'bold',
+    color: COLORS.ink,
+    fontSize: 14,
+    lineHeight: 20,
+    fontWeight: '800',
     textAlign: 'center',
     letterSpacing: 0.8,
   },
   stateText: {
-    color: '#8A7E6B',
-    fontSize: 9,
+    color: COLORS.inkMuted,
+    fontSize: 12,
     textAlign: 'center',
-    lineHeight: 13,
+    lineHeight: 18,
+    maxWidth: 520,
   },
   stateHint: {
-    color: '#A64B2A',
-    fontSize: 8,
-    fontWeight: 'bold',
+    color: COLORS.sienna,
+    fontSize: 12,
+    lineHeight: 17,
+    fontWeight: '800',
     textAlign: 'center',
   },
   formContainer: {
-    backgroundColor: '#F3ECD8',
-    borderRadius: 4,
+    backgroundColor: COLORS.parchmentLight,
+    borderRadius: 7,
     borderWidth: 1,
-    borderColor: '#B08D57',
-    padding: 8,
+    borderColor: COLORS.brass,
+    padding: 12,
   },
   formContentContainer: {
-    paddingBottom: 20,
+    paddingBottom: 28,
   },
   label: {
-    fontSize: 8,
-    fontWeight: 'bold',
-    color: '#2A2420',
-    marginBottom: 2,
-    marginTop: 4,
+    fontSize: 12,
+    lineHeight: 17,
+    fontWeight: '800',
+    color: COLORS.ink,
+    marginBottom: 5,
+    marginTop: 10,
   },
   input: {
-    backgroundColor: '#E8DCC0',
-    borderWidth: 1,
-    borderColor: '#B08D57',
-    borderRadius: 3,
-    paddingHorizontal: 6,
-    paddingVertical: 5,
-    fontSize: 10,
-    color: '#2A2420',
+    minHeight: MIN_TOUCH_TARGET,
+    backgroundColor: COLORS.parchment,
+    borderWidth: 1.5,
+    borderColor: COLORS.brass,
+    borderRadius: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 10,
+    fontSize: 14,
+    lineHeight: 20,
+    color: COLORS.ink,
   },
   inputError: {
-    borderColor: '#A64B2A',
-    borderWidth: 1.5,
+    borderColor: COLORS.sienna,
+    borderWidth: 2,
   },
   errorText: {
-    color: '#A64B2A',
-    fontSize: 7,
-    fontWeight: 'bold',
-    marginTop: 1,
+    color: COLORS.sienna,
+    fontSize: 11,
+    lineHeight: 16,
+    fontWeight: '800',
+    marginTop: 4,
   },
   textArea: {
-    minHeight: 42,
+    minHeight: 88,
     textAlignVertical: 'top',
   },
   coordsHeaderRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
+    gap: 8,
   },
   gpsStatus: {
-    color: '#3A4B3C',
-    fontSize: 7,
-    fontWeight: 'bold',
+    color: '#324B36',
+    fontSize: 11,
+    fontWeight: '800',
   },
   gpsStatusWarning: {
-    color: '#A64B2A',
-    fontSize: 7,
-    fontWeight: 'bold',
+    color: COLORS.sienna,
+    fontSize: 11,
+    fontWeight: '800',
   },
   coordsRow: {
     flexDirection: 'row',
-    gap: 6,
+    gap: 10,
   },
   coordinateHelp: {
-    color: '#8A7E6B',
-    fontSize: 7,
-    lineHeight: 10,
-    marginTop: 4,
+    color: COLORS.inkMuted,
+    fontSize: 11,
+    lineHeight: 16,
+    marginTop: 8,
   },
   sealAndBuryBtn: {
-    backgroundColor: '#A64B2A',
-    paddingVertical: 8,
-    borderRadius: 3,
+    minHeight: MIN_TOUCH_TARGET,
+    backgroundColor: COLORS.sienna,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderRadius: 6,
     alignItems: 'center',
     justifyContent: 'center',
-    minHeight: 32,
-    marginTop: 8,
+    marginTop: 14,
     borderWidth: 1,
-    borderColor: '#B08D57',
+    borderColor: COLORS.brass,
   },
   sealAndBuryText: {
-    color: '#F3ECD8',
-    fontWeight: 'bold',
-    fontSize: 10,
+    color: COLORS.parchmentLight,
+    fontWeight: '800',
+    fontSize: 13,
     letterSpacing: 1,
+    textAlign: 'center',
   },
   disabledButton: {
-    opacity: 0.6,
+    opacity: 0.55,
   },
   rightViewport: {
-    flex: 0.4,
     minWidth: 0,
-    backgroundColor: '#2C3B2E',
-    padding: 10,
+    minHeight: 0,
+    backgroundColor: COLORS.forest,
+    padding: 12,
     justifyContent: 'space-between',
+  },
+  rightViewportPortrait: {
+    borderTopWidth: 0,
   },
   telemetryPanel: {
     flex: 1,
@@ -1501,193 +1656,221 @@ const styles = StyleSheet.create({
   panelHeaderRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
-    marginBottom: 4,
+    gap: 8,
+    marginBottom: 8,
   },
   panelTitle: {
     flexShrink: 1,
-    color: '#E8DCC0',
-    fontWeight: 'bold',
-    fontSize: 10,
+    color: COLORS.parchmentLight,
+    fontWeight: '800',
+    fontSize: 13,
+    lineHeight: 18,
     letterSpacing: 1,
   },
   divider: {
     height: 1,
-    backgroundColor: '#B08D57',
-    marginBottom: 6,
+    backgroundColor: COLORS.brassLight,
+    marginBottom: 8,
+    opacity: 0.7,
+  },
+  detailsScroll: {
+    flex: 1,
+    minHeight: 0,
   },
   detailsBody: {
     alignItems: 'center',
-    paddingVertical: 2,
+    paddingVertical: 6,
+    paddingBottom: 12,
   },
   iconCircle: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
-    backgroundColor: '#1C2A20',
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: COLORS.forestDark,
     borderWidth: 1,
-    borderColor: '#B08D57',
+    borderColor: COLORS.brassLight,
     justifyContent: 'center',
     alignItems: 'center',
-    marginBottom: 4,
+    marginBottom: 8,
   },
   itemHeaderTitle: {
-    color: '#E8DCC0',
-    fontSize: 11,
-    fontWeight: 'bold',
+    color: COLORS.parchmentLight,
+    fontSize: 15,
+    lineHeight: 20,
+    fontWeight: '800',
     letterSpacing: 0.5,
     textAlign: 'center',
-    marginBottom: 2,
+    marginBottom: 4,
   },
   itemReference: {
-    color: '#B08D57',
-    fontSize: 7,
-    fontWeight: 'bold',
-    marginBottom: 6,
+    color: COLORS.brassLight,
+    fontSize: 11,
+    fontWeight: '800',
+    marginBottom: 10,
   },
   metaRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     width: '100%',
-    gap: 8,
-    marginVertical: 1,
-    borderBottomWidth: 0.5,
-    borderBottomColor: '#3A4B3C',
-    paddingBottom: 2,
+    gap: 10,
+    marginVertical: 3,
+    borderBottomWidth: 1,
+    borderBottomColor: '#4B604E',
+    paddingBottom: 6,
   },
   metaLabel: {
-    color: '#B08D57',
-    fontSize: 8,
-    fontWeight: 'bold',
+    color: COLORS.brassLight,
+    fontSize: 11,
+    lineHeight: 16,
+    fontWeight: '800',
   },
   metaValue: {
-    flexShrink: 1,
-    color: '#E8DCC0',
-    fontSize: 8,
+    flex: 1,
+    color: COLORS.parchmentLight,
+    fontSize: 12,
+    lineHeight: 17,
     textAlign: 'right',
   },
   noSelectionText: {
-    color: '#B08D57',
-    fontSize: 9,
+    color: COLORS.brassLight,
+    fontSize: 12,
+    lineHeight: 18,
     fontStyle: 'italic',
-    marginTop: 14,
+    marginTop: 18,
     textAlign: 'center',
   },
   hintBox: {
-    marginTop: 5,
-    backgroundColor: '#1C2A20',
-    padding: 5,
-    borderRadius: 3,
+    marginTop: 10,
+    backgroundColor: COLORS.forestDark,
+    padding: 10,
+    borderRadius: 6,
     borderWidth: 1,
-    borderColor: '#B08D57',
+    borderColor: COLORS.brassLight,
     width: '100%',
   },
   payloadBox: {
-    marginTop: 4,
+    marginTop: 8,
   },
   hintLabel: {
-    color: '#B08D57',
-    fontSize: 7,
-    fontWeight: 'bold',
-    marginBottom: 1,
+    color: COLORS.brassLight,
+    fontSize: 11,
+    lineHeight: 16,
+    fontWeight: '800',
+    marginBottom: 4,
   },
   hintText: {
-    color: '#E8DCC0',
-    fontSize: 8,
+    color: COLORS.parchmentLight,
+    fontSize: 12,
     fontStyle: 'italic',
-    lineHeight: 11,
+    lineHeight: 18,
   },
   editScroll: {
     flex: 1,
+    minHeight: 0,
   },
   editScrollContent: {
-    paddingBottom: 8,
+    paddingBottom: 12,
   },
   editHeader: {
-    color: '#E8DCC0',
-    fontSize: 9,
-    fontWeight: 'bold',
-    marginBottom: 4,
+    color: COLORS.parchmentLight,
+    fontSize: 13,
+    lineHeight: 18,
+    fontWeight: '800',
+    marginBottom: 8,
   },
   editInput: {
-    backgroundColor: '#1C2A20',
-    borderWidth: 1,
-    borderColor: '#B08D57',
-    borderRadius: 3,
-    color: '#E8DCC0',
-    fontSize: 9,
-    paddingHorizontal: 6,
-    paddingVertical: 4,
-    marginBottom: 4,
+    minHeight: MIN_TOUCH_TARGET,
+    backgroundColor: COLORS.forestDark,
+    borderWidth: 1.5,
+    borderColor: COLORS.brassLight,
+    borderRadius: 6,
+    color: COLORS.parchmentLight,
+    fontSize: 14,
+    lineHeight: 20,
+    paddingHorizontal: 10,
+    paddingVertical: 9,
+    marginBottom: 10,
   },
   editTextArea: {
-    minHeight: 42,
+    minHeight: 88,
     textAlignVertical: 'top',
   },
   actionBtnRow: {
     flexDirection: 'row',
-    gap: 6,
-    marginTop: 6,
+    gap: 8,
+    marginTop: 8,
   },
   smallBtn: {
     flex: 1,
-    minHeight: 28,
-    paddingVertical: 6,
-    borderRadius: 3,
+    minHeight: MIN_TOUCH_TARGET,
+    paddingHorizontal: 10,
+    paddingVertical: 10,
+    borderRadius: 6,
     alignItems: 'center',
     justifyContent: 'center',
   },
   saveButton: {
-    backgroundColor: '#A64B2A',
+    backgroundColor: COLORS.sienna,
   },
   cancelButton: {
     backgroundColor: '#3A4B3C',
+    borderWidth: 1,
+    borderColor: COLORS.brassLight,
   },
   smallBtnText: {
-    color: '#E8DCC0',
-    fontSize: 8,
-    fontWeight: 'bold',
+    color: COLORS.parchmentLight,
+    fontSize: 12,
+    fontWeight: '800',
   },
   creatorActionContainer: {
     flexDirection: 'row',
-    gap: 4,
-    marginTop: 6,
+    gap: 6,
+    marginTop: 8,
   },
   editButton: {
     flex: 1,
+    minHeight: MIN_TOUCH_TARGET,
     backgroundColor: '#3A4B3C',
     borderWidth: 1,
-    borderColor: '#B08D57',
-    paddingVertical: 6,
-    borderRadius: 3,
+    borderColor: COLORS.brassLight,
+    paddingHorizontal: 8,
+    paddingVertical: 10,
+    borderRadius: 6,
     alignItems: 'center',
+    justifyContent: 'center',
   },
   archiveButton: {
     flex: 1,
+    minHeight: MIN_TOUCH_TARGET,
     backgroundColor: '#5A4B2A',
     borderWidth: 1,
-    borderColor: '#B08D57',
-    paddingVertical: 6,
-    borderRadius: 3,
+    borderColor: COLORS.brassLight,
+    paddingHorizontal: 8,
+    paddingVertical: 10,
+    borderRadius: 6,
     alignItems: 'center',
+    justifyContent: 'center',
   },
   deleteButton: {
     flex: 1,
-    backgroundColor: '#A64B2A',
+    minHeight: MIN_TOUCH_TARGET,
+    backgroundColor: COLORS.sienna,
     borderWidth: 1,
-    borderColor: '#B08D57',
-    paddingVertical: 6,
-    borderRadius: 3,
+    borderColor: COLORS.brassLight,
+    paddingHorizontal: 8,
+    paddingVertical: 10,
+    borderRadius: 6,
     alignItems: 'center',
+    justifyContent: 'center',
   },
   actionBtnText: {
-    color: '#E8DCC0',
-    fontSize: 8,
-    fontWeight: 'bold',
+    color: COLORS.parchmentLight,
+    fontSize: 11,
+    fontWeight: '800',
   },
   deleteBtnText: {
-    color: '#F3ECD8',
-    fontSize: 8,
-    fontWeight: 'bold',
+    color: COLORS.parchmentLight,
+    fontSize: 11,
+    fontWeight: '800',
   },
 });

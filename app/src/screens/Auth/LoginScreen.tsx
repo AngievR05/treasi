@@ -1,17 +1,21 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
-  View,
-  Text,
-  StyleSheet,
-  TextInput,
-  TouchableOpacity,
-  Switch,
-  useWindowDimensions,
+  AccessibilityInfo,
   ActivityIndicator,
-  ScrollView,
   KeyboardAvoidingView,
   Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Switch,
+  Text,
+  TextInput,
+  useWindowDimensions,
+  View,
 } from 'react-native';
+import { FirebaseError } from 'firebase/app';
+import { signInWithEmailAndPassword, signOut } from 'firebase/auth';
+import { doc, getDoc, setDoc, Timestamp } from 'firebase/firestore';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Animated, {
   FadeInDown,
@@ -20,100 +24,227 @@ import Animated, {
   useSharedValue,
   withSpring,
 } from 'react-native-reanimated';
-import { 
-  Mail, 
-  Lock, 
-  Compass, 
-  MapPin, 
-  Activity, 
-  RotateCw, 
-  Eye, 
-  EyeOff, 
+import {
+  Activity,
+  Compass,
+  Eye,
+  EyeOff,
+  Lock,
+  Mail,
+  MapPin,
+  Moon,
+  RotateCw,
   ShieldAlert,
-  Moon
 } from 'lucide-react-native';
 
-// Firebase Auth & Firestore Engine
-import { signInWithEmailAndPassword } from 'firebase/auth';
-import { doc, getDoc, setDoc, updateDoc, Timestamp } from 'firebase/firestore';
 import { auth, db } from '../../config/firebase';
-import { UserDocument } from '../../types/firestore';
+import type { UserDocument } from '../../types/firestore';
 
 export interface LoginScreenProps {
   onNavigateSignUp: () => void;
   onLoginSuccess: () => void;
 }
 
+type FocusedField = 'email' | 'password' | null;
+
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-export const LoginScreen: React.FC<LoginScreenProps> = ({ 
-  onNavigateSignUp, 
-  onLoginSuccess 
+const COLOURS = {
+  forest950: '#172018',
+  forest900: '#1C261D',
+  forest800: '#2C3B2E',
+  forest700: '#3D503F',
+  parchment100: '#F6EFD9',
+  parchment200: '#E8DCC0',
+  ink900: '#2A2420',
+  bronze600: '#6B563A',
+  bronze500: '#B08D57',
+  rust700: '#7F321B',
+  rust600: '#8C3A20',
+  white: '#FFFFFF',
+} as const;
+
+const getLoginErrorMessage = (error: unknown): string => {
+  if (!(error instanceof FirebaseError)) {
+    return 'Sign in could not be completed. Please try again.';
+  }
+
+  switch (error.code) {
+    case 'auth/invalid-email':
+      return 'Enter a valid email address.';
+    case 'auth/user-disabled':
+      return 'This account has been disabled. Contact support for help.';
+    case 'auth/user-not-found':
+    case 'auth/wrong-password':
+    case 'auth/invalid-credential':
+      return 'The email or passcode is incorrect.';
+    case 'auth/network-request-failed':
+      return 'A network connection could not be established. Check your connection and try again.';
+    case 'auth/too-many-requests':
+      return 'Too many unsuccessful attempts. Wait a moment before trying again.';
+    case 'auth/operation-not-allowed':
+      return 'Email and passcode sign in is currently unavailable.';
+    default:
+      return 'Sign in could not be completed. Please try again.';
+  }
+};
+
+export const LoginScreen: React.FC<LoginScreenProps> = ({
+  onNavigateSignUp,
+  onLoginSuccess,
 }) => {
   const { width, height } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const isLandscape = width > height;
 
-  // Form State
-  const [email, setEmail] = useState<string>('');
-  const [password, setPassword] = useState<string>('');
-  const [showPassword, setShowPassword] = useState<boolean>(false);
-  const [isLoading, setIsLoading] = useState<boolean>(false);
+  const passwordInputRef = useRef<TextInput>(null);
+
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [focusedField, setFocusedField] = useState<FocusedField>(null);
+  const [reduceMotionEnabled, setReduceMotionEnabled] = useState(false);
 
-  // Pre-flight Sensor & System Calibration Toggles (Default: OFF / false)
-  const [gpsEnabled, setGpsEnabled] = useState<boolean>(false);
-  const [compassHapticsEnabled, setCompassHapticsEnabled] = useState<boolean>(false);
-  const [motionEnabled, setMotionEnabled] = useState<boolean>(false);
-  const [nightModeEnabled, setNightModeEnabled] = useState<boolean>(false);
+  const [gpsEnabled, setGpsEnabled] = useState(false);
+  const [compassHapticsEnabled, setCompassHapticsEnabled] = useState(false);
+  const [motionEnabled, setMotionEnabled] = useState(false);
+  const [nightModeEnabled, setNightModeEnabled] = useState(false);
 
-  // Tactile Button Press Spring Scale
   const buttonScale = useSharedValue(1);
+
+  useEffect(() => {
+    let mounted = true;
+
+    AccessibilityInfo.isReduceMotionEnabled().then((enabled) => {
+      if (mounted) {
+        setReduceMotionEnabled(enabled);
+      }
+    });
+
+    const subscription = AccessibilityInfo.addEventListener(
+      'reduceMotionChanged',
+      setReduceMotionEnabled,
+    );
+
+    return () => {
+      mounted = false;
+      subscription.remove();
+    };
+  }, []);
 
   const animatedButtonStyle = useAnimatedStyle(() => ({
     transform: [{ scale: buttonScale.value }],
   }));
 
+  const announceError = (message: string) => {
+    setErrorMessage(message);
+    AccessibilityInfo.announceForAccessibility(`Sign in error. ${message}`);
+  };
+
+  const clearError = () => {
+    if (errorMessage) {
+      setErrorMessage(null);
+    }
+  };
+
   const handlePressIn = () => {
-    buttonScale.value = withSpring(0.96, { damping: 12, stiffness: 200 });
+    if (!reduceMotionEnabled) {
+      buttonScale.value = withSpring(0.97, {
+        damping: 16,
+        stiffness: 220,
+      });
+    }
   };
 
   const handlePressOut = () => {
-    buttonScale.value = withSpring(1, { damping: 12, stiffness: 200 });
+    if (!reduceMotionEnabled) {
+      buttonScale.value = withSpring(1, {
+        damping: 16,
+        stiffness: 220,
+      });
+    }
   };
 
-  // Error clearing helpers on user typing
   const handleEmailChange = (text: string) => {
     setEmail(text);
-    if (errorMessage) setErrorMessage(null);
+    clearError();
   };
 
   const handlePasswordChange = (text: string) => {
     setPassword(text);
-    if (errorMessage) setErrorMessage(null);
+    clearError();
   };
 
-  // Firebase Auth Login & Telemetry Synchronization Pipeline
+  const syncExplorerPreferences = async (
+    uid: string,
+    authenticatedEmail: string | null,
+    displayName: string | null,
+  ) => {
+    const userDocRef = doc(db, 'users', uid);
+    const userDocSnap = await getDoc(userDocRef);
+    const now = Timestamp.now();
+
+    const preferences: Pick<
+      UserDocument,
+      | 'telemetryEnabled'
+      | 'hapticFeedbackEnabled'
+      | 'motionSensitivityEnabled'
+      | 'nightModeEnabled'
+      | 'updatedAt'
+    > = {
+      telemetryEnabled: gpsEnabled,
+      hapticFeedbackEnabled: compassHapticsEnabled,
+      motionSensitivityEnabled: motionEnabled,
+      nightModeEnabled,
+      updatedAt: now,
+    };
+
+    if (userDocSnap.exists()) {
+      await setDoc(userDocRef, preferences, { merge: true });
+      return;
+    }
+
+    const safeEmail = authenticatedEmail ?? email.trim().toLowerCase();
+    const fallbackUsername = safeEmail.split('@')[0] || 'Explorer';
+
+    const newUserDocument: UserDocument = {
+      uid,
+      username: displayName?.trim() || fallbackUsername,
+      email: safeEmail,
+      totalPoints: 0,
+      hasCompletedOnboarding: false,
+      telemetryEnabled: gpsEnabled,
+      hapticFeedbackEnabled: compassHapticsEnabled,
+      motionSensitivityEnabled: motionEnabled,
+      batteryOptimizerEnabled: false,
+      nightModeEnabled,
+      skipOnboardingAuthFlow: false,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    await setDoc(userDocRef, newUserDocument);
+  };
+
   const handleLogin = async () => {
     if (isLoading) return;
 
-    const trimmedEmail = email.trim();
+    const normalisedEmail = email.trim().toLowerCase();
 
-    // 1. Empty email validation
-    if (!trimmedEmail) {
-      setErrorMessage('Please enter your Explorer Email.');
+    if (!normalisedEmail) {
+      announceError('Enter your Explorer email.');
       return;
     }
 
-    // 2. Email format validation
-    if (!EMAIL_REGEX.test(trimmedEmail)) {
-      setErrorMessage('Please enter a valid Explorer Email address.');
+    if (!EMAIL_REGEX.test(normalisedEmail)) {
+      announceError('Enter a valid email address.');
       return;
     }
 
-    // 3. Empty password validation
     if (!password) {
-      setErrorMessage('Please enter your Passcode.');
+      announceError('Enter your passcode.');
       return;
     }
 
@@ -121,75 +252,55 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
     setErrorMessage(null);
 
     try {
-      // Authenticate credentials via Firebase Auth
-      const userCredential = await signInWithEmailAndPassword(auth, trimmedEmail, password);
-      const user = userCredential.user;
+      const userCredential = await signInWithEmailAndPassword(
+        auth,
+        normalisedEmail,
+        password,
+      );
 
-      if (user) {
-        const userDocRef = doc(db, 'users', user.uid);
-        const userDocSnap = await getDoc(userDocRef);
+      try {
+        await syncExplorerPreferences(
+          userCredential.user.uid,
+          userCredential.user.email,
+          userCredential.user.displayName,
+        );
+      } catch (profileError: unknown) {
+        console.error('[Treasi] Explorer profile synchronisation failed:', profileError);
 
-        // Synchronize active Pre-flight Toggles to user profile document
-        const telemetryPayload: Partial<UserDocument> = {
-          telemetryEnabled: gpsEnabled,
-          hapticFeedbackEnabled: compassHapticsEnabled,
-          motionSensitivityEnabled: motionEnabled,
-          nightModeEnabled: nightModeEnabled,
-          updatedAt: Timestamp.now(),
-        };
-
-        if (userDocSnap.exists()) {
-          await updateDoc(userDocRef, telemetryPayload);
-        } else {
-          // Failsafe: Initialize user document if missing in Firestore
-          await setDoc(userDocRef, {
-            uid: user.uid,
-            username: trimmedEmail.split('@')[0] || 'Explorer',
-            email: user.email || trimmedEmail,
-            totalPoints: 0,
-            hasCompletedOnboarding: false,
-            batteryOptimizerEnabled: false,
-            skipOnboardingAuthFlow: false,
-            createdAt: Timestamp.now(),
-            ...telemetryPayload,
-          });
+        try {
+          await signOut(auth);
+        } catch (signOutError: unknown) {
+          console.error('[Treasi] Cleanup sign out failed:', signOutError);
         }
+
+        announceError(
+          'Your account was verified, but Treasi could not load your field profile. Please try again.',
+        );
+        return;
       }
 
       onLoginSuccess();
-    } catch (error: any) {
-      let msg = 'Something went wrong while signing in. Please try again.';
-      const errorCode = error?.code;
-
-      if (errorCode === 'auth/network-request-failed') {
-        msg = 'Unable to connect. Check telemetry signal and retry.';
-      } else if (errorCode === 'auth/invalid-email') {
-        msg = 'Please enter a valid Explorer Email address.';
-      } else if (
-        errorCode === 'auth/user-not-found' ||
-        errorCode === 'auth/wrong-password' ||
-        errorCode === 'auth/invalid-credential'
-      ) {
-        msg = 'Incorrect Explorer Email or Passcode.';
-      } else if (errorCode === 'auth/too-many-requests') {
-        msg = 'Too many failed attempts. Terminal locked temporarily. Try again shortly.';
-      } else if (
-        errorCode === 'auth/unavailable' ||
-        errorCode === 'auth/internal-error'
-      ) {
-        msg = 'Firebase Authentication service offline. Retry in a moment.';
-      }
-      
-      setErrorMessage(msg);
+    } catch (error: unknown) {
+      announceError(getLoginErrorMessage(error));
     } finally {
       setIsLoading(false);
     }
   };
 
+  const renderDecorativeIcon = (icon: React.ReactNode) => (
+    <View
+      accessible={false}
+      importantForAccessibility="no-hide-descendants"
+      style={styles.iconWrapper}
+    >
+      {icon}
+    </View>
+  );
+
   return (
     <KeyboardAvoidingView
       style={styles.fullScreenChassis}
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
     >
       <ScrollView
         contentContainerStyle={[
@@ -197,256 +308,407 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
           {
             paddingLeft: Math.max(insets.left, 16),
             paddingRight: Math.max(insets.right, 16),
-            paddingTop: Math.max(insets.top, 12),
-            paddingBottom: Math.max(insets.bottom, 12),
+            paddingTop: Math.max(insets.top, 16),
+            paddingBottom: Math.max(insets.bottom, 16),
           },
         ]}
-        bounces={false}
+        keyboardShouldPersistTaps="handled"
         showsVerticalScrollIndicator={false}
+        contentInsetAdjustmentBehavior="automatic"
       >
-        <View 
+        <View
           style={[
-            styles.layoutSplitWrapper, 
-            { flexDirection: isLandscape ? 'row' : 'column' }
+            styles.layoutSplitWrapper,
+            { flexDirection: isLandscape ? 'row' : 'column' },
           ]}
         >
-          
-          {/* LEFT PANEL (60% Width in Landscape): VINTAGE ADMIT PERMIT TICKET */}
           <Animated.View
-            entering={FadeInDown.duration(500)}
+            entering={
+              reduceMotionEnabled ? undefined : FadeInDown.duration(350)
+            }
             style={[
-              styles.parchmentCard, 
-              { flex: isLandscape ? 0.6 : 1 }
+              styles.parchmentCard,
+              isLandscape ? styles.leftLandscape : styles.fullWidthCard,
             ]}
           >
             <View style={styles.dashedBorderFrame}>
-              
-              {/* Header Metadata */}
               <View style={styles.ticketHeader}>
                 <Text style={styles.ticketHeaderLabel}>ADMIT ONE · 1951</Text>
                 <Text style={styles.ticketHeaderLabel}>FIELD PERMIT ★★★</Text>
               </View>
 
-              {/* Branding Titles */}
               <View style={styles.brandHeader}>
-                <Text style={styles.brandTitle}>TREASI</Text>
-                <Text style={styles.brandSubtitle}>Hide. Explore. Stay connected.</Text>
+                <Text accessibilityRole="header" style={styles.brandTitle}>
+                  TREASI
+                </Text>
+                <Text style={styles.brandSubtitle}>
+                  Hide. Explore. Stay connected.
+                </Text>
               </View>
 
-              {/* Diagnostic Error Banner */}
-              {errorMessage && (
+              {errorMessage ? (
                 <View
                   style={styles.errorBox}
-                  accessible={true}
+                  accessible
                   accessibilityRole="alert"
-                  accessibilityLabel={`Error: ${errorMessage}`}
+                  accessibilityLiveRegion="assertive"
+                  accessibilityLabel={`Sign in error. ${errorMessage}`}
                 >
-                  <ShieldAlert size={16} color="#A64B2A" />
+                  {renderDecorativeIcon(
+                    <ShieldAlert
+                      size={20}
+                      stroke={COLOURS.rust700}
+                      strokeWidth={2.25}
+                    />,
+                  )}
                   <Text style={styles.errorText}>{errorMessage}</Text>
                 </View>
-              )}
+              ) : null}
 
-              {/* Form Input Stack */}
               <View style={styles.inputStack}>
-                
-                {/* Explorer Email Input */}
-                <View style={styles.inputContainer}>
-                  <Mail size={18} color="#2A2420" style={styles.inputIcon} />
-                  <TextInput
-                    style={styles.textInput}
-                    placeholder="EXPLORER EMAIL"
-                    placeholderTextColor="#8C7350"
-                    value={email}
-                    onChangeText={handleEmailChange}
-                    autoCapitalize="none"
-                    keyboardType="email-address"
-                    autoCorrect={false}
-                    editable={!isLoading}
-                    accessible={true}
-                    accessibilityLabel="Explorer Email Input"
-                    accessibilityHint="Enter your registered explorer email address"
-                  />
-                </View>
-
-                {/* Passcode Input */}
-                <View style={styles.inputContainer}>
-                  <Lock size={18} color="#2A2420" style={styles.inputIcon} />
-                  <TextInput
-                    style={styles.textInput}
-                    placeholder="PASSCODE"
-                    placeholderTextColor="#8C7350"
-                    value={password}
-                    onChangeText={handlePasswordChange}
-                    secureTextEntry={!showPassword}
-                    autoCapitalize="none"
-                    editable={!isLoading}
-                    accessible={true}
-                    accessibilityLabel="Passcode Input"
-                    accessibilityHint="Enter your secret security passcode"
-                  />
-                  <TouchableOpacity
-                    onPress={() => setShowPassword((prev) => !prev)}
-                    style={styles.eyeButton}
-                    disabled={isLoading}
-                    accessible={true}
-                    accessibilityRole="button"
-                    accessibilityLabel={showPassword ? 'Hide passcode' : 'Show passcode'}
-                    accessibilityHint="Toggles security passcode text visibility"
+                <View style={styles.fieldGroup}>
+                  <Text style={styles.inputLabel}>EXPLORER EMAIL</Text>
+                  <View
+                    style={[
+                      styles.inputContainer,
+                      focusedField === 'email' && styles.inputContainerFocused,
+                    ]}
                   >
-                    {showPassword ? (
-                      <EyeOff size={18} color="#2A2420" />
-                    ) : (
-                      <Eye size={18} color="#2A2420" />
+                    {renderDecorativeIcon(
+                      <Mail
+                        size={20}
+                        stroke={COLOURS.ink900}
+                        strokeWidth={2.1}
+                      />,
                     )}
-                  </TouchableOpacity>
+                    <TextInput
+                      style={styles.textInput}
+                      placeholder="name@example.com"
+                      placeholderTextColor={COLOURS.bronze600}
+                      value={email}
+                      onChangeText={handleEmailChange}
+                      onFocus={() => setFocusedField('email')}
+                      onBlur={() => setFocusedField(null)}
+                      onSubmitEditing={() => passwordInputRef.current?.focus()}
+                      autoCapitalize="none"
+                      autoComplete="email"
+                      keyboardType="email-address"
+                      textContentType="emailAddress"
+                      autoCorrect={false}
+                      editable={!isLoading}
+                      returnKeyType="next"
+                      accessibilityLabel="Explorer email"
+                      accessibilityHint="Enter the email address registered to your Treasi account."
+                    />
+                  </View>
                 </View>
 
+                <View style={styles.fieldGroup}>
+                  <Text style={styles.inputLabel}>PASSCODE</Text>
+                  <View
+                    style={[
+                      styles.inputContainer,
+                      focusedField === 'password' && styles.inputContainerFocused,
+                    ]}
+                  >
+                    {renderDecorativeIcon(
+                      <Lock
+                        size={20}
+                        stroke={COLOURS.ink900}
+                        strokeWidth={2.1}
+                      />,
+                    )}
+                    <TextInput
+                      ref={passwordInputRef}
+                      style={styles.textInput}
+                      placeholder="Enter your passcode"
+                      placeholderTextColor={COLOURS.bronze600}
+                      value={password}
+                      onChangeText={handlePasswordChange}
+                      onFocus={() => setFocusedField('password')}
+                      onBlur={() => setFocusedField(null)}
+                      onSubmitEditing={handleLogin}
+                      secureTextEntry={!showPassword}
+                      autoCapitalize="none"
+                      autoComplete="current-password"
+                      textContentType="password"
+                      autoCorrect={false}
+                      editable={!isLoading}
+                      returnKeyType="done"
+                      accessibilityLabel="Passcode"
+                      accessibilityHint="Enter the password for your Treasi account."
+                    />
+
+                    <Pressable
+                      onPress={() => setShowPassword((current) => !current)}
+                      disabled={isLoading}
+                      hitSlop={6}
+                      style={({ pressed }) => [
+                        styles.eyeButton,
+                        pressed && styles.controlPressed,
+                      ]}
+                      accessibilityRole="button"
+                      accessibilityLabel={
+                        showPassword ? 'Hide passcode' : 'Show passcode'
+                      }
+                      accessibilityHint="Changes whether the passcode is visible on screen."
+                      accessibilityState={{ disabled: isLoading }}
+                    >
+                      {showPassword ? (
+                        <EyeOff
+                          size={21}
+                          stroke={COLOURS.ink900}
+                          strokeWidth={2.1}
+                        />
+                      ) : (
+                        <Eye
+                          size={21}
+                          stroke={COLOURS.ink900}
+                          strokeWidth={2.1}
+                        />
+                      )}
+                    </Pressable>
+                  </View>
+                </View>
               </View>
 
-              {/* Primary Action Button */}
-              <Animated.View style={[animatedButtonStyle, styles.fullWidthContainer]}>
-                <TouchableOpacity
-                  style={[styles.primaryButton, isLoading && styles.buttonDisabled]}
+              <Animated.View
+                style={[animatedButtonStyle, styles.fullWidthContainer]}
+              >
+                <Pressable
                   onPress={handleLogin}
                   onPressIn={handlePressIn}
                   onPressOut={handlePressOut}
                   disabled={isLoading}
-                  accessible={true}
+                  style={({ pressed }) => [
+                    styles.primaryButton,
+                    pressed && !isLoading && styles.primaryButtonPressed,
+                    isLoading && styles.buttonDisabled,
+                  ]}
                   accessibilityRole="button"
-                  accessibilityLabel="Enter the field button"
-                  accessibilityHint="Submits login credentials to authenticate session"
+                  accessibilityLabel={isLoading ? 'Signing in' : 'Enter the field'}
+                  accessibilityHint="Signs in to Treasi with your email and passcode."
+                  accessibilityState={{
+                    disabled: isLoading,
+                    busy: isLoading,
+                  }}
                 >
                   {isLoading ? (
-                    <ActivityIndicator color="#E8DCC0" />
+                    <View style={styles.loadingRow}>
+                      <ActivityIndicator
+                        size="small"
+                        color={COLOURS.parchment200}
+                      />
+                      <Text style={styles.buttonText}>SIGNING IN…</Text>
+                    </View>
                   ) : (
-                    <Text style={styles.buttonText}>&gt;&gt; ENTER THE FIELD &lt;&lt;</Text>
+                    <Text style={styles.buttonText}>
+                      &gt;&gt; ENTER THE FIELD &lt;&lt;
+                    </Text>
                   )}
-                </TouchableOpacity>
+                </Pressable>
               </Animated.View>
 
-              {/* Registration Link */}
-              <TouchableOpacity
+              <Pressable
                 onPress={onNavigateSignUp}
                 disabled={isLoading}
-                style={styles.linkContainer}
-                accessible={true}
-                accessibilityRole="button"
-                accessibilityLabel="Register New Explorer"
-                accessibilityHint="Navigates to the sign up screen"
+                hitSlop={4}
+                style={({ pressed }) => [
+                  styles.linkContainer,
+                  pressed && styles.controlPressed,
+                ]}
+                accessibilityRole="link"
+                accessibilityLabel="Register a new Explorer account"
+                accessibilityHint="Opens the Treasi sign up screen."
+                accessibilityState={{ disabled: isLoading }}
               >
-                <Text style={styles.linkText}>NEW EXPEDITION? SIGN UP HERE</Text>
-              </TouchableOpacity>
-
+                <Text style={styles.linkText}>
+                  NEW EXPEDITION? SIGN UP HERE
+                </Text>
+              </Pressable>
             </View>
           </Animated.View>
 
-          {/* RIGHT PANEL (40% Width in Landscape): TACTICAL CONTROL & SENSOR CONSOLE */}
           <Animated.View
-            entering={FadeInRight.duration(500).delay(100)}
+            entering={
+              reduceMotionEnabled
+                ? undefined
+                : FadeInRight.duration(350).delay(80)
+            }
             style={[
-              styles.consoleCard, 
-              { flex: isLandscape ? 0.4 : 1 }
+              styles.consoleCard,
+              isLandscape ? styles.rightLandscape : styles.fullWidthCard,
             ]}
           >
-            {/* Guidance Section */}
-            <Text style={styles.consoleSectionTitle}>★ BEFORE YOU HEAD OUT</Text>
-            
+            <Text accessibilityRole="header" style={styles.consoleSectionTitle}>
+              ★ BEFORE YOU HEAD OUT
+            </Text>
+
             <View style={styles.widgetBox}>
-              <RotateCw size={22} color="#B08D57" style={styles.widgetIcon} />
+              {renderDecorativeIcon(
+                <RotateCw
+                  size={24}
+                  stroke={COLOURS.bronze500}
+                  strokeWidth={2.15}
+                />,
+              )}
               <View style={styles.flexShrinkContainer}>
                 <Text style={styles.widgetTitle}>ROTATE DEVICE</Text>
-                <Text style={styles.widgetSubtitle}>TO BEGIN</Text>
+                <Text style={styles.widgetSubtitle}>
+                  Landscape mode is required for the field interface.
+                </Text>
               </View>
             </View>
 
-            {/* Pre-flight Sensor Toggles Section */}
-            <Text style={[styles.consoleSectionTitle, styles.topMarginSection]}>
-              ★ INITIALIZE TELEMETRY
+            <Text
+              accessibilityRole="header"
+              style={[styles.consoleSectionTitle, styles.topMarginSection]}
+            >
+              ★ INITIALISE TELEMETRY
             </Text>
 
             <View style={styles.toggleList}>
-              {/* GPS Sensor Toggle */}
               <View style={styles.toggleRow}>
                 <View style={styles.toggleLabelGroup}>
-                  <MapPin size={16} color="#B08D57" />
-                  <Text style={styles.toggleText}>GPS TELEMETRY</Text>
+                  {renderDecorativeIcon(
+                    <MapPin
+                      size={18}
+                      stroke={COLOURS.bronze500}
+                      strokeWidth={2.1}
+                    />,
+                  )}
+                  <View style={styles.toggleTextGroup}>
+                    <Text style={styles.toggleText}>GPS TELEMETRY</Text>
+                    <Text style={styles.toggleDescription}>
+                      Save GPS as your preferred field sensor.
+                    </Text>
+                  </View>
                 </View>
                 <Switch
                   value={gpsEnabled}
                   onValueChange={setGpsEnabled}
                   disabled={isLoading}
-                  trackColor={{ false: '#1A231B', true: '#A64B2A' }}
-                  thumbColor={gpsEnabled ? '#E8DCC0' : '#B08D57'}
-                  accessible={true}
-                  accessibilityRole="switch"
-                  accessibilityLabel="Enable GPS Telemetry"
-                  accessibilityState={{ checked: gpsEnabled }}
-                  style={styles.switchTarget}
+                  trackColor={{
+                    false: COLOURS.forest700,
+                    true: COLOURS.rust600,
+                  }}
+                  thumbColor={COLOURS.parchment100}
+                  ios_backgroundColor={COLOURS.forest700}
+                  accessibilityLabel="GPS telemetry preference"
+                  accessibilityHint="Turns your saved GPS preference on or off."
+                  accessibilityState={{
+                    checked: gpsEnabled,
+                    disabled: isLoading,
+                  }}
                 />
               </View>
 
-              {/* Compass Haptics Toggle */}
               <View style={styles.toggleRow}>
                 <View style={styles.toggleLabelGroup}>
-                  <Compass size={16} color="#B08D57" />
-                  <Text style={styles.toggleText}>COMPASS HAPTICS</Text>
+                  {renderDecorativeIcon(
+                    <Compass
+                      size={18}
+                      stroke={COLOURS.bronze500}
+                      strokeWidth={2.1}
+                    />,
+                  )}
+                  <View style={styles.toggleTextGroup}>
+                    <Text style={styles.toggleText}>COMPASS HAPTICS</Text>
+                    <Text style={styles.toggleDescription}>
+                      Save directional haptic feedback as a preference.
+                    </Text>
+                  </View>
                 </View>
                 <Switch
                   value={compassHapticsEnabled}
                   onValueChange={setCompassHapticsEnabled}
                   disabled={isLoading}
-                  trackColor={{ false: '#1A231B', true: '#A64B2A' }}
-                  thumbColor={compassHapticsEnabled ? '#E8DCC0' : '#B08D57'}
-                  accessible={true}
-                  accessibilityRole="switch"
-                  accessibilityLabel="Enable Compass Heading Haptic Pulses"
-                  accessibilityState={{ checked: compassHapticsEnabled }}
-                  style={styles.switchTarget}
+                  trackColor={{
+                    false: COLOURS.forest700,
+                    true: COLOURS.rust600,
+                  }}
+                  thumbColor={COLOURS.parchment100}
+                  ios_backgroundColor={COLOURS.forest700}
+                  accessibilityLabel="Compass haptics preference"
+                  accessibilityHint="Turns your saved compass haptics preference on or off."
+                  accessibilityState={{
+                    checked: compassHapticsEnabled,
+                    disabled: isLoading,
+                  }}
                 />
               </View>
 
-              {/* Motion Sense Toggle */}
               <View style={styles.toggleRow}>
                 <View style={styles.toggleLabelGroup}>
-                  <Activity size={16} color="#B08D57" />
-                  <Text style={styles.toggleText}>MOTION SENSE</Text>
+                  {renderDecorativeIcon(
+                    <Activity
+                      size={18}
+                      stroke={COLOURS.bronze500}
+                      strokeWidth={2.1}
+                    />,
+                  )}
+                  <View style={styles.toggleTextGroup}>
+                    <Text style={styles.toggleText}>MOTION SENSE</Text>
+                    <Text style={styles.toggleDescription}>
+                      Save accelerometer interaction as a preference.
+                    </Text>
+                  </View>
                 </View>
                 <Switch
                   value={motionEnabled}
                   onValueChange={setMotionEnabled}
                   disabled={isLoading}
-                  trackColor={{ false: '#1A231B', true: '#A64B2A' }}
-                  thumbColor={motionEnabled ? '#E8DCC0' : '#B08D57'}
-                  accessible={true}
-                  accessibilityRole="switch"
-                  accessibilityLabel="Enable Motion Sense Accelerometer"
-                  accessibilityState={{ checked: motionEnabled }}
-                  style={styles.switchTarget}
+                  trackColor={{
+                    false: COLOURS.forest700,
+                    true: COLOURS.rust600,
+                  }}
+                  thumbColor={COLOURS.parchment100}
+                  ios_backgroundColor={COLOURS.forest700}
+                  accessibilityLabel="Motion sense preference"
+                  accessibilityHint="Turns your saved motion sensor preference on or off."
+                  accessibilityState={{
+                    checked: motionEnabled,
+                    disabled: isLoading,
+                  }}
                 />
               </View>
 
-              {/* Night Mode Toggle */}
               <View style={styles.toggleRow}>
                 <View style={styles.toggleLabelGroup}>
-                  <Moon size={16} color="#B08D57" />
-                  <Text style={styles.toggleText}>NIGHT MODE</Text>
+                  {renderDecorativeIcon(
+                    <Moon
+                      size={18}
+                      stroke={COLOURS.bronze500}
+                      strokeWidth={2.1}
+                    />,
+                  )}
+                  <View style={styles.toggleTextGroup}>
+                    <Text style={styles.toggleText}>NIGHT MODE</Text>
+                    <Text style={styles.toggleDescription}>
+                      Save the darker field interface as a preference.
+                    </Text>
+                  </View>
                 </View>
                 <Switch
                   value={nightModeEnabled}
                   onValueChange={setNightModeEnabled}
                   disabled={isLoading}
-                  trackColor={{ false: '#1A231B', true: '#A64B2A' }}
-                  thumbColor={nightModeEnabled ? '#E8DCC0' : '#B08D57'}
-                  accessible={true}
-                  accessibilityRole="switch"
-                  accessibilityLabel="Enable Night Mode Interface"
-                  accessibilityState={{ checked: nightModeEnabled }}
-                  style={styles.switchTarget}
+                  trackColor={{
+                    false: COLOURS.forest700,
+                    true: COLOURS.rust600,
+                  }}
+                  thumbColor={COLOURS.parchment100}
+                  ios_backgroundColor={COLOURS.forest700}
+                  accessibilityLabel="Night mode preference"
+                  accessibilityHint="Turns your saved night mode preference on or off."
+                  accessibilityState={{
+                    checked: nightModeEnabled,
+                    disabled: isLoading,
+                  }}
                 />
               </View>
             </View>
           </Animated.View>
-
         </View>
       </ScrollView>
     </KeyboardAvoidingView>
@@ -458,9 +720,7 @@ export default LoginScreen;
 const styles = StyleSheet.create({
   fullScreenChassis: {
     flex: 1,
-    width: '100%',
-    height: '100%',
-    backgroundColor: '#1C261D',
+    backgroundColor: COLOURS.forest900,
   },
   scrollContainer: {
     flexGrow: 1,
@@ -470,239 +730,315 @@ const styles = StyleSheet.create({
   },
   layoutSplitWrapper: {
     width: '100%',
-    height: '100%',
-    gap: 12,
+    maxWidth: 1180,
+    gap: 16,
     alignItems: 'stretch',
     justifyContent: 'center',
+  },
+  leftLandscape: {
+    flex: 0.6,
+  },
+  rightLandscape: {
+    flex: 0.4,
+  },
+  fullWidthCard: {
+    width: '100%',
   },
   fullWidthContainer: {
     width: '100%',
   },
   flexShrinkContainer: {
     flex: 1,
+    minWidth: 0,
+  },
+  iconWrapper: {
+    flexShrink: 0,
   },
 
-  /* LEFT PANEL: PARCHMENT PERMIT CARD */
   parchmentCard: {
-    backgroundColor: '#E8DCC0',
-    borderRadius: 8,
+    backgroundColor: COLOURS.parchment200,
+    borderRadius: 12,
     borderWidth: 2,
-    borderColor: '#B08D57',
+    borderColor: COLOURS.bronze600,
     padding: 8,
-    shadowColor: '#000',
+    shadowColor: '#000000',
     shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.35,
-    shadowRadius: 6,
+    shadowOpacity: 0.28,
+    shadowRadius: 8,
     elevation: 6,
-    justifyContent: 'center',
   },
   dashedBorderFrame: {
-    borderWidth: 1.5,
-    borderColor: '#A64B2A',
-    borderStyle: 'dashed',
-    borderRadius: 6,
-    padding: 14,
-    alignItems: 'center',
-    justifyContent: 'space-between',
     flex: 1,
+    width: '100%',
+    borderWidth: 2,
+    borderColor: COLOURS.rust700,
+    borderStyle: 'dashed',
+    borderRadius: 8,
+    padding: 16,
+    justifyContent: 'center',
   },
   ticketHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
     width: '100%',
-    marginBottom: 8,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+    gap: 8,
+    marginBottom: 12,
   },
   ticketHeaderLabel: {
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-    fontSize: 10,
-    fontWeight: 'bold',
-    color: '#8C7350',
-    letterSpacing: 1,
+    fontFamily: Platform.OS === 'ios' ? 'Courier-Bold' : 'monospace',
+    fontSize: 12,
+    fontWeight: '700',
+    color: COLOURS.bronze600,
+    letterSpacing: 0.8,
   },
   brandHeader: {
     alignItems: 'center',
-    marginBottom: 12,
+    marginBottom: 18,
   },
   brandTitle: {
     fontFamily: Platform.OS === 'ios' ? 'Courier-Bold' : 'monospace',
-    fontSize: 32,
+    fontSize: 34,
     fontWeight: '900',
-    color: '#2A2420',
-    letterSpacing: 6,
+    color: COLOURS.ink900,
+    letterSpacing: 5,
+    textAlign: 'center',
   },
   brandSubtitle: {
+    marginTop: 4,
     fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-    fontSize: 11,
-    color: '#2A2420',
-    marginTop: 2,
+    fontSize: 14,
+    lineHeight: 20,
+    color: COLOURS.ink900,
     fontStyle: 'italic',
+    textAlign: 'center',
   },
 
-  /* DIAGNOSTIC ERROR BANNER */
   errorBox: {
+    width: '100%',
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#F3ECD8',
-    borderColor: '#A64B2A',
-    borderWidth: 1,
-    borderRadius: 4,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    marginBottom: 10,
-    gap: 8,
-    width: '100%',
+    gap: 10,
+    marginBottom: 14,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    backgroundColor: COLOURS.parchment100,
+    borderColor: COLOURS.rust700,
+    borderWidth: 2,
+    borderRadius: 6,
   },
   errorText: {
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-    color: '#A64B2A',
-    fontSize: 11,
     flex: 1,
+    fontFamily: Platform.OS === 'ios' ? 'Courier-Bold' : 'monospace',
+    color: COLOURS.rust700,
+    fontSize: 14,
+    lineHeight: 20,
+    fontWeight: '700',
   },
 
-  /* INPUT FIELDS */
   inputStack: {
     width: '100%',
-    gap: 8,
-    marginBottom: 12,
+    gap: 14,
+    marginBottom: 18,
+  },
+  fieldGroup: {
+    width: '100%',
+    gap: 6,
+  },
+  inputLabel: {
+    fontFamily: Platform.OS === 'ios' ? 'Courier-Bold' : 'monospace',
+    fontSize: 13,
+    fontWeight: '800',
+    letterSpacing: 1,
+    color: COLOURS.ink900,
   },
   inputContainer: {
+    width: '100%',
+    minHeight: 52,
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#F3ECD8',
-    borderWidth: 1,
-    borderColor: '#B08D57',
-    borderRadius: 4,
-    paddingHorizontal: 10,
-    height: 44,
+    gap: 10,
+    paddingLeft: 12,
+    paddingRight: 4,
+    paddingVertical: 4,
+    backgroundColor: COLOURS.parchment100,
+    borderWidth: 2,
+    borderColor: COLOURS.bronze600,
+    borderRadius: 6,
   },
-  inputIcon: {
-    marginRight: 8,
+  inputContainerFocused: {
+    borderColor: COLOURS.rust700,
+    shadowColor: COLOURS.rust700,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.18,
+    shadowRadius: 4,
+    elevation: 2,
   },
   textInput: {
     flex: 1,
-    fontFamily: Platform.OS === 'ios' ? 'Courier-Bold' : 'monospace',
-    fontSize: 12,
-    color: '#2A2420',
-    letterSpacing: 1,
+    minWidth: 0,
+    paddingVertical: 9,
+    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+    fontSize: 16,
+    lineHeight: 22,
+    color: COLOURS.ink900,
   },
   eyeButton: {
-    padding: 6,
-    minWidth: 44,
-    minHeight: 44,
+    minWidth: 48,
+    minHeight: 48,
     justifyContent: 'center',
     alignItems: 'center',
+    borderRadius: 6,
+  },
+  controlPressed: {
+    opacity: 0.68,
   },
 
-  /* ACTION BUTTONS */
   primaryButton: {
-    backgroundColor: '#A64B2A',
-    borderWidth: 1,
-    borderColor: '#2A2420',
-    paddingVertical: 12,
-    borderRadius: 4,
+    minHeight: 52,
+    width: '100%',
     alignItems: 'center',
     justifyContent: 'center',
-    minHeight: 48,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    backgroundColor: COLOURS.rust700,
+    borderWidth: 2,
+    borderColor: COLOURS.ink900,
+    borderRadius: 6,
+  },
+  primaryButtonPressed: {
+    backgroundColor: COLOURS.rust600,
   },
   buttonDisabled: {
-    opacity: 0.6,
+    opacity: 0.65,
+  },
+  loadingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
   },
   buttonText: {
     fontFamily: Platform.OS === 'ios' ? 'Courier-Bold' : 'monospace',
-    color: '#E8DCC0',
-    fontSize: 12,
-    fontWeight: 'bold',
-    letterSpacing: 1.5,
+    color: COLOURS.parchment200,
+    fontSize: 14,
+    lineHeight: 20,
+    fontWeight: '800',
+    letterSpacing: 1,
+    textAlign: 'center',
   },
   linkContainer: {
+    alignSelf: 'center',
+    minHeight: 48,
     marginTop: 8,
-    padding: 6,
-    minHeight: 44,
+    paddingHorizontal: 12,
     justifyContent: 'center',
     alignItems: 'center',
+    borderRadius: 6,
   },
   linkText: {
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-    color: '#2A2420',
-    fontSize: 10,
-    fontWeight: 'bold',
-    letterSpacing: 1,
+    fontFamily: Platform.OS === 'ios' ? 'Courier-Bold' : 'monospace',
+    color: COLOURS.ink900,
+    fontSize: 13,
+    lineHeight: 19,
+    fontWeight: '800',
+    letterSpacing: 0.7,
+    textAlign: 'center',
     textDecorationLine: 'underline',
   },
 
-  /* RIGHT PANEL: CONTROL CONSOLE */
   consoleCard: {
-    backgroundColor: '#2C3B2E',
-    borderRadius: 8,
+    backgroundColor: COLOURS.forest800,
+    borderRadius: 12,
     borderWidth: 2,
-    borderColor: '#B08D57',
-    padding: 14,
+    borderColor: COLOURS.bronze500,
+    padding: 16,
     justifyContent: 'center',
+    shadowColor: '#000000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.22,
+    shadowRadius: 8,
+    elevation: 5,
   },
   consoleSectionTitle: {
+    marginBottom: 8,
     fontFamily: Platform.OS === 'ios' ? 'Courier-Bold' : 'monospace',
-    fontSize: 10,
-    color: '#B08D57',
-    letterSpacing: 1.2,
-    marginBottom: 6,
+    fontSize: 13,
+    lineHeight: 19,
+    fontWeight: '800',
+    color: COLOURS.bronze500,
+    letterSpacing: 1,
   },
   topMarginSection: {
-    marginTop: 12,
+    marginTop: 18,
   },
   widgetBox: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#1C261D',
+    gap: 12,
+    minHeight: 64,
+    padding: 12,
+    backgroundColor: COLOURS.forest950,
     borderWidth: 1,
-    borderColor: '#B08D57',
-    borderRadius: 4,
-    padding: 10,
-    gap: 10,
-  },
-  widgetIcon: {
-    marginRight: 2,
+    borderColor: COLOURS.bronze500,
+    borderRadius: 6,
   },
   widgetTitle: {
     fontFamily: Platform.OS === 'ios' ? 'Courier-Bold' : 'monospace',
-    fontSize: 11,
-    color: '#E8DCC0',
-    letterSpacing: 1,
+    fontSize: 14,
+    lineHeight: 20,
+    fontWeight: '800',
+    color: COLOURS.parchment200,
+    letterSpacing: 0.8,
   },
   widgetSubtitle: {
+    marginTop: 2,
     fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-    fontSize: 9,
-    color: '#B08D57',
-    letterSpacing: 1,
+    fontSize: 12,
+    lineHeight: 18,
+    color: COLOURS.bronze500,
   },
 
-  /* TOGGLES */
   toggleList: {
-    gap: 6,
+    gap: 8,
   },
   toggleRow: {
+    minHeight: 60,
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    backgroundColor: '#1C261D',
+    gap: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    backgroundColor: COLOURS.forest950,
     borderWidth: 1,
-    borderColor: '#3D503F',
-    borderRadius: 4,
-    paddingHorizontal: 10,
-    paddingVertical: 2,
-    minHeight: 44,
+    borderColor: COLOURS.forest700,
+    borderRadius: 6,
   },
   toggleLabelGroup: {
+    flex: 1,
+    minWidth: 0,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    gap: 10,
+  },
+  toggleTextGroup: {
+    flex: 1,
+    minWidth: 0,
   },
   toggleText: {
     fontFamily: Platform.OS === 'ios' ? 'Courier-Bold' : 'monospace',
-    fontSize: 10,
-    color: '#E8DCC0',
-    letterSpacing: 1,
+    fontSize: 13,
+    lineHeight: 19,
+    fontWeight: '800',
+    color: COLOURS.parchment200,
+    letterSpacing: 0.6,
   },
-  switchTarget: {
-    transform: Platform.OS === 'ios' ? [{ scaleX: 0.8 }, { scaleY: 0.8 }] : [],
+  toggleDescription: {
+    marginTop: 2,
+    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+    fontSize: 11,
+    lineHeight: 16,
+    color: COLOURS.bronze500,
   },
 });
