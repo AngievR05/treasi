@@ -1,472 +1,1167 @@
-import React, { useState, useEffect, useRef, Suspense, lazy } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
+import {
+  Alert,
+  Animated,
+  Easing,
+  StyleSheet,
+  Text,
+  useWindowDimensions,
+  View,
+} from 'react-native';
+
 import { StatusBar } from 'expo-status-bar';
-import { StyleSheet, Text, View, useWindowDimensions, Animated, Easing, Alert } from 'react-native';
-import { SafeAreaProvider, initialWindowMetrics } from 'react-native-safe-area-context';
-import { onAuthStateChanged, User } from 'firebase/auth';
-import { doc, getDoc } from 'firebase/firestore';
+import {
+  SafeAreaProvider,
+  initialWindowMetrics,
+} from 'react-native-safe-area-context';
+
 import AsyncStorage from '@react-native-async-storage/async-storage';
+
+import {
+  onAuthStateChanged,
+  signOut,
+  User,
+} from 'firebase/auth';
+
+import {
+  doc,
+  getDoc,
+} from 'firebase/firestore';
+
 import { auth, db } from './src/config/firebase';
 
-// Lazy-loaded screen components for optimized performance
-const SplashScreen = lazy(() => 
-  import('./src/screens/SplashScreen').then((module) => ({ default: module.SplashScreen }))
-);
-const OnboardingScreen = lazy(() => 
-  import('./src/screens/OnboardingScreen').then((module) => ({ default: module.OnboardingScreen }))
-);
-const LoginScreen = lazy(() => 
-  import('./src/screens/Auth/LoginScreen').then((module) => ({ default: module.default }))
-);
-const SignUpScreen = lazy(() => 
-  import('./src/screens/Auth/SignUpScreen').then((module) => ({ default: module.SignUpScreen }))
-);
-const DashboardScreen = lazy(() => 
-  import('./src/screens/DashboardScreen').then((module) => ({ default: module.DashboardScreen }))
-);
-const HuntScreen = lazy(() => 
-  import('./src/screens/HuntScreen').then((module) => ({ default: module.HuntScreen }))
-);
-const LeaderboardScreen = lazy(() => 
-  import('./src/screens/LeaderboardScreen').then((module) => ({ default: module.LeaderboardScreen }))
-);
-const InventoryScreen = lazy(() => 
-  import('./src/screens/InventoryScreen').then((module) => ({ default: module.InventoryScreen }))
-);
-const ProfileSettingsScreen = lazy(() => 
-  import('./src/screens/ProfileSettingsScreen').then((module) => ({ default: module.ProfileSettingsScreen }))
-);
+/* -------------------------------------------------------------------------- */
+/* Screens                                                                    */
+/* -------------------------------------------------------------------------- */
 
-export type ScreenState = 
-  | 'SPLASH' 
-  | 'ONBOARDING' 
-  | 'LOGIN' 
-  | 'SIGNUP' 
-  | 'DASHBOARD' 
-  | 'HUNT' 
-  | 'LEADERBOARD' 
-  | 'INVENTORY' 
+import { SplashScreen } from './src/screens/SplashScreen';
+import { OnboardingScreen } from './src/screens/OnboardingScreen';
+
+import LoginScreen from './src/screens/Auth/LoginScreen';
+import { SignUpScreen } from './src/screens/Auth/SignUpScreen';
+
+import { DashboardScreen } from './src/screens/DashboardScreen';
+import { HuntScreen } from './src/screens/HuntScreen';
+import { LeaderboardScreen } from './src/screens/LeaderboardScreen';
+import { SocialScreen } from './src/screens/SocialScreen';
+import { InventoryScreen } from './src/screens/InventoryScreen';
+import { ProfileSettingsScreen } from './src/screens/ProfileSettingsScreen';
+
+/* -------------------------------------------------------------------------- */
+/* Navigation Types                                                           */
+/* -------------------------------------------------------------------------- */
+
+export type ScreenState =
+  | 'SPLASH'
+  | 'ONBOARDING'
+  | 'LOGIN'
+  | 'SIGNUP'
+  | 'DASHBOARD'
+  | 'HUNT'
+  | 'LEADERBOARD'
+  | 'SOCIAL'
+  | 'INVENTORY'
   | 'PROFILE';
 
-/**
- * Navigation Parameter Interface
- * Strongly typed parameter structure passed across application screen transitions.
- */
 export interface NavigationParams {
   treasureId?: string;
   mode?: 'hunt' | 'create';
+
   latitude?: number;
   longitude?: number;
+
   [key: string]: unknown;
 }
 
-/**
- * AnimatedScreenWrapper
- * Micro-interaction screen transitions (fade + tactile scale)
- */
+/* -------------------------------------------------------------------------- */
+/* Constants                                                                  */
+/* -------------------------------------------------------------------------- */
+
+const ONBOARDING_STORAGE_KEY =
+  '@treasi_onboarding_completed';
+
+const PROTECTED_SCREENS: ScreenState[] = [
+  'DASHBOARD',
+  'HUNT',
+  'LEADERBOARD',
+  'SOCIAL',
+  'INVENTORY',
+  'PROFILE',
+];
+
+/* -------------------------------------------------------------------------- */
+/* Helpers                                                                    */
+/* -------------------------------------------------------------------------- */
+
+const readLocalOnboardingState =
+  async (): Promise<boolean> => {
+    try {
+      const storedValue =
+        await AsyncStorage.getItem(
+          ONBOARDING_STORAGE_KEY,
+        );
+
+      return storedValue === 'true';
+    } catch (error) {
+      console.warn(
+        '[Treasi] Unable to read onboarding state:',
+        error,
+      );
+
+      return false;
+    }
+  };
+
+const hasValidCoordinates = (
+  latitude: unknown,
+  longitude: unknown,
+): latitude is number => {
+  return (
+    typeof latitude === 'number' &&
+    typeof longitude === 'number' &&
+    Number.isFinite(latitude) &&
+    Number.isFinite(longitude) &&
+    latitude >= -90 &&
+    latitude <= 90 &&
+    longitude >= -180 &&
+    longitude <= 180
+  );
+};
+
+/* -------------------------------------------------------------------------- */
+/* Animated Screen Wrapper                                                    */
+/* -------------------------------------------------------------------------- */
+
 interface AnimatedScreenWrapperProps {
   children: React.ReactNode;
-  screenKey: string;
+  screenKey: ScreenState;
 }
 
-function AnimatedScreenWrapper({ children, screenKey }: AnimatedScreenWrapperProps) {
-  const fadeAnim = useRef(new Animated.Value(0)).current;
-  const scaleAnim = useRef(new Animated.Value(0.97)).current;
+const AnimatedScreenWrapper: React.FC<
+  AnimatedScreenWrapperProps
+> = ({
+  children,
+  screenKey,
+}) => {
+  const fadeAnim = useRef(
+    new Animated.Value(0),
+  ).current;
+
+  const scaleAnim = useRef(
+    new Animated.Value(0.985),
+  ).current;
 
   useEffect(() => {
-    fadeAnim.setValue(0);
-    scaleAnim.setValue(0.97);
+    fadeAnim.stopAnimation();
+    scaleAnim.stopAnimation();
 
-    Animated.parallel([
+    fadeAnim.setValue(0);
+    scaleAnim.setValue(0.985);
+
+    const animation = Animated.parallel([
       Animated.timing(fadeAnim, {
         toValue: 1,
-        duration: 350,
-        easing: Easing.out(Easing.cubic),
+        duration: 220,
+        easing: Easing.out(
+          Easing.cubic,
+        ),
         useNativeDriver: true,
       }),
+
       Animated.timing(scaleAnim, {
         toValue: 1,
-        duration: 350,
-        easing: Easing.out(Easing.back(1.2)),
+        duration: 220,
+        easing: Easing.out(
+          Easing.cubic,
+        ),
         useNativeDriver: true,
       }),
-    ]).start();
-  }, [screenKey, fadeAnim, scaleAnim]);
+    ]);
+
+    animation.start();
+
+    return () => {
+      animation.stop();
+    };
+  }, [
+    screenKey,
+    fadeAnim,
+    scaleAnim,
+  ]);
 
   return (
-    <Animated.View 
+    <Animated.View
       style={[
-        styles.animatedWrapper, 
-        { opacity: fadeAnim, transform: [{ scale: scaleAnim }] }
+        styles.animatedWrapper,
+        {
+          opacity: fadeAnim,
+          transform: [
+            {
+              scale: scaleAnim,
+            },
+          ],
+        },
       ]}
     >
       {children}
     </Animated.View>
   );
-}
+};
 
-function MainNavigator() {
-  const { width, height } = useWindowDimensions();
-  const isLandscape = width > height;
+/* -------------------------------------------------------------------------- */
+/* Main Navigator                                                             */
+/* -------------------------------------------------------------------------- */
 
-  // Active Navigation & Parameter State
-  const [currentScreen, setCurrentScreen] = useState<ScreenState>('SPLASH');
-  const [navigationParams, setNavigationParams] = useState<NavigationParams>({});
-  const [selectedTreasureId, setSelectedTreasureId] = useState<string | undefined>(undefined);
+const MainNavigator: React.FC = () => {
+  const {
+    width,
+    height,
+  } = useWindowDimensions();
 
-  // Synchronization & Auth State Flags
-  const [isSplashFinished, setIsSplashFinished] = useState<boolean>(false);
-  const [isAuthResolved, setIsAuthResolved] = useState<boolean>(false);
-  const [currentUser, setCurrentUser] = useState<User | null>(null);
-  const [hasCompletedOnboarding, setHasCompletedOnboarding] = useState<boolean>(false);
-  const [isInitialBootDone, setIsInitialBootDone] = useState<boolean>(false);
+  const isLandscape =
+    width > height;
 
-  // 1. Listen for Firebase Auth state changes & check Firestore onboarding state
+  /* ---------------------------------------------------------------------- */
+  /* Screen state                                                           */
+  /* ---------------------------------------------------------------------- */
+
+  const [
+    currentScreen,
+    setCurrentScreen,
+  ] =
+    useState<ScreenState>(
+      'SPLASH',
+    );
+
+  const [
+    navigationParams,
+    setNavigationParams,
+  ] =
+    useState<NavigationParams>(
+      {},
+    );
+
+  const [
+    selectedTreasureId,
+    setSelectedTreasureId,
+  ] =
+    useState<
+      string | undefined
+    >(undefined);
+
+  /* ---------------------------------------------------------------------- */
+  /* Startup state                                                          */
+  /* ---------------------------------------------------------------------- */
+
+  const [
+    isSplashFinished,
+    setIsSplashFinished,
+  ] =
+    useState(false);
+
+  const [
+    isAuthResolved,
+    setIsAuthResolved,
+  ] =
+    useState(false);
+
+  const [
+    currentUser,
+    setCurrentUser,
+  ] =
+    useState<User | null>(
+      null,
+    );
+
+  const [
+    hasCompletedOnboarding,
+    setHasCompletedOnboarding,
+  ] =
+    useState(false);
+
+  const [
+    isInitialBootDone,
+    setIsInitialBootDone,
+  ] =
+    useState(false);
+
+  /* ---------------------------------------------------------------------- */
+  /* Authentication listener                                                */
+  /* ---------------------------------------------------------------------- */
+
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (user) => {
-      if (user) {
-        setCurrentUser(user);
-        try {
-          const userDocRef = doc(db, 'users', user.uid);
-          const userSnap = await getDoc(userDocRef);
-          if (userSnap.exists()) {
-            const data = userSnap.data();
-            setHasCompletedOnboarding(data?.hasCompletedOnboarding ?? false);
-          } else {
-            const localOnboarding = await AsyncStorage.getItem('@treasi_onboarding_completed');
-            setHasCompletedOnboarding(localOnboarding === 'true');
-          }
-        } catch (error) {
-          const localOnboarding = await AsyncStorage.getItem('@treasi_onboarding_completed');
-          setHasCompletedOnboarding(localOnboarding === 'true');
-        }
-      } else {
-        setCurrentUser(null);
-        const localOnboarding = await AsyncStorage.getItem('@treasi_onboarding_completed');
-        setHasCompletedOnboarding(localOnboarding === 'true');
-      }
-      setIsAuthResolved(true);
-    });
+    let mounted = true;
 
-    return () => unsubscribe();
+    const unsubscribe =
+      onAuthStateChanged(
+        auth,
+        async (user) => {
+          try {
+            if (!mounted) {
+              return;
+            }
+
+            setCurrentUser(
+              user ?? null,
+            );
+
+            let onboardingComplete =
+              false;
+
+            if (user) {
+              try {
+                const userDocumentRef =
+                  doc(
+                    db,
+                    'users',
+                    user.uid,
+                  );
+
+                const userSnapshot =
+                  await getDoc(
+                    userDocumentRef,
+                  );
+
+                if (!mounted) {
+                  return;
+                }
+
+                if (
+                  userSnapshot.exists()
+                ) {
+                  const data =
+                    userSnapshot.data();
+
+                  onboardingComplete =
+                    data
+                      ?.hasCompletedOnboarding ===
+                    true;
+                } else {
+                  onboardingComplete =
+                    await readLocalOnboardingState();
+                }
+              } catch (error) {
+                console.warn(
+                  '[Treasi] Unable to read user profile:',
+                  error,
+                );
+
+                onboardingComplete =
+                  await readLocalOnboardingState();
+              }
+            } else {
+              onboardingComplete =
+                await readLocalOnboardingState();
+            }
+
+            if (!mounted) {
+              return;
+            }
+
+            setHasCompletedOnboarding(
+              onboardingComplete,
+            );
+          } catch (error) {
+            console.error(
+              '[Treasi] Authentication resolver failed:',
+              error,
+            );
+
+            if (mounted) {
+              setCurrentUser(
+                null,
+              );
+            }
+          } finally {
+            if (mounted) {
+              setIsAuthResolved(
+                true,
+              );
+            }
+          }
+        },
+        (error) => {
+          console.error(
+            '[Treasi] Firebase auth listener failed:',
+            error,
+          );
+
+          if (mounted) {
+            setCurrentUser(null);
+            setIsAuthResolved(
+              true,
+            );
+          }
+        },
+      );
+
+    return () => {
+      mounted = false;
+      unsubscribe();
+    };
   }, []);
 
-  // 2. Synchronized Startup Routing Resolver (Waits for both Splash finish and Auth resolution)
+  /* ---------------------------------------------------------------------- */
+  /* Initial startup routing                                                */
+  /* ---------------------------------------------------------------------- */
+
   useEffect(() => {
-    if (!isInitialBootDone && isSplashFinished && isAuthResolved) {
-      setIsInitialBootDone(true);
-      if (currentUser) {
-        if (hasCompletedOnboarding) {
-          setCurrentScreen('DASHBOARD');
-        } else {
-          setCurrentScreen('ONBOARDING');
-        }
-      } else {
-        if (hasCompletedOnboarding) {
-          setCurrentScreen('LOGIN');
-        } else {
-          setCurrentScreen('ONBOARDING');
-        }
-      }
+    if (
+      isInitialBootDone ||
+      !isSplashFinished ||
+      !isAuthResolved
+    ) {
+      return;
     }
-  }, [isSplashFinished, isAuthResolved, currentUser, hasCompletedOnboarding, isInitialBootDone]);
 
-  // 3. Dynamic Guard for Mid-session Auth Changes (e.g. Sign out)
+    setIsInitialBootDone(
+      true,
+    );
+
+    if (currentUser) {
+      setCurrentScreen(
+        hasCompletedOnboarding
+          ? 'DASHBOARD'
+          : 'ONBOARDING',
+      );
+
+      return;
+    }
+
+    setCurrentScreen(
+      hasCompletedOnboarding
+        ? 'LOGIN'
+        : 'ONBOARDING',
+    );
+  }, [
+    currentUser,
+    hasCompletedOnboarding,
+    isAuthResolved,
+    isInitialBootDone,
+    isSplashFinished,
+  ]);
+
+  /* ---------------------------------------------------------------------- */
+  /* Protected screen auth guard                                            */
+  /* ---------------------------------------------------------------------- */
+
   useEffect(() => {
-    if (isInitialBootDone) {
-      if (!currentUser && ['DASHBOARD', 'HUNT', 'LEADERBOARD', 'INVENTORY', 'PROFILE'].includes(currentScreen)) {
-        setCurrentScreen('LOGIN');
-      }
-    }
-  }, [currentUser, isInitialBootDone, currentScreen]);
-
-  /**
-   * Central Navigation Controller
-   * Handles target mapping, alias translation, parameter preservation,
-   * target validation for Hunt mode, and stale parameter isolation.
-   */
-  const handleNavigate = (target: string, params?: NavigationParams) => {
-    const normalizedTarget = (target || '').toUpperCase().trim();
-
-    // Map bottom navigation & system aliases to core ScreenState targets
-    let targetScreen: ScreenState;
-    if (normalizedTarget === 'MAP' || normalizedTarget === 'DASHBOARD') {
-      targetScreen = 'DASHBOARD';
-    } else if (normalizedTarget === 'RANKS' || normalizedTarget === 'LEADERBOARD') {
-      targetScreen = 'LEADERBOARD';
-    } else if (normalizedTarget === 'BAG' || normalizedTarget === 'INVENTORY') {
-      targetScreen = 'INVENTORY';
-    } else if (normalizedTarget === 'HUNT') {
-      targetScreen = 'HUNT';
-    } else if (normalizedTarget === 'PROFILE') {
-      targetScreen = 'PROFILE';
-    } else if (normalizedTarget === 'LOGIN') {
-      targetScreen = 'LOGIN';
-    } else if (normalizedTarget === 'SIGNUP') {
-      targetScreen = 'SIGNUP';
-    } else if (normalizedTarget === 'ONBOARDING') {
-      targetScreen = 'ONBOARDING';
-    } else if (normalizedTarget === 'SPLASH') {
-      targetScreen = 'SPLASH';
-    } else {
-      targetScreen = 'DASHBOARD';
+    if (
+      !isInitialBootDone ||
+      !isAuthResolved
+    ) {
+      return;
     }
 
-    // HUNT Screen Parameter Guard
-    if (targetScreen === 'HUNT') {
-      const activeTreasureId = params?.treasureId || selectedTreasureId;
-      if (!activeTreasureId) {
+    if (
+      !currentUser &&
+      PROTECTED_SCREENS.includes(
+        currentScreen,
+      )
+    ) {
+      setNavigationParams(
+        {},
+      );
+
+      setSelectedTreasureId(
+        undefined,
+      );
+
+      setCurrentScreen(
+        'LOGIN',
+      );
+    }
+  }, [
+    currentScreen,
+    currentUser,
+    isAuthResolved,
+    isInitialBootDone,
+  ]);
+
+  /* ---------------------------------------------------------------------- */
+  /* Navigation                                                             */
+  /* ---------------------------------------------------------------------- */
+
+  const handleNavigate = (
+    target: string,
+    params?: NavigationParams,
+  ) => {
+    const normalizedTarget =
+      String(target ?? '')
+        .trim()
+        .toUpperCase();
+
+    let targetScreen:
+      ScreenState;
+
+    switch (
+      normalizedTarget
+    ) {
+      case 'MAP':
+      case 'DASHBOARD':
+      case 'HOME':
+        targetScreen =
+          'DASHBOARD';
+        break;
+
+      case 'HUNT':
+        targetScreen =
+          'HUNT';
+        break;
+
+      case 'RANKS':
+      case 'RANK':
+      case 'LEADERBOARD':
+        targetScreen =
+          'LEADERBOARD';
+        break;
+
+      /*
+       * Social aliases.
+       *
+       * Leaderboard's ADD FRIEND and DISPATCH TELEGRAM
+       * buttons can both call:
+       *
+       * onNavigate('SOCIAL')
+       */
+      case 'SOCIAL':
+      case 'FRIENDS':
+      case 'FRIEND':
+      case 'TELEGRAM':
+      case 'COMMUNITY':
+      case 'COMMS':
+        targetScreen =
+          'SOCIAL';
+        break;
+
+      case 'BAG':
+      case 'INVENTORY':
+        targetScreen =
+          'INVENTORY';
+        break;
+
+      case 'PROFILE':
+      case 'SETTINGS':
+        targetScreen =
+          'PROFILE';
+        break;
+
+      case 'LOGIN':
+        targetScreen =
+          'LOGIN';
+        break;
+
+      case 'SIGNUP':
+      case 'REGISTER':
+        targetScreen =
+          'SIGNUP';
+        break;
+
+      case 'ONBOARDING':
+        targetScreen =
+          'ONBOARDING';
+        break;
+
+      case 'SPLASH':
+        targetScreen =
+          'SPLASH';
+        break;
+
+      default:
+        console.warn(
+          `[Treasi] Unknown route "${target}". Falling back to DASHBOARD.`,
+        );
+
+        targetScreen =
+          'DASHBOARD';
+        break;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Authentication guard                                               */
+    /* ------------------------------------------------------------------ */
+
+    if (
+      PROTECTED_SCREENS.includes(
+        targetScreen,
+      ) &&
+      !currentUser
+    ) {
+      setNavigationParams(
+        {},
+      );
+
+      setCurrentScreen(
+        'LOGIN',
+      );
+
+      return;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Hunt route                                                         */
+    /* ------------------------------------------------------------------ */
+
+    if (
+      targetScreen ===
+      'HUNT'
+    ) {
+      const requestedTreasureId =
+        typeof params
+          ?.treasureId ===
+        'string'
+          ? params.treasureId
+          : undefined;
+
+      const activeTreasureId =
+        requestedTreasureId ||
+        selectedTreasureId;
+
+      if (
+        !activeTreasureId
+      ) {
         Alert.alert(
           'NO ACTIVE TARGET',
-          'Select a treasure from the field map before entering Hunt mode.'
+          'Select a treasure from the field map before entering Hunt mode.',
         );
+
         return;
       }
 
-      // Preserve active target in memory and set screen parameters
-      setSelectedTreasureId(activeTreasureId);
+      setSelectedTreasureId(
+        activeTreasureId,
+      );
+
       setNavigationParams({
         ...params,
-        treasureId: activeTreasureId,
+        treasureId:
+          activeTreasureId,
       });
-      setCurrentScreen('HUNT');
+
+      setCurrentScreen(
+        'HUNT',
+      );
+
       return;
     }
 
-    // INVENTORY Screen Parameter Handling
-    if (targetScreen === 'INVENTORY') {
-      if (params && params.mode === 'create') {
+    /* ------------------------------------------------------------------ */
+    /* Inventory create route                                             */
+    /* ------------------------------------------------------------------ */
+
+    if (
+      targetScreen ===
+      'INVENTORY'
+    ) {
+      if (
+        params?.mode ===
+        'create'
+      ) {
         setNavigationParams({
           mode: 'create',
-          latitude: params.latitude,
-          longitude: params.longitude,
-          treasureId: params.treasureId,
+
+          latitude:
+            typeof params.latitude ===
+            'number'
+              ? params.latitude
+              : undefined,
+
+          longitude:
+            typeof params.longitude ===
+            'number'
+              ? params.longitude
+              : undefined,
+
+          treasureId:
+            typeof params.treasureId ===
+            'string'
+              ? params.treasureId
+              : undefined,
         });
       } else {
-        // Clear stale creation/GPS state when accessing standard Inventory view
-        setNavigationParams({});
+        setNavigationParams(
+          {},
+        );
       }
-      setCurrentScreen('INVENTORY');
+
+      setCurrentScreen(
+        'INVENTORY',
+      );
+
       return;
     }
 
-    // Standard Transitions: Clear route-specific parameters to avoid leakage
-    setNavigationParams({});
-    setCurrentScreen(targetScreen);
-  };
+    /* ------------------------------------------------------------------ */
+    /* Social route                                                       */
+    /* ------------------------------------------------------------------ */
 
-  /**
-   * Universal Back Callback
-   * Navigates back to Dashboard while resetting temporary screen parameters.
-   */
-  const handleBackToDashboard = () => {
-    setNavigationParams({});
-    setCurrentScreen('DASHBOARD');
-  };
+    if (
+      targetScreen ===
+      'SOCIAL'
+    ) {
+      /*
+       * Preserve coordinates if a caller provides them.
+       * SocialScreen may use these for nearby-agent distance.
+       */
+      if (
+        hasValidCoordinates(
+          params?.latitude,
+          params?.longitude,
+        )
+      ) {
+        setNavigationParams({
+          latitude:
+            params?.latitude,
+          longitude:
+            params?.longitude,
+        });
+      } else {
+        setNavigationParams(
+          {},
+        );
+      }
 
-  const renderActiveScreen = () => {
-    const renderWithSuspense = (element: React.ReactNode) => (
-      <Suspense 
-        fallback={
-          <View style={styles.loadingState}>
-            <Text style={styles.loadingPrefix}>Loading...</Text>
-            <Text style={styles.loadingText}>Please Wait</Text>
-          </View>
-        }
-      >
-        <AnimatedScreenWrapper screenKey={currentScreen}>
-          {element}
-        </AnimatedScreenWrapper>
-      </Suspense>
+      setCurrentScreen(
+        'SOCIAL',
+      );
+
+      return;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Standard navigation                                                */
+    /* ------------------------------------------------------------------ */
+
+    setNavigationParams(
+      {},
     );
 
-    switch (currentScreen) {
-      case 'SPLASH':
-        return renderWithSuspense(
-          <SplashScreen onFinish={() => setIsSplashFinished(true)} />
-        );
-
-      case 'ONBOARDING':
-        return renderWithSuspense(
-          <OnboardingScreen 
-            onComplete={async () => {
-              await AsyncStorage.setItem('@treasi_onboarding_completed', 'true');
-              setHasCompletedOnboarding(true);
-              setNavigationParams({});
-              if (auth.currentUser) {
-                setCurrentScreen('DASHBOARD');
-              } else {
-                setCurrentScreen('LOGIN');
-              }
-            }} 
-          />
-        );
-
-      case 'LOGIN':
-        return renderWithSuspense(
-          <LoginScreen 
-            onNavigateSignUp={() => {
-              setNavigationParams({});
-              setCurrentScreen('SIGNUP');
-            }} 
-            onLoginSuccess={() => {
-              setNavigationParams({});
-              setCurrentScreen('DASHBOARD');
-            }} 
-          />
-        );
-
-      case 'SIGNUP':
-        return renderWithSuspense(
-          <SignUpScreen 
-            onNavigateLogin={() => {
-              setNavigationParams({});
-              setCurrentScreen('LOGIN');
-            }} 
-            onSignUpSuccess={() => {
-              setNavigationParams({});
-              setCurrentScreen('DASHBOARD');
-            }} 
-          />
-        );
-
-      case 'DASHBOARD':
-        return renderWithSuspense(
-          <DashboardScreen onNavigate={handleNavigate} />
-        );
-
-      case 'HUNT':
-        return renderWithSuspense(
-          <HuntScreen 
-            treasureId={navigationParams.treasureId || selectedTreasureId} 
-            onBack={handleBackToDashboard} 
-          />
-        );
-
-      case 'LEADERBOARD':
-        return renderWithSuspense(
-          <LeaderboardScreen
-            onBack={handleBackToDashboard}
-            onNavigate={handleNavigate}
-          />
-        );
-
-      case 'INVENTORY':
-        return renderWithSuspense(
-          <InventoryScreen
-            initialParams={navigationParams}
-            onBack={handleBackToDashboard}
-            onNavigate={handleNavigate}
-          />
-        );
-
-      case 'PROFILE':
-        return renderWithSuspense(
-          <ProfileSettingsScreen 
-            onBack={handleBackToDashboard} 
-            onSignOut={async () => {
-              await auth.signOut();
-              setSelectedTreasureId(undefined);
-              setNavigationParams({});
-              setCurrentScreen('LOGIN');
-            }} 
-          />
-        );
-
-      default:
-        return renderWithSuspense(
-          <DashboardScreen onNavigate={handleNavigate} />
-        );
-    }
+    setCurrentScreen(
+      targetScreen,
+    );
   };
 
+  /* ---------------------------------------------------------------------- */
+  /* Back                                                                  */
+  /* ---------------------------------------------------------------------- */
+
+  const handleBackToDashboard =
+    () => {
+      setNavigationParams(
+        {},
+      );
+
+      setCurrentScreen(
+        'DASHBOARD',
+      );
+    };
+
+  /* ---------------------------------------------------------------------- */
+  /* Logout                                                                */
+  /* ---------------------------------------------------------------------- */
+
+  const handleSignOut =
+    async () => {
+      try {
+        await signOut(auth);
+
+        setCurrentUser(
+          null,
+        );
+
+        setSelectedTreasureId(
+          undefined,
+        );
+
+        setNavigationParams(
+          {},
+        );
+
+        setCurrentScreen(
+          'LOGIN',
+        );
+      } catch (error) {
+        console.error(
+          '[Treasi] Sign out failed:',
+          error,
+        );
+
+        Alert.alert(
+          'SIGN OUT FAILED',
+          'Unable to end the current explorer session. Please try again.',
+        );
+      }
+    };
+
+  /* ---------------------------------------------------------------------- */
+  /* Social coordinates                                                    */
+  /* ---------------------------------------------------------------------- */
+
+  const socialCoordinates =
+    hasValidCoordinates(
+      navigationParams.latitude,
+      navigationParams.longitude,
+    )
+      ? {
+          latitude:
+            navigationParams.latitude,
+          longitude:
+            navigationParams.longitude as number,
+        }
+      : null;
+
+  /* ---------------------------------------------------------------------- */
+  /* Screen rendering                                                      */
+  /* ---------------------------------------------------------------------- */
+
+  const renderActiveScreen =
+    () => {
+      let screen:
+        React.ReactNode;
+
+      switch (
+        currentScreen
+      ) {
+        case 'SPLASH':
+          screen = (
+            <SplashScreen
+              onFinish={() =>
+                setIsSplashFinished(
+                  true,
+                )
+              }
+            />
+          );
+          break;
+
+        case 'ONBOARDING':
+          screen = (
+            <OnboardingScreen
+              onComplete={
+                async () => {
+                  try {
+                    await AsyncStorage.setItem(
+                      ONBOARDING_STORAGE_KEY,
+                      'true',
+                    );
+                  } catch (
+                    error
+                  ) {
+                    console.warn(
+                      '[Treasi] Unable to persist onboarding state:',
+                      error,
+                    );
+                  }
+
+                  setHasCompletedOnboarding(
+                    true,
+                  );
+
+                  setNavigationParams(
+                    {},
+                  );
+
+                  /*
+                   * Use state from the auth listener rather than
+                   * accessing currentUser.displayName or assuming
+                   * Firebase has already restored the session.
+                   */
+                  if (
+                    auth.currentUser
+                  ) {
+                    setCurrentScreen(
+                      'DASHBOARD',
+                    );
+                  } else {
+                    setCurrentScreen(
+                      'LOGIN',
+                    );
+                  }
+                }
+              }
+            />
+          );
+          break;
+
+        case 'LOGIN':
+          screen = (
+            <LoginScreen
+              onNavigateSignUp={() => {
+                setNavigationParams(
+                  {},
+                );
+
+                setCurrentScreen(
+                  'SIGNUP',
+                );
+              }}
+              onLoginSuccess={() => {
+                setNavigationParams(
+                  {},
+                );
+
+                setCurrentScreen(
+                  'DASHBOARD',
+                );
+              }}
+            />
+          );
+          break;
+
+        case 'SIGNUP':
+          screen = (
+            <SignUpScreen
+              onNavigateLogin={() => {
+                setNavigationParams(
+                  {},
+                );
+
+                setCurrentScreen(
+                  'LOGIN',
+                );
+              }}
+              onSignUpSuccess={() => {
+                setNavigationParams(
+                  {},
+                );
+
+                setCurrentScreen(
+                  'DASHBOARD',
+                );
+              }}
+            />
+          );
+          break;
+
+        case 'DASHBOARD':
+          screen = (
+            <DashboardScreen
+              onNavigate={
+                handleNavigate
+              }
+            />
+          );
+          break;
+
+        case 'HUNT':
+          screen = (
+            <HuntScreen
+              treasureId={
+                navigationParams.treasureId ||
+                selectedTreasureId
+              }
+              onBack={
+                handleBackToDashboard
+              }
+            />
+          );
+          break;
+
+        case 'LEADERBOARD':
+          screen = (
+            <LeaderboardScreen
+              onBack={
+                handleBackToDashboard
+              }
+              onNavigate={
+                handleNavigate
+              }
+            />
+          );
+          break;
+
+        case 'SOCIAL':
+          screen = (
+            <SocialScreen
+              onNavigate={
+                handleNavigate
+              }
+              userCoordinates={
+                socialCoordinates
+              }
+            />
+          );
+          break;
+
+        case 'INVENTORY':
+          screen = (
+            <InventoryScreen
+              initialParams={
+                navigationParams
+              }
+              onBack={
+                handleBackToDashboard
+              }
+              onNavigate={
+                handleNavigate
+              }
+            />
+          );
+          break;
+
+        case 'PROFILE':
+          screen = (
+            <ProfileSettingsScreen
+              onBack={
+                handleBackToDashboard
+              }
+              onSignOut={
+                handleSignOut
+              }
+            />
+          );
+          break;
+
+        default:
+          screen = (
+            <DashboardScreen
+              onNavigate={
+                handleNavigate
+              }
+            />
+          );
+          break;
+      }
+
+      return (
+        <AnimatedScreenWrapper
+          screenKey={
+            currentScreen
+          }
+        >
+          {screen}
+        </AnimatedScreenWrapper>
+      );
+    };
+
+  /* ---------------------------------------------------------------------- */
+  /* Render                                                                */
+  /* ---------------------------------------------------------------------- */
+
   return (
-    <View style={styles.container}>
-      <StatusBar style="light" hidden />
-      
+    <View
+      style={
+        styles.container
+      }
+    >
+      <StatusBar
+        style="light"
+        hidden
+      />
+
       {isLandscape ? (
         renderActiveScreen()
       ) : (
-        /* Orientation Safety Net for Landscape Constraint */
-        <View style={styles.orientationWarning}>
-          <Text style={styles.warningIcon}>[ ! ]</Text>
-          <Text style={styles.warningTitle}>TILT INSTRUMENT HORIZONTALLY</Text>
-          <Text style={styles.warningSubText}>
-            Treasi requires landscape alignment to calibrate hardware sensor telemetry array.
+        <View
+          style={
+            styles.orientationWarning
+          }
+        >
+          <Text
+            style={
+              styles.warningIcon
+            }
+          >
+            [ ! ]
+          </Text>
+
+          <Text
+            style={
+              styles.warningTitle
+            }
+          >
+            TILT INSTRUMENT HORIZONTALLY
+          </Text>
+
+          <Text
+            style={
+              styles.warningSubText
+            }
+          >
+            Treasi requires landscape alignment to calibrate the field interface.
           </Text>
         </View>
       )}
     </View>
   );
-}
+};
 
-export default function App() {
+/* -------------------------------------------------------------------------- */
+/* Root App                                                                   */
+/* -------------------------------------------------------------------------- */
+
+const App: React.FC = () => {
   return (
-    <SafeAreaProvider initialMetrics={initialWindowMetrics}>
+    <SafeAreaProvider
+      initialMetrics={
+        initialWindowMetrics
+      }
+    >
       <MainNavigator />
     </SafeAreaProvider>
   );
-}
+};
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#1E281F', // Forest Deep Chassis
-    paddingLeft: 0,
-    paddingRight: 0,
-    paddingTop: 0,
-    paddingBottom: 0,
-  },
-  animatedWrapper: {
-    flex: 1,
-    width: '100%',
-    height: '100%',
-  },
-  orientationWarning: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: '#1E281F',
-    padding: 32,
-  },
-  warningIcon: {
-    color: '#A64B2A', // Sienna Accent
-    fontSize: 24,
-    fontWeight: 'bold',
-    marginBottom: 12,
-    letterSpacing: 2,
-  },
-  warningTitle: {
-    color: '#E8DCC0', // Parchment
-    fontSize: 18,
-    fontWeight: 'bold',
-    letterSpacing: 1.5,
-    textAlign: 'center',
-    marginBottom: 8,
-  },
-  warningSubText: {
-    color: '#B08D57', // Brass Trim
-    fontSize: 13,
-    textAlign: 'center',
-    maxWidth: 320,
-    lineHeight: 18,
-  },
-  loadingState: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: '#1E281F',
-  },
-  loadingPrefix: {
-    color: '#B08D57',
-    fontSize: 12,
-    fontWeight: 'bold',
-    letterSpacing: 1.5,
-    marginBottom: 6,
-  },
-  loadingText: {
-    color: '#E8DCC0',
-    fontSize: 14,
-    fontWeight: '600',
-    letterSpacing: 1.2,
-  },
-});
+export default App;
+
+/* -------------------------------------------------------------------------- */
+/* Styles                                                                     */
+/* -------------------------------------------------------------------------- */
+
+const styles =
+  StyleSheet.create({
+    container: {
+      flex: 1,
+      backgroundColor:
+        '#1E281F',
+    },
+
+    animatedWrapper: {
+      flex: 1,
+      width: '100%',
+      height: '100%',
+    },
+
+    orientationWarning: {
+      flex: 1,
+      justifyContent:
+        'center',
+      alignItems:
+        'center',
+      backgroundColor:
+        '#1E281F',
+      padding: 32,
+    },
+
+    warningIcon: {
+      color:
+        '#A64B2A',
+      fontSize: 24,
+      fontWeight:
+        'bold',
+      marginBottom: 12,
+      letterSpacing: 2,
+    },
+
+    warningTitle: {
+      color:
+        '#E8DCC0',
+      fontSize: 18,
+      fontWeight:
+        'bold',
+      letterSpacing: 1.5,
+      textAlign:
+        'center',
+      marginBottom: 8,
+    },
+
+    warningSubText: {
+      color:
+        '#B08D57',
+      fontSize: 13,
+      textAlign:
+        'center',
+      maxWidth: 360,
+      lineHeight: 18,
+    },
+  });

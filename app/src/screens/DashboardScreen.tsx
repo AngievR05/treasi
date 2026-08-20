@@ -1,1048 +1,2832 @@
-import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
+
 import {
-  View,
-  Text,
-  StyleSheet,
-  TouchableOpacity,
-  ScrollView,
-  useWindowDimensions,
-  Alert,
   ActivityIndicator,
-  Platform,
-  Modal,
+  Alert,
   Image,
+  Modal,
+  Platform,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  useWindowDimensions,
+  View,
 } from 'react-native';
-import type { Region } from 'react-native-maps';
+
 import * as Location from 'expo-location';
+
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+
 import Animated, {
-  useSharedValue,
+  FadeInDown,
   useAnimatedStyle,
-  withSpring,
+  useSharedValue,
   withRepeat,
   withSequence,
+  withSpring,
   withTiming,
-  FadeInDown,
 } from 'react-native-reanimated';
-import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
+
 import {
-  doc,
+  Ionicons,
+  MaterialCommunityIcons,
+} from '@expo/vector-icons';
+
+import {
   collection,
-  query,
-  where,
-  orderBy,
+  doc,
   limit,
   onSnapshot,
-  updateDoc,
+  orderBy,
+  query,
   Timestamp,
+  updateDoc,
+  where,
 } from 'firebase/firestore';
 
 import { auth, db } from '../config/firebase';
+
 import { FieldNavBar } from '../components/FieldNavBar';
-import {
-  UserDocument,
-  TreasureDocument,
+
+import FieldMap from '../components/FieldMap';
+
+import type {
+  FieldMapHandle,
+  FieldMapRegion,
+  FieldMapTreasure,
+} from '../components/FieldMap.types';
+
+import type {
   ActivityFeedDocument,
+  TreasureDocument,
+  UserDocument,
 } from '../types/firestore';
+
+/* -------------------------------------------------------------------------- */
+/* Types                                                                      */
+/* -------------------------------------------------------------------------- */
 
 export interface NavigationParams {
   treasureId?: string;
+
   mode?: 'hunt' | 'create';
+
   latitude?: number;
+
   longitude?: number;
-  [key: string]: any;
+
+  [key: string]: unknown;
 }
 
 interface Props {
-  onNavigate?: (screen: string, params?: NavigationParams) => void;
+  onNavigate?: (
+    screen: string,
+    params?: NavigationParams,
+  ) => void;
 }
 
-// Vintage Map Styling Matrix (Sepia & Forest Palette)
-const VINTAGE_MAP_STYLE = [
-  { elementType: 'geometry', stylers: [{ color: '#E8DCC0' }] },
-  { elementType: 'labels.text.fill', stylers: [{ color: '#2A2420' }] },
-  { elementType: 'labels.text.stroke', stylers: [{ color: '#E8DCC0' }] },
-  { featureType: 'administrative', elementType: 'geometry', stylers: [{ color: '#B08D57' }] },
-  { featureType: 'landscape.natural', elementType: 'geometry', stylers: [{ color: '#D8CBB0' }] },
-  { featureType: 'poi', elementType: 'geometry', stylers: [{ color: '#C8BB9C' }] },
-  { featureType: 'road', elementType: 'geometry', stylers: [{ color: '#F3ECD8' }] },
-  { featureType: 'road', elementType: 'labels.text.fill', stylers: [{ color: '#2A2420' }] },
-  { featureType: 'water', elementType: 'geometry', stylers: [{ color: '#A0B2A6' }] },
-];
+interface RemovableSubscription {
+  remove: () => void;
+}
 
-const AnimatedTouchableOpacity = Animated.createAnimatedComponent(TouchableOpacity);
+/* -------------------------------------------------------------------------- */
+/* Constants                                                                  */
+/* -------------------------------------------------------------------------- */
 
-/**
- * Calculates Haversine distance between two coordinates in kilometers.
- */
+const DEFAULT_REGION: FieldMapRegion = {
+  latitude: -25.7479,
+  longitude: 28.2293,
+  latitudeDelta: 0.08,
+  longitudeDelta: 0.08,
+};
+
+const RECENTER_REGION_DELTA = 0.04;
+
+const MAX_TREASURE_DISTANCE_KM = 20;
+
+const MAX_ACTIVITY_ITEMS = 10;
+
+const GPS_ACCURACY_WARNING_METERS = 100;
+
+const NAVIGATION_LOCK_MS = 600;
+
+/* -------------------------------------------------------------------------- */
+/* Animated components                                                        */
+/* -------------------------------------------------------------------------- */
+
+const AnimatedTouchableOpacity =
+  Animated.createAnimatedComponent(
+    TouchableOpacity,
+  );
+
+/* -------------------------------------------------------------------------- */
+/* Helpers                                                                    */
+/* -------------------------------------------------------------------------- */
+
+const isValidCoordinate = (
+  latitude: unknown,
+  longitude: unknown,
+): boolean => {
+  return (
+    typeof latitude === 'number' &&
+    typeof longitude === 'number' &&
+    Number.isFinite(latitude) &&
+    Number.isFinite(longitude) &&
+    latitude >= -90 &&
+    latitude <= 90 &&
+    longitude >= -180 &&
+    longitude <= 180
+  );
+};
+
 const calculateHaversineDistance = (
   lat1: number,
   lon1: number,
   lat2: number,
-  lon2: number
+  lon2: number,
 ): number => {
-  const R = 6371; // Earth's radius in km
-  const dLat = ((lat2 - lat1) * Math.PI) / 180;
-  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+  const earthRadiusKm = 6371;
+
+  const dLat =
+    ((lat2 - lat1) * Math.PI) /
+    180;
+
+  const dLon =
+    ((lon2 - lon1) * Math.PI) /
+    180;
+
   const a =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos((lat1 * Math.PI) / 180) *
-      Math.cos((lat2 * Math.PI) / 180) *
-      Math.sin(dLon / 2) *
-      Math.sin(dLon / 2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return R * c;
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(
+      (lat1 * Math.PI) / 180,
+    ) *
+      Math.cos(
+        (lat2 * Math.PI) / 180,
+      ) *
+      Math.sin(dLon / 2) ** 2;
+
+  const c =
+    2 *
+    Math.atan2(
+      Math.sqrt(a),
+      Math.sqrt(1 - a),
+    );
+
+  return earthRadiusKm * c;
 };
 
-/**
- * Formats distances human-readably (meters if < 1km, kilometers otherwise).
- */
-const formatDistanceText = (distKm: number): string => {
-  if (distKm < 1) {
-    return `${Math.round(distKm * 1000)} M AWAY`;
+const formatDistanceText = (
+  distanceKm: number,
+): string => {
+  if (
+    !Number.isFinite(distanceKm)
+  ) {
+    return 'DISTANCE UNKNOWN';
   }
-  return `${distKm.toFixed(2)} KM AWAY`;
+
+  if (distanceKm < 1) {
+    return `${Math.round(
+      distanceKm * 1000,
+    )} M AWAY`;
+  }
+
+  return `${distanceKm.toFixed(
+    2,
+  )} KM AWAY`;
 };
 
-/**
- * Formats Firestore timestamps to relative time strings.
- */
-const formatRelativeTime = (timestamp?: Timestamp): string => {
-  if (!timestamp) return 'JUST NOW';
-  const now = Date.now();
-  const millis = typeof timestamp.toMillis === 'function' ? timestamp.toMillis() : Date.now();
-  const diffInSeconds = Math.floor((now - millis) / 1000);
+const formatRelativeTime = (
+  timestamp?: Timestamp | null,
+): string => {
+  if (!timestamp) {
+    return 'JUST NOW';
+  }
 
-  if (diffInSeconds < 60) return 'JUST NOW';
-  if (diffInSeconds < 3600) return `${Math.floor(diffInSeconds / 60)}M AGO`;
-  if (diffInSeconds < 86400) return `${Math.floor(diffInSeconds / 3600)}H AGO`;
-  return `${Math.floor(diffInSeconds / 86400)}D AGO`;
+  try {
+    const milliseconds =
+      timestamp.toMillis();
+
+    const differenceSeconds =
+      Math.max(
+        0,
+        Math.floor(
+          (Date.now() -
+            milliseconds) /
+            1000,
+        ),
+      );
+
+    if (
+      differenceSeconds < 60
+    ) {
+      return 'JUST NOW';
+    }
+
+    if (
+      differenceSeconds < 3600
+    ) {
+      return `${Math.floor(
+        differenceSeconds / 60,
+      )}M AGO`;
+    }
+
+    if (
+      differenceSeconds < 86400
+    ) {
+      return `${Math.floor(
+        differenceSeconds / 3600,
+      )}H AGO`;
+    }
+
+    return `${Math.floor(
+      differenceSeconds / 86400,
+    )}D AGO`;
+  } catch {
+    return 'RECENT';
+  }
 };
 
-/**
- * Validates coordinate integrity to prevent MapView rendering crashes.
- */
-const isValidCoordinate = (lat?: number, lng?: number): boolean => {
-  return (
-    typeof lat === 'number' &&
-    typeof lng === 'number' &&
-    !isNaN(lat) &&
-    !isNaN(lng) &&
-    lat >= -90 &&
-    lat <= 90 &&
-    lng >= -180 &&
-    lng <= 180
-  );
+const normaliseUsername = (
+  value: unknown,
+  fallback = 'FIELD EXPLORER',
+): string => {
+  if (
+    typeof value !== 'string'
+  ) {
+    return fallback;
+  }
+
+  const trimmed = value.trim();
+
+  return trimmed
+    ? trimmed.toUpperCase()
+    : fallback;
 };
 
-export const DashboardScreen: React.FC<Props> = ({ onNavigate }) => {
-  const { width, height } = useWindowDimensions();
-  const isLandscape = width > height;
-  const insets = useSafeAreaInsets();
-  const mapRef = useRef<any>(null);
-  const webMapRef = useRef<any>(null);
-  const webMapReadyRef = useRef(false);
+const getRankTitle = (
+  points = 0,
+): string => {
+  if (points >= 3000) {
+    return 'RANK: MASTER EXPLORER';
+  }
 
-  const isNavigatingRef = useRef(false);
-  const hasInitialCenteredRef = useRef(false);
-  const currentUser = auth.currentUser;
+  if (points >= 1500) {
+    return 'RANK: TRAILBLAZER III';
+  }
 
-  // Firestore & Application State
-  const [userData, setUserData] = useState<UserDocument | null>(null);
-  const [allRawTreasures, setAllRawTreasures] = useState<TreasureDocument[]>([]);
-  const [activityFeed, setActivityFeed] = useState<ActivityFeedDocument[]>([]);
-  const [isLoadingFeed, setIsLoadingFeed] = useState(true);
-  const [firestoreError, setFirestoreError] = useState<string | null>(null);
+  if (points >= 500) {
+    return 'RANK: PATHFINDER II';
+  }
 
-  // GPS Telemetry State
-  const [userLocation, setUserLocation] = useState<Location.LocationObject | null>(null);
-  const [isInitializingLocation, setIsInitializingLocation] = useState(true);
-  const [locationError, setLocationError] = useState<string | null>(null);
-  const [isMapReady, setIsMapReady] = useState(false);
+  return 'RANK: NOVICE SCOUT I';
+};
 
-  // Selected Treasure Modal Overlay State
-  const [selectedTreasure, setSelectedTreasure] = useState<TreasureDocument | null>(null);
-  const [isArchiving, setIsArchiving] = useState(false);
+/* -------------------------------------------------------------------------- */
+/* Dashboard                                                                  */
+/* -------------------------------------------------------------------------- */
 
-  // Region State
-  const [region, setRegion] = useState<Region>({
-    latitude: -25.7479,
-    longitude: 28.2293,
-    latitudeDelta: 0.08,
-    longitudeDelta: 0.08,
-  });
+export const DashboardScreen: React.FC<
+  Props
+> = ({
+  onNavigate,
+}) => {
+  const {
+    width,
+    height,
+  } = useWindowDimensions();
 
-  // Reanimated Shared Values
-  const buttonScale = useSharedValue(1);
-  const pulseOpacity = useSharedValue(1);
+  const isLandscape =
+    width > height;
 
-  // Rank Title Calculation Matrix
-  const getRankTitle = (points: number = 0): string => {
-    if (points >= 3000) return 'RANK: MASTER EXPLORER';
-    if (points >= 1500) return 'RANK: TRAILBLAZER III';
-    if (points >= 500) return 'RANK: PATHFINDER II';
-    return 'RANK: NOVICE SCOUT I';
-  };
+  const insets =
+    useSafeAreaInsets();
 
-  // Safe Navigation Wrapper preventing fast double taps
-  const safeNavigate = useCallback(
-    (screen: string, params?: NavigationParams) => {
-      if (isNavigatingRef.current) return;
-      isNavigatingRef.current = true;
-      onNavigate?.(screen, params);
+  /* ---------------------------------------------------------------------- */
+  /* Refs                                                                  */
+  /* ---------------------------------------------------------------------- */
 
-      setTimeout(() => {
-        isNavigatingRef.current = false;
-      }, 600);
-    },
-    [onNavigate]
-  );
+  const mapRef =
+    useRef<FieldMapHandle | null>(
+      null,
+    );
 
-  // Firestore Real-Time Subscriptions
+  const locationSubscriptionRef =
+    useRef<RemovableSubscription | null>(
+      null,
+    );
+
+  const isMountedRef =
+    useRef(true);
+
+  const isNavigatingRef =
+    useRef(false);
+
+  const hasInitialCenteredRef =
+    useRef(false);
+
+  /* ---------------------------------------------------------------------- */
+  /* Auth                                                                  */
+  /* ---------------------------------------------------------------------- */
+
+  const currentUser =
+    auth.currentUser;
+
+  /* ---------------------------------------------------------------------- */
+  /* Firestore state                                                       */
+  /* ---------------------------------------------------------------------- */
+
+  const [
+    userData,
+    setUserData,
+  ] =
+    useState<UserDocument | null>(
+      null,
+    );
+
+  const [
+    allRawTreasures,
+    setAllRawTreasures,
+  ] =
+    useState<TreasureDocument[]>(
+      [],
+    );
+
+  const [
+    activityFeed,
+    setActivityFeed,
+  ] =
+    useState<
+      ActivityFeedDocument[]
+    >([]);
+
+  const [
+    isLoadingFeed,
+    setIsLoadingFeed,
+  ] =
+    useState(true);
+
+  const [
+    firestoreError,
+    setFirestoreError,
+  ] =
+    useState<string | null>(
+      null,
+    );
+
+  /* ---------------------------------------------------------------------- */
+  /* Location state                                                        */
+  /* ---------------------------------------------------------------------- */
+
+  const [
+    userLocation,
+    setUserLocation,
+  ] =
+    useState<Location.LocationObject | null>(
+      null,
+    );
+
+  const [
+    isInitializingLocation,
+    setIsInitializingLocation,
+  ] =
+    useState(true);
+
+  const [
+    locationError,
+    setLocationError,
+  ] =
+    useState<string | null>(
+      null,
+    );
+
+  const [
+    isMapReady,
+    setIsMapReady,
+  ] =
+    useState(false);
+
+  /* ---------------------------------------------------------------------- */
+  /* Map state                                                             */
+  /* ---------------------------------------------------------------------- */
+
+  const [
+    region,
+    setRegion,
+  ] =
+    useState<FieldMapRegion>(
+      DEFAULT_REGION,
+    );
+
+  /* ---------------------------------------------------------------------- */
+  /* Treasure modal state                                                  */
+  /* ---------------------------------------------------------------------- */
+
+  const [
+    selectedTreasure,
+    setSelectedTreasure,
+  ] =
+    useState<TreasureDocument | null>(
+      null,
+    );
+
+  const [
+    isArchiving,
+    setIsArchiving,
+  ] =
+    useState(false);
+
+  /* ---------------------------------------------------------------------- */
+  /* Animation state                                                       */
+  /* ---------------------------------------------------------------------- */
+
+  const buttonScale =
+    useSharedValue(1);
+
+  const pulseOpacity =
+    useSharedValue(1);
+
+  const animatedButtonStyle =
+    useAnimatedStyle(() => ({
+      transform: [
+        {
+          scale:
+            buttonScale.value,
+        },
+      ],
+    }));
+
+  const animatedBadgeStyle =
+    useAnimatedStyle(() => ({
+      opacity:
+        pulseOpacity.value,
+    }));
+
+  /* ---------------------------------------------------------------------- */
+  /* Component lifecycle                                                   */
+  /* ---------------------------------------------------------------------- */
+
   useEffect(() => {
-    if (!currentUser) return;
-    setFirestoreError(null);
+    isMountedRef.current =
+      true;
 
-    // 1. User Document Listener
-    const userDocRef = doc(db, 'users', currentUser.uid);
-    const unsubscribeUser = onSnapshot(
-      userDocRef,
-      (snapshot) => {
-        if (snapshot.exists()) {
-          setUserData(snapshot.data() as UserDocument);
+    return () => {
+      isMountedRef.current =
+        false;
+
+      locationSubscriptionRef.current?.remove();
+
+      locationSubscriptionRef.current =
+        null;
+    };
+  }, []);
+
+  /* ---------------------------------------------------------------------- */
+  /* Navigation                                                            */
+  /* ---------------------------------------------------------------------- */
+
+  const safeNavigate =
+    useCallback(
+      (
+        screen: string,
+        params?: NavigationParams,
+      ) => {
+        if (
+          isNavigatingRef.current
+        ) {
+          return;
         }
+
+        isNavigatingRef.current =
+          true;
+
+        onNavigate?.(
+          screen,
+          params,
+        );
+
+        setTimeout(() => {
+          isNavigatingRef.current =
+            false;
+        }, NAVIGATION_LOCK_MS);
       },
-      () => setFirestoreError('USER PROFILE TELEMETRY OFFLINE')
+      [onNavigate],
     );
 
-    // 2. Unarchived Treasures Query
-    const treasuresQuery = query(
-      collection(db, 'treasures'),
-      where('isArchived', '==', false)
-    );
-    const unsubscribeTreasures = onSnapshot(
-      treasuresQuery,
-      (snapshot) => {
-        const treasures: TreasureDocument[] = [];
-        snapshot.forEach((docSnap) => {
-          const rawData = docSnap.data() as TreasureDocument;
+  /* ---------------------------------------------------------------------- */
+  /* Firestore subscriptions                                               */
+  /* ---------------------------------------------------------------------- */
+
+  useEffect(() => {
+    if (!currentUser?.uid) {
+      setUserData(null);
+      setAllRawTreasures([]);
+      setActivityFeed([]);
+      setIsLoadingFeed(false);
+
+      return;
+    }
+
+    setFirestoreError(null);
+    setIsLoadingFeed(true);
+
+    const userDocumentRef =
+      doc(
+        db,
+        'users',
+        currentUser.uid,
+      );
+
+    const unsubscribeUser =
+      onSnapshot(
+        userDocumentRef,
+        (snapshot) => {
           if (
-            rawData &&
-            rawData.location &&
-            isValidCoordinate(rawData.location.latitude, rawData.location.longitude)
+            snapshot.exists()
           ) {
-            treasures.push({
-              ...rawData,
-              treasureId: rawData.treasureId || docSnap.id,
-            });
+            setUserData(
+              snapshot.data() as UserDocument,
+            );
+          } else {
+            setUserData(null);
           }
-        });
-        setAllRawTreasures(treasures);
-      },
-      () => setFirestoreError('TREASURE CACHE FIELD SYNC FAILED')
-    );
+        },
+        (error) => {
+          console.error(
+            '[Treasi Dashboard] User subscription failed:',
+            error,
+          );
 
-    // 3. Activity Feed Listener
-    const activityQuery = query(
-      collection(db, 'activity_feed'),
-      orderBy('createdAt', 'desc'),
-      limit(10)
-    );
-    const unsubscribeActivity = onSnapshot(
-      activityQuery,
-      (snapshot) => {
-        const activities: ActivityFeedDocument[] = [];
-        snapshot.forEach((docSnap) => {
-          const rawData = docSnap.data() as ActivityFeedDocument;
-          activities.push({
-            ...rawData,
-            activityId: rawData.activityId || docSnap.id,
-          });
-        });
-        setActivityFeed(activities);
-        setIsLoadingFeed(false);
-      },
-      () => {
-        setIsLoadingFeed(false);
-        setFirestoreError('FIELD SIGNALS FEED OFFLINE');
-      }
-    );
+          setFirestoreError(
+            'USER PROFILE TELEMETRY OFFLINE',
+          );
+        },
+      );
+
+    const treasuresQuery =
+      query(
+        collection(
+          db,
+          'treasures',
+        ),
+        where(
+          'isArchived',
+          '==',
+          false,
+        ),
+      );
+
+    const unsubscribeTreasures =
+      onSnapshot(
+        treasuresQuery,
+        (snapshot) => {
+          const treasures:
+            TreasureDocument[] =
+            [];
+
+          snapshot.forEach(
+            (documentSnapshot) => {
+              const data =
+                documentSnapshot.data() as
+                  TreasureDocument;
+
+              if (
+                !data?.location ||
+                !isValidCoordinate(
+                  data.location
+                    .latitude,
+                  data.location
+                    .longitude,
+                )
+              ) {
+                return;
+              }
+
+              treasures.push({
+                ...data,
+
+                treasureId:
+                  data.treasureId ||
+                  documentSnapshot.id,
+              });
+            },
+          );
+
+          setAllRawTreasures(
+            treasures,
+          );
+        },
+        (error) => {
+          console.error(
+            '[Treasi Dashboard] Treasure subscription failed:',
+            error,
+          );
+
+          setFirestoreError(
+            'TREASURE CACHE FIELD SYNC FAILED',
+          );
+        },
+      );
+
+    const activityQuery =
+      query(
+        collection(
+          db,
+          'activity_feed',
+        ),
+        orderBy(
+          'createdAt',
+          'desc',
+        ),
+        limit(
+          MAX_ACTIVITY_ITEMS,
+        ),
+      );
+
+    const unsubscribeActivity =
+      onSnapshot(
+        activityQuery,
+        (snapshot) => {
+          const activities:
+            ActivityFeedDocument[] =
+            [];
+
+          snapshot.forEach(
+            (documentSnapshot) => {
+              const data =
+                documentSnapshot.data() as
+                  ActivityFeedDocument;
+
+              activities.push({
+                ...data,
+
+                activityId:
+                  data.activityId ||
+                  documentSnapshot.id,
+              });
+            },
+          );
+
+          setActivityFeed(
+            activities,
+          );
+
+          setIsLoadingFeed(
+            false,
+          );
+        },
+        (error) => {
+          console.error(
+            '[Treasi Dashboard] Activity subscription failed:',
+            error,
+          );
+
+          setActivityFeed([]);
+
+          setIsLoadingFeed(
+            false,
+          );
+
+          setFirestoreError(
+            'FIELD SIGNALS FEED OFFLINE',
+          );
+        },
+      );
 
     return () => {
       unsubscribeUser();
       unsubscribeTreasures();
       unsubscribeActivity();
     };
-  }, [currentUser]);
+  }, [
+    currentUser?.uid,
+  ]);
 
-  // Location Service Initialization & Watching
-  const initializeLocationService = useCallback(async () => {
-    setIsInitializingLocation(true);
-    setLocationError(null);
+  /* ---------------------------------------------------------------------- */
+  /* Location helpers                                                      */
+  /* ---------------------------------------------------------------------- */
 
-    try {
-      // Expo Location on native devices.
-      // Expo Web can use the browser Geolocation API directly for a more reliable
-      // web build and avoids relying on a native-only location watcher.
-      if (Platform.OS === 'web') {
-        if (typeof navigator === 'undefined' || !navigator.geolocation) {
-          setLocationError('BROWSER GPS IS NOT AVAILABLE ON THIS DEVICE.');
-          setIsInitializingLocation(false);
+  const applyLocation =
+    useCallback(
+      (
+        location:
+          Location.LocationObject,
+      ) => {
+        if (
+          !isMountedRef.current
+        ) {
+          return;
+        }
+
+        const {
+          latitude,
+          longitude,
+        } =
+          location.coords;
+
+        if (
+          !isValidCoordinate(
+            latitude,
+            longitude,
+          )
+        ) {
+          return;
+        }
+
+        setUserLocation(
+          location,
+        );
+
+        setLocationError(
+          null,
+        );
+
+        setIsInitializingLocation(
+          false,
+        );
+      },
+      [],
+    );
+
+  /* ---------------------------------------------------------------------- */
+  /* Location service                                                      */
+  /* ---------------------------------------------------------------------- */
+
+  const initializeLocationService =
+    useCallback(
+      async (): Promise<RemovableSubscription | null> => {
+        if (
+          !isMountedRef.current
+        ) {
           return null;
         }
 
-        const applyBrowserPosition = (position: GeolocationPosition) => {
-          const { latitude, longitude, accuracy } = position.coords;
-          const locationObject = {
-            coords: {
-              latitude,
-              longitude,
-              altitude: null,
-              accuracy: typeof accuracy === 'number' ? accuracy : null,
-              altitudeAccuracy: null,
-              heading: null,
-              speed: null,
-            },
-            timestamp: position.timestamp || Date.now(),
-          } as Location.LocationObject;
+        setIsInitializingLocation(
+          true,
+        );
 
-          setUserLocation(locationObject);
-          setLocationError(null);
+        setLocationError(
+          null,
+        );
 
-          if (!hasInitialCenteredRef.current) {
-            hasInitialCenteredRef.current = true;
-            const newRegion = {
-              latitude,
-              longitude,
-              latitudeDelta: 0.08,
-              longitudeDelta: 0.08,
+        try {
+          /* ---------------------------------------------------------------- */
+          /* Web / localhost                                                   */
+          /* ---------------------------------------------------------------- */
+
+          if (
+            Platform.OS ===
+            'web'
+          ) {
+            if (
+              typeof window ===
+                'undefined' ||
+              typeof navigator ===
+                'undefined'
+            ) {
+              setLocationError(
+                'BROWSER LOCATION ENVIRONMENT IS UNAVAILABLE.',
+              );
+
+              setIsInitializingLocation(
+                false,
+              );
+
+              return null;
+            }
+
+            if (
+              !window
+                .isSecureContext
+            ) {
+              setLocationError(
+                'BROWSER LOCATION REQUIRES HTTPS OR LOCALHOST.',
+              );
+
+              setIsInitializingLocation(
+                false,
+              );
+
+              return null;
+            }
+
+            if (
+              !navigator.geolocation
+            ) {
+              setLocationError(
+                'BROWSER GPS IS NOT AVAILABLE ON THIS DEVICE.',
+              );
+
+              setIsInitializingLocation(
+                false,
+              );
+
+              return null;
+            }
+
+            const applyBrowserPosition =
+              (
+                position:
+                  GeolocationPosition,
+              ) => {
+                if (
+                  !isMountedRef.current
+                ) {
+                  return;
+                }
+
+                const {
+                  latitude,
+                  longitude,
+                  accuracy,
+                  altitude,
+                  altitudeAccuracy,
+                  heading,
+                  speed,
+                } =
+                  position.coords;
+
+                if (
+                  !isValidCoordinate(
+                    latitude,
+                    longitude,
+                  )
+                ) {
+                  setLocationError(
+                    'BROWSER RETURNED INVALID LOCATION TELEMETRY.',
+                  );
+
+                  setIsInitializingLocation(
+                    false,
+                  );
+
+                  return;
+                }
+
+                const browserLocation: Location.LocationObject =
+                  {
+                    coords: {
+                      latitude,
+                      longitude,
+
+                      accuracy:
+                        typeof accuracy ===
+                        'number'
+                          ? accuracy
+                          : null,
+
+                      altitude:
+                        typeof altitude ===
+                        'number'
+                          ? altitude
+                          : null,
+
+                      altitudeAccuracy:
+                        typeof altitudeAccuracy ===
+                        'number'
+                          ? altitudeAccuracy
+                          : null,
+
+                      heading:
+                        typeof heading ===
+                        'number'
+                          ? heading
+                          : null,
+
+                      speed:
+                        typeof speed ===
+                        'number'
+                          ? speed
+                          : null,
+                    },
+
+                    timestamp:
+                      position.timestamp ||
+                      Date.now(),
+                  };
+
+                applyLocation(
+                  browserLocation,
+                );
+              };
+
+            const handleBrowserError =
+              (
+                error:
+                  GeolocationPositionError,
+              ) => {
+                if (
+                  !isMountedRef.current
+                ) {
+                  return;
+                }
+
+                setIsInitializingLocation(
+                  false,
+                );
+
+                switch (
+                  error.code
+                ) {
+                  case 1:
+                    setLocationError(
+                      'GPS PERMISSION DENIED. ENABLE LOCATION FOR LOCALHOST IN YOUR BROWSER.',
+                    );
+                    break;
+
+                  case 2:
+                    setLocationError(
+                      'BROWSER GPS POSITION UNAVAILABLE.',
+                    );
+                    break;
+
+                  case 3:
+                    setLocationError(
+                      'BROWSER GPS FIX TIMED OUT. RETRY POSITIONAL TELEMETRY.',
+                    );
+                    break;
+
+                  default:
+                    setLocationError(
+                      'BROWSER GPS TELEMETRY UNAVAILABLE.',
+                    );
+                }
+              };
+
+            navigator.geolocation.getCurrentPosition(
+              applyBrowserPosition,
+              handleBrowserError,
+              {
+                enableHighAccuracy:
+                  true,
+
+                timeout: 15000,
+
+                maximumAge:
+                  10000,
+              },
+            );
+
+            const watchId =
+              navigator.geolocation.watchPosition(
+                applyBrowserPosition,
+                handleBrowserError,
+                {
+                  enableHighAccuracy:
+                    true,
+
+                  timeout:
+                    20000,
+
+                  maximumAge:
+                    10000,
+                },
+              );
+
+            return {
+              remove: () => {
+                navigator.geolocation.clearWatch(
+                  watchId,
+                );
+              },
             };
-            setRegion(newRegion);
           }
-        };
 
-        const handleBrowserError = (error: GeolocationPositionError) => {
-          switch (error.code) {
-            case error.PERMISSION_DENIED:
-              setLocationError('GPS PERMISSION DENIED. ENABLE LOCATION IN YOUR BROWSER SETTINGS.');
-              break;
-            case error.POSITION_UNAVAILABLE:
-              setLocationError('BROWSER GPS POSITION UNAVAILABLE.');
-              break;
-            case error.TIMEOUT:
-              setLocationError('BROWSER GPS FIX TIMED OUT. RETRY POSITIONAL TELEMETRY.');
-              break;
-            default:
-              setLocationError('BROWSER GPS TELEMETRY UNAVAILABLE.');
+          /* ---------------------------------------------------------------- */
+          /* Android / iOS                                                     */
+          /* ---------------------------------------------------------------- */
+
+          const permission =
+            await Location.requestForegroundPermissionsAsync();
+
+          if (
+            !isMountedRef.current
+          ) {
+            return null;
           }
-        };
 
-        navigator.geolocation.getCurrentPosition(
-          applyBrowserPosition,
-          handleBrowserError,
-          { enableHighAccuracy: true, timeout: 15000, maximumAge: 10000 },
-        );
+          if (
+            permission.status !==
+            'granted'
+          ) {
+            setLocationError(
+              'GPS PERMISSION DENIED. ENABLE LOCATION IN SYSTEM SETTINGS.',
+            );
 
-        const watchId = navigator.geolocation.watchPosition(
-          applyBrowserPosition,
-          handleBrowserError,
-          { enableHighAccuracy: true, maximumAge: 10000, timeout: 15000 },
-        );
+            setIsInitializingLocation(
+              false,
+            );
 
-        setIsInitializingLocation(false);
+            return null;
+          }
 
-        return {
-          remove: () => navigator.geolocation.clearWatch(watchId),
-        } as unknown as Location.LocationSubscription;
+          /*
+           * A last known position gives us
+           * a fast initial map location when
+           * available.
+           */
+          try {
+            const lastKnownPosition =
+              await Location.getLastKnownPositionAsync();
+
+            if (
+              lastKnownPosition &&
+              isValidCoordinate(
+                lastKnownPosition
+                  .coords.latitude,
+                lastKnownPosition
+                  .coords.longitude,
+              )
+            ) {
+              applyLocation(
+                lastKnownPosition,
+              );
+            }
+          } catch {
+            // Last known position is optional.
+          }
+
+          /*
+           * Obtain a fresh fix.
+           */
+          try {
+            const initialPosition =
+              await Location.getCurrentPositionAsync(
+                {
+                  accuracy:
+                    Location.Accuracy
+                      .Balanced,
+                },
+              );
+
+            if (
+              initialPosition
+            ) {
+              applyLocation(
+                initialPosition,
+              );
+            }
+          } catch (
+            error
+          ) {
+            console.warn(
+              '[Treasi Dashboard] Initial GPS fix unavailable:',
+              error,
+            );
+          }
+
+          if (
+            !isMountedRef.current
+          ) {
+            return null;
+          }
+
+          const subscription =
+            await Location.watchPositionAsync(
+              {
+                accuracy:
+                  Location.Accuracy
+                    .Balanced,
+
+                timeInterval:
+                  5000,
+
+                distanceInterval:
+                  15,
+              },
+              (
+                newLocation,
+              ) => {
+                applyLocation(
+                  newLocation,
+                );
+              },
+            );
+
+          if (
+            !userLocation &&
+            isMountedRef.current
+          ) {
+            setIsInitializingLocation(
+              false,
+            );
+          }
+
+          return subscription;
+        } catch (
+          error
+        ) {
+          console.error(
+            '[Treasi Dashboard] Location service failed:',
+            error,
+          );
+
+          if (
+            isMountedRef.current
+          ) {
+            setLocationError(
+              Platform.OS ===
+                'web'
+                ? 'BROWSER GPS TELEMETRY UNAVAILABLE.'
+                : 'HARDWARE GPS TELEMETRY UNAVAILABLE.',
+            );
+
+            setIsInitializingLocation(
+              false,
+            );
+          }
+
+          return null;
+        }
+      },
+      [
+        applyLocation,
+        userLocation,
+      ],
+    );
+
+  /* ---------------------------------------------------------------------- */
+  /* Restart GPS service                                                   */
+  /* ---------------------------------------------------------------------- */
+
+  const startLocationService =
+    useCallback(
+      async () => {
+        try {
+          locationSubscriptionRef.current?.remove();
+        } catch {
+          // No-op.
+        }
+
+        locationSubscriptionRef.current =
+          null;
+
+        hasInitialCenteredRef.current =
+          false;
+
+        const subscription =
+          await initializeLocationService();
+
+        if (
+          !isMountedRef.current
+        ) {
+          subscription?.remove();
+
+          return;
+        }
+
+        locationSubscriptionRef.current =
+          subscription;
+      },
+      [
+        initializeLocationService,
+      ],
+    );
+
+  /* ---------------------------------------------------------------------- */
+  /* Start GPS once                                                        */
+  /* ---------------------------------------------------------------------- */
+
+  useEffect(() => {
+    void startLocationService();
+
+    return () => {
+      try {
+        locationSubscriptionRef.current?.remove();
+      } catch {
+        // No-op.
       }
 
-      const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== 'granted') {
-        setLocationError('GPS PERMISSION DENIED. ENABLE LOCATION IN SYSTEM SETTINGS.');
-        setIsInitializingLocation(false);
+      locationSubscriptionRef.current =
+        null;
+    };
+  }, [
+    startLocationService,
+  ]);
+
+  /* ---------------------------------------------------------------------- */
+  /* Pulse animation                                                       */
+  /* ---------------------------------------------------------------------- */
+
+  useEffect(() => {
+    pulseOpacity.value =
+      withRepeat(
+        withSequence(
+          withTiming(
+            0.35,
+            {
+              duration:
+                1000,
+            },
+          ),
+
+          withTiming(
+            1,
+            {
+              duration:
+                1000,
+            },
+          ),
+        ),
+
+        -1,
+
+        true,
+      );
+  }, [
+    pulseOpacity,
+  ]);
+
+  /* ---------------------------------------------------------------------- */
+  /* Initial map centring                                                  */
+  /* ---------------------------------------------------------------------- */
+
+  useEffect(() => {
+    if (
+      !isMapReady ||
+      !userLocation ||
+      hasInitialCenteredRef.current
+    ) {
+      return;
+    }
+
+    const {
+      latitude,
+      longitude,
+    } =
+      userLocation.coords;
+
+    if (
+      !isValidCoordinate(
+        latitude,
+        longitude,
+      )
+    ) {
+      return;
+    }
+
+    const initialUserRegion: FieldMapRegion =
+      {
+        latitude,
+        longitude,
+
+        latitudeDelta:
+          0.08,
+
+        longitudeDelta:
+          0.08,
+      };
+
+    setRegion(
+      initialUserRegion,
+    );
+
+    mapRef.current?.setView(
+      initialUserRegion,
+      false,
+    );
+
+    hasInitialCenteredRef.current =
+      true;
+  }, [
+    isMapReady,
+    userLocation,
+  ]);
+
+  /* ---------------------------------------------------------------------- */
+  /* Nearby treasures                                                      */
+  /* ---------------------------------------------------------------------- */
+
+  const nearbyTreasures =
+    useMemo(() => {
+      /*
+       * Preserve your existing behaviour:
+       * if location is not available yet,
+       * show valid active caches instead
+       * of returning an empty map.
+       */
+      if (!userLocation) {
+        return allRawTreasures;
+      }
+
+      const userLatitude =
+        userLocation.coords
+          .latitude;
+
+      const userLongitude =
+        userLocation.coords
+          .longitude;
+
+      if (
+        !isValidCoordinate(
+          userLatitude,
+          userLongitude,
+        )
+      ) {
+        return allRawTreasures;
+      }
+
+      return allRawTreasures.filter(
+        (treasure) => {
+          if (
+            !treasure.location ||
+            !isValidCoordinate(
+              treasure.location
+                .latitude,
+              treasure.location
+                .longitude,
+            )
+          ) {
+            return false;
+          }
+
+          const distanceKm =
+            calculateHaversineDistance(
+              userLatitude,
+              userLongitude,
+
+              treasure.location
+                .latitude,
+
+              treasure.location
+                .longitude,
+            );
+
+          return (
+            distanceKm <=
+            MAX_TREASURE_DISTANCE_KM
+          );
+        },
+      );
+    }, [
+      allRawTreasures,
+      userLocation,
+    ]);
+
+  /* ---------------------------------------------------------------------- */
+  /* Convert Firestore treasures to FieldMap model                         */
+  /* ---------------------------------------------------------------------- */
+
+  const mapTreasures =
+    useMemo<
+      FieldMapTreasure[]
+    >(() => {
+      return nearbyTreasures
+        .filter(
+          (treasure) =>
+            Boolean(
+              treasure.treasureId,
+            ) &&
+            Boolean(
+              treasure.location,
+            ) &&
+            isValidCoordinate(
+              treasure.location
+                .latitude,
+              treasure.location
+                .longitude,
+            ),
+        )
+        .map(
+          (treasure) => ({
+            id:
+              treasure.treasureId,
+
+            title:
+              treasure.title ||
+              'TREASURE CACHE',
+
+            creatorName:
+              treasure.creatorName,
+
+            latitude:
+              treasure.location
+                .latitude,
+
+            longitude:
+              treasure.location
+                .longitude,
+          }),
+        );
+    }, [
+      nearbyTreasures,
+    ]);
+
+  /* ---------------------------------------------------------------------- */
+  /* User map model                                                        */
+  /* ---------------------------------------------------------------------- */
+
+  const mapUserLocation =
+    useMemo(() => {
+      if (!userLocation) {
         return null;
       }
 
-      const initialPosition = await Location.getCurrentPositionAsync({
-        accuracy: Location.Accuracy.Balanced,
-      }).catch(() => null);
+      const {
+        latitude,
+        longitude,
+      } =
+        userLocation.coords;
 
-      if (initialPosition) {
-        setUserLocation(initialPosition);
-        const newRegion = {
-          latitude: initialPosition.coords.latitude,
-          longitude: initialPosition.coords.longitude,
-          latitudeDelta: 0.08,
-          longitudeDelta: 0.08,
-        };
-        setRegion(newRegion);
+      if (
+        !isValidCoordinate(
+          latitude,
+          longitude,
+        )
+      ) {
+        return null;
+      }
 
-        if (!hasInitialCenteredRef.current) {
-          hasInitialCenteredRef.current = true;
-          if (mapRef.current) {
-            mapRef.current.animateToRegion(newRegion, 1200);
-          }
+      return {
+        latitude,
+        longitude,
+      };
+    }, [
+      userLocation,
+    ]);
+
+  /* ---------------------------------------------------------------------- */
+  /* Map ready                                                             */
+  /* ---------------------------------------------------------------------- */
+
+  const handleMapReady =
+    useCallback(() => {
+      setIsMapReady(true);
+    }, []);
+
+  /* ---------------------------------------------------------------------- */
+  /* Treasure marker selection                                             */
+  /* ---------------------------------------------------------------------- */
+
+  const handleTreasureMarkerPress =
+    useCallback(
+      (
+        treasureId: string,
+      ) => {
+        const treasure =
+          allRawTreasures.find(
+            (item) =>
+              item.treasureId ===
+              treasureId,
+          );
+
+        if (!treasure) {
+          return;
         }
-      } else {
-        setLocationError('SATELLITE FIX TIMEOUT. RETRYING POSITIONAL TELEMETRY...');
-      }
 
-      const subscription = await Location.watchPositionAsync(
-        {
-          accuracy: Location.Accuracy.Balanced,
-          timeInterval: 5000,
-          distanceInterval: 15,
-        },
-        (newLocation) => {
-          setUserLocation(newLocation);
-          setLocationError(null);
-        },
-      );
-
-      setIsInitializingLocation(false);
-      return subscription;
-    } catch {
-      setLocationError(
-        Platform.OS === 'web'
-          ? 'BROWSER GPS TELEMETRY UNAVAILABLE.'
-          : 'HARDWARE GPS TELEMETRY UNAVAILABLE',
-      );
-      setIsInitializingLocation(false);
-      return null;
-    }
-  }, []);
-
-  // Set up Pulse Animation & GPS Watcher
-  useEffect(() => {
-    pulseOpacity.value = withRepeat(
-      withSequence(
-        withTiming(0.3, { duration: 1000 }),
-        withTiming(1.0, { duration: 1000 })
-      ),
-      -1,
-      true
+        setSelectedTreasure(
+          treasure,
+        );
+      },
+      [
+        allRawTreasures,
+      ],
     );
 
-    let activeSubscription: Location.LocationSubscription | null = null;
-    initializeLocationService().then((sub) => {
-      activeSubscription = sub;
-    });
+  /* ---------------------------------------------------------------------- */
+  /* Recenter map                                                          */
+  /* ---------------------------------------------------------------------- */
 
-    return () => {
-      if (activeSubscription) {
-        activeSubscription.remove();
+  const handleRecenterMap =
+    useCallback(() => {
+      if (!userLocation) {
+        Alert.alert(
+          'GPS UNFIXED',
+          Platform.OS === 'web'
+            ? 'Waiting for browser location lock.'
+            : 'Waiting for satellite position lock.',
+        );
+
+        return;
       }
-    };
-  }, [initializeLocationService, pulseOpacity]);
 
-  // Filter Active Treasures within 20 KM Range
-  const nearbyTreasures = useMemo(() => {
-    if (!userLocation) return allRawTreasures;
-    const userLat = userLocation.coords.latitude;
-    const userLon = userLocation.coords.longitude;
+      const {
+        latitude,
+        longitude,
+      } =
+        userLocation.coords;
 
-    return allRawTreasures.filter((treasure) => {
-      if (!treasure.location || !isValidCoordinate(treasure.location.latitude, treasure.location.longitude)) {
-        return false;
+      if (
+        !isValidCoordinate(
+          latitude,
+          longitude,
+        )
+      ) {
+        Alert.alert(
+          'INVALID POSITION',
+          'The current location fix could not be validated.',
+        );
+
+        return;
       }
-      const distanceKm = calculateHaversineDistance(
-        userLat,
-        userLon,
-        treasure.location.latitude,
-        treasure.location.longitude
+
+      const targetRegion:
+        FieldMapRegion = {
+          latitude,
+          longitude,
+
+          latitudeDelta:
+            RECENTER_REGION_DELTA,
+
+          longitudeDelta:
+            RECENTER_REGION_DELTA,
+        };
+
+      setRegion(
+        targetRegion,
       );
-      return distanceKm <= 20;
-    });
-  }, [userLocation, allRawTreasures]);
 
-  // Animated Styles
-  const animatedButtonStyle = useAnimatedStyle(() => ({
-    transform: [{ scale: buttonScale.value }],
-  }));
-
-  const animatedBadgeStyle = useAnimatedStyle(() => ({
-    opacity: pulseOpacity.value,
-  }));
-
-  // Recenter Map Camera on User Location
-  const handleRecenterMap = () => {
-    if (!userLocation) {
-      Alert.alert('GPS UNFIXED', 'Waiting for satellite position lock.');
-      return;
-    }
-    const targetRegion = {
-      latitude: userLocation.coords.latitude,
-      longitude: userLocation.coords.longitude,
-      latitudeDelta: 0.04,
-      longitudeDelta: 0.04,
-    };
-    setRegion(targetRegion);
-    if (Platform.OS === 'web') {
-      webMapRef.current?.contentWindow?.postMessage(
-        { type: 'TREASI_SET_VIEW', latitude: targetRegion.latitude, longitude: targetRegion.longitude, zoom: 15 },
-        '*'
+      mapRef.current?.setView(
+        targetRegion,
+        true,
       );
-    } else if (mapRef.current) {
-      mapRef.current.animateToRegion(targetRegion, 1000);
-    }
-  };
+    }, [
+      userLocation,
+    ]);
 
-  // Stamp Location Action with GPS Lock & Accuracy Safeguards
-  const handleStampLocation = () => {
-    if (isNavigatingRef.current) return;
+  /* ---------------------------------------------------------------------- */
+  /* Stamp location                                                        */
+  /* ---------------------------------------------------------------------- */
 
-    if (!userLocation) {
-      Alert.alert(
-        'TELEMETRY OFFLINE',
-        'Cannot stamp location without an active GPS lock. Verify location services and retry.'
-      );
-      return;
-    }
-
-    const { latitude, longitude, accuracy } = userLocation.coords;
-
-    if (accuracy && accuracy > 100) {
-      Alert.alert(
-        'POOR GPS ACCURACY',
-        `Current GPS fix uncertainty is ±${Math.round(accuracy)}m. Do you wish to stamp these coordinates anyway?`,
-        [
-          { text: 'CANCEL', style: 'cancel' },
-          {
-            text: 'STAMP ANYWAY',
-            onPress: () =>
-              safeNavigate('INVENTORY', {
-                mode: 'create',
-                latitude: Number(latitude.toFixed(6)),
-                longitude: Number(longitude.toFixed(6)),
-              }),
-          },
-        ]
-      );
-      return;
-    }
-
-    safeNavigate('INVENTORY', {
-      mode: 'create',
-      latitude: Number(latitude.toFixed(6)),
-      longitude: Number(longitude.toFixed(6)),
-    });
-  };
-
-  // Marker Selection Handler
-  const handleMarkerPress = (treasure: TreasureDocument) => {
-    setSelectedTreasure(treasure);
-  };
-
-  // Archive Cache Action
-  const handleArchiveTreasure = async (treasureId: string) => {
-    if (!treasureId) return;
-    setIsArchiving(true);
-    try {
-      const treasureRef = doc(db, 'treasures', treasureId);
-      await updateDoc(treasureRef, { isArchived: true });
-      setSelectedTreasure(null);
-      Alert.alert('CACHE ARCHIVED', 'The treasure cache has been deactivated from the field map.');
-    } catch (error: any) {
-      Alert.alert('ACTION FAILED', error.message || 'Unable to update cache status.');
-    } finally {
-      setIsArchiving(false);
-    }
-  };
-
-  const getDisplayUsername = (item: ActivityFeedDocument): string => {
-    if (item.userId === currentUser?.uid) {
-      return (userData?.username || currentUser?.displayName || 'YOU').toUpperCase();
-    }
-    return (item.username || 'FIELD EXPLORER').toUpperCase();
-  };
-
-  // Leaflet/OpenStreetMap web map. This avoids react-native-maps on Expo Web while
-  // preserving interactive markers, the user's location, the 20km operational radius,
-  // and treasure selection. The iframe communicates with DashboardScreen through postMessage.
-  const webMapHtml = useMemo(() => `<!doctype html>
-<html>
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
-<style>
-html,body,#map{height:100%;width:100%;margin:0;padding:0;background:#E8DCC0;}
-body{overflow:hidden;font-family:Arial,sans-serif;}
-.leaflet-container{background:#E8DCC0;}
-.leaflet-tile-pane{filter:sepia(.20) saturate(.72) contrast(.95);}
-.leaflet-control-zoom a{background:#F3ECD8;color:#2A2420;border-color:#B08D57;}
-.leaflet-control-attribution{background:rgba(243,236,216,.88)!important;color:#2A2420!important;font-size:9px!important;}
-.leaflet-popup-content-wrapper,.leaflet-popup-tip{background:#F3ECD8;color:#2A2420;border:1px solid #B08D57;}
-.leaflet-popup-content{font-size:12px;line-height:1.35;}
-</style>
-</head>
-<body>
-<div id="map"></div>
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-<script>
-(function(){
-  const DEFAULT_CENTER = [-25.7479, 28.2293];
-  const map = L.map('map', { zoomControl: true, attributionControl: true }).setView(DEFAULT_CENTER, 13);
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap contributors' }).addTo(map);
-  const treasureLayer = L.layerGroup().addTo(map);
-  let userMarker = null;
-  let radiusCircle = null;
-
-  function post(message){
-    try { window.parent.postMessage(message, '*'); } catch(e) {}
-  }
-
-  function clearTreasureLayer(){ treasureLayer.clearLayers(); }
-
-  function drawTreasureMarkers(treasures){
-    clearTreasureLayer();
-    (treasures || []).forEach(function(t){
-      if (typeof t.latitude !== 'number' || typeof t.longitude !== 'number') return;
-      const marker = L.circleMarker([t.latitude, t.longitude], {
-        radius: 9,
-        color: '#F3ECD8',
-        weight: 2,
-        fillColor: '#A64B2A',
-        fillOpacity: 1
-      }).addTo(treasureLayer);
-      marker.bindPopup('<strong>' + escapeHtml(t.title || 'TREASURE CACHE') + '</strong><br/>Tap marker for details.');
-      marker.on('click', function(){ post({ type: 'TREASURE_MARKER_PRESS', treasureId: t.id }); });
-    });
-  }
-
-  function drawUser(lat, lon){
-    if (typeof lat !== 'number' || typeof lon !== 'number') return;
-    if (userMarker) userMarker.setLatLng([lat, lon]);
-    else {
-      userMarker = L.circleMarker([lat, lon], {
-        radius: 7,
-        color: '#F3ECD8',
-        weight: 2,
-        fillColor: '#2C3B2E',
-        fillOpacity: 1
-      }).addTo(map).bindTooltip('YOUR POSITION');
-    }
-    if (radiusCircle) radiusCircle.setLatLng([lat, lon]);
-    else {
-      radiusCircle = L.circle([lat, lon], { radius: 20000, color: '#B08D57', weight: 1, fillColor: '#B08D57', fillOpacity: 0.06 }).addTo(map);
-    }
-  }
-
-  function escapeHtml(value){
-    return String(value).replace(/[&<>'\"]/g, function(c){ return ({'&':'&amp;','<':'&lt;','>':'&gt;',\"'\":'&#39;',\"\\\"\":'&quot;'}[c]); });
-  }
-
-  window.addEventListener('message', function(event){
-    const data = event.data || {};
-    if (data.type === 'TREASI_UPDATE_MAP') {
-      if (data.user && typeof data.user.latitude === 'number' && typeof data.user.longitude === 'number') {
-        drawUser(data.user.latitude, data.user.longitude);
+  const handleStampLocation =
+    useCallback(() => {
+      if (
+        isNavigatingRef.current
+      ) {
+        return;
       }
-      drawTreasureMarkers(data.treasures || []);
-    }
-    if (data.type === 'TREASI_SET_VIEW' && typeof data.latitude === 'number' && typeof data.longitude === 'number') {
-      map.setView([data.latitude, data.longitude], data.zoom || 14, { animate: true });
-    }
-  });
 
-  post({ type: 'TREASI_WEB_MAP_READY' });
-})();
-</script>
-</body>
-</html>`, []);
+      if (!userLocation) {
+        Alert.alert(
+          'TELEMETRY OFFLINE',
+          Platform.OS === 'web'
+            ? 'Cannot stamp location without browser location access. Allow location permission and retry.'
+            : 'Cannot stamp location without an active GPS lock. Verify location services and retry.',
+        );
 
-  useEffect(() => {
-    if (Platform.OS !== 'web') return;
-
-    const handleWebMapMessage = (event: MessageEvent) => {
-      const data = event.data || {};
-      if (data.type === 'TREASI_WEB_MAP_READY') {
-        webMapReadyRef.current = true;
-        setIsMapReady(true);
+        return;
       }
-      if (data.type === 'TREASURE_MARKER_PRESS' && typeof data.treasureId === 'string') {
-        const treasure = allRawTreasures.find((item) => item.treasureId === data.treasureId);
-        if (treasure) setSelectedTreasure(treasure);
+
+      const {
+        latitude,
+        longitude,
+        accuracy,
+      } =
+        userLocation.coords;
+
+      if (
+        !isValidCoordinate(
+          latitude,
+          longitude,
+        )
+      ) {
+        Alert.alert(
+          'INVALID GPS FIX',
+          'The current position is invalid and cannot be stamped.',
+        );
+
+        return;
       }
-    };
 
-    window.addEventListener('message', handleWebMapMessage);
-    return () => window.removeEventListener('message', handleWebMapMessage);
-  }, [allRawTreasures]);
+      const navigateToCreate =
+        () => {
+          safeNavigate(
+            'INVENTORY',
+            {
+              mode:
+                'create',
 
-  useEffect(() => {
-    if (Platform.OS !== 'web' || !webMapReadyRef.current) return;
+              latitude:
+                Number(
+                  latitude.toFixed(
+                    6,
+                  ),
+                ),
 
-    const payload = {
-      type: 'TREASI_UPDATE_MAP',
-      user: userLocation
-        ? { latitude: userLocation.coords.latitude, longitude: userLocation.coords.longitude }
-        : null,
-      treasures: nearbyTreasures.map((treasure) => ({
-        id: treasure.treasureId,
-        title: treasure.title,
-        latitude: treasure.location.latitude,
-        longitude: treasure.location.longitude,
-      })),
-    };
+              longitude:
+                Number(
+                  longitude.toFixed(
+                    6,
+                  ),
+                ),
+            },
+          );
+        };
 
-    webMapRef.current?.contentWindow?.postMessage(payload, '*');
-  }, [isMapReady, nearbyTreasures, userLocation]);
+      if (
+        typeof accuracy ===
+          'number' &&
+        accuracy >
+          GPS_ACCURACY_WARNING_METERS
+      ) {
+        Alert.alert(
+          'POOR GPS ACCURACY',
 
-  const selectedDistance = useMemo(() => {
-    if (!selectedTreasure || !userLocation) return null;
-    return calculateHaversineDistance(
-      userLocation.coords.latitude,
-      userLocation.coords.longitude,
-      selectedTreasure.location.latitude,
-      selectedTreasure.location.longitude
+          `Current GPS fix uncertainty is ±${Math.round(
+            accuracy,
+          )}m. Do you wish to stamp these coordinates anyway?`,
+
+          [
+            {
+              text:
+                'CANCEL',
+
+              style:
+                'cancel',
+            },
+
+            {
+              text:
+                'STAMP ANYWAY',
+
+              onPress:
+                navigateToCreate,
+            },
+          ],
+        );
+
+        return;
+      }
+
+      navigateToCreate();
+    }, [
+      safeNavigate,
+      userLocation,
+    ]);
+
+  /* ---------------------------------------------------------------------- */
+  /* Archive treasure                                                      */
+  /* ---------------------------------------------------------------------- */
+
+  const handleArchiveTreasure =
+    useCallback(
+      async (
+        treasureId?: string,
+      ) => {
+        if (
+          !treasureId ||
+          isArchiving
+        ) {
+          return;
+        }
+
+        setIsArchiving(
+          true,
+        );
+
+        try {
+          const treasureReference =
+            doc(
+              db,
+              'treasures',
+              treasureId,
+            );
+
+          await updateDoc(
+            treasureReference,
+            {
+              isArchived:
+                true,
+            },
+          );
+
+          setSelectedTreasure(
+            null,
+          );
+
+          Alert.alert(
+            'CACHE ARCHIVED',
+            'The treasure cache has been deactivated from the field map.',
+          );
+        } catch (
+          error
+        ) {
+          console.error(
+            '[Treasi Dashboard] Archive failed:',
+            error,
+          );
+
+          Alert.alert(
+            'ACTION FAILED',
+
+            error instanceof
+            Error
+              ? error.message
+              : 'Unable to update cache status.',
+          );
+        } finally {
+          setIsArchiving(
+            false,
+          );
+        }
+      },
+      [
+        isArchiving,
+      ],
     );
-  }, [selectedTreasure, userLocation]);
 
-  const isSelectedTreasureCreator = selectedTreasure?.creatorId === currentUser?.uid;
+  /* ---------------------------------------------------------------------- */
+  /* Activity display name                                                 */
+  /* ---------------------------------------------------------------------- */
+
+  const getDisplayUsername =
+    useCallback(
+      (
+        item:
+          ActivityFeedDocument,
+      ): string => {
+        if (
+          item.userId ===
+          currentUser?.uid
+        ) {
+          return normaliseUsername(
+            userData
+              ?.username ||
+              currentUser
+                ?.displayName ||
+              currentUser?.email,
+            'YOU',
+          );
+        }
+
+        return normaliseUsername(
+          item.username,
+        );
+      },
+      [
+        currentUser?.displayName,
+        currentUser?.email,
+        currentUser?.uid,
+        userData?.username,
+      ],
+    );
+
+  /* ---------------------------------------------------------------------- */
+  /* Selected distance                                                     */
+  /* ---------------------------------------------------------------------- */
+
+  const selectedDistance =
+    useMemo(() => {
+      if (
+        !selectedTreasure ||
+        !userLocation ||
+        !selectedTreasure.location
+      ) {
+        return null;
+      }
+
+      const {
+        latitude:
+          userLatitude,
+
+        longitude:
+          userLongitude,
+      } =
+        userLocation.coords;
+
+      const {
+        latitude:
+          treasureLatitude,
+
+        longitude:
+          treasureLongitude,
+      } =
+        selectedTreasure.location;
+
+      if (
+        !isValidCoordinate(
+          userLatitude,
+          userLongitude,
+        ) ||
+        !isValidCoordinate(
+          treasureLatitude,
+          treasureLongitude,
+        )
+      ) {
+        return null;
+      }
+
+      return calculateHaversineDistance(
+        userLatitude,
+        userLongitude,
+        treasureLatitude,
+        treasureLongitude,
+      );
+    }, [
+      selectedTreasure,
+      userLocation,
+    ]);
+
+  const isSelectedTreasureCreator =
+    Boolean(
+      selectedTreasure &&
+        currentUser?.uid &&
+        selectedTreasure.creatorId ===
+          currentUser.uid,
+    );
+
+  /* ---------------------------------------------------------------------- */
+  /* Accuracy text                                                         */
+  /* ---------------------------------------------------------------------- */
+
+  const locationStatusText =
+    useMemo(() => {
+      if (
+        isInitializingLocation
+      ) {
+        return Platform.OS ===
+          'web'
+          ? 'ACQUIRING BROWSER POSITION...'
+          : 'ACQUIRING SATELLITE FIX...';
+      }
+
+      if (!userLocation) {
+        return 'TELEMETRY OFFLINE';
+      }
+
+      const accuracy =
+        userLocation.coords
+          .accuracy;
+
+      if (
+        typeof accuracy ===
+          'number' &&
+        accuracy >
+          GPS_ACCURACY_WARNING_METERS
+      ) {
+        return `WEAK FIX (±${Math.round(
+          accuracy,
+        )}M)`;
+      }
+
+      return Platform.OS ===
+        'web'
+        ? 'BROWSER LOCATION LOCK'
+        : 'GPS SIGNAL LOCK';
+    }, [
+      isInitializingLocation,
+      userLocation,
+    ]);
+
+  /* ---------------------------------------------------------------------- */
+  /* Render                                                                */
+  /* ---------------------------------------------------------------------- */
 
   return (
     <View
       style={[
         styles.container,
+
         {
-          flexDirection: isLandscape ? 'row' : 'column',
-          paddingLeft: isLandscape ? Math.max(insets.left, 12) : 0,
-          paddingRight: isLandscape ? Math.max(insets.right, 12) : 0,
-          paddingTop: isLandscape ? 0 : Math.max(insets.top, 12),
-          paddingBottom: isLandscape ? 0 : Math.max(insets.bottom, 6),
+          flexDirection:
+            isLandscape
+              ? 'row'
+              : 'column',
+
+          paddingLeft:
+            isLandscape
+              ? Math.max(
+                  insets.left,
+                  12,
+                )
+              : 0,
+
+          paddingRight:
+            isLandscape
+              ? Math.max(
+                  insets.right,
+                  12,
+                )
+              : 0,
+
+          paddingTop:
+            isLandscape
+              ? 0
+              : Math.max(
+                  insets.top,
+                  12,
+                ),
+
+          paddingBottom:
+            isLandscape
+              ? 0
+              : Math.max(
+                  insets.bottom,
+                  6,
+                ),
         },
       ]}
     >
-      {/* LEFT VIEWPORT: Operational Map Canvas */}
-      <View style={isLandscape ? styles.leftViewportLandscape : styles.leftViewportPortrait}>
-        {Platform.OS === 'web' ? (
-          <View style={styles.webMapContainer}>
-            {React.createElement('iframe', {
-              ref: webMapRef,
-              title: 'Treasi Field Map',
-              srcDoc: webMapHtml,
-              style: { width: '100%', height: '100%', border: '0', display: 'block' },
-              loading: 'eager',
-            })}
-            {!isMapReady && (
-              <View style={styles.webMapLoadingOverlay} pointerEvents="none">
-                <ActivityIndicator size="small" color="#A64B2A" />
-                <Text style={styles.webMapLoadingText}>LOADING FIELD MAP...</Text>
-              </View>
-            )}
-          </View>
-        ) : (() => {
-          const NativeMapView = require('react-native-maps').default;
-          const { Marker: NativeMarker, PROVIDER_DEFAULT: nativeProviderDefault } = require('react-native-maps');
-          return (
-            <NativeMapView
-              ref={mapRef}
-              provider={nativeProviderDefault}
-              style={StyleSheet.absoluteFillObject}
-              initialRegion={region}
-              customMapStyle={VINTAGE_MAP_STYLE}
-              showsUserLocation={true}
-              showsCompass={false}
-              onMapReady={() => setIsMapReady(true)}
-              accessibilityLabel="Scavenger Hunt Field Map Canvas"
-            >
-              {nearbyTreasures.map((treasure, index) => (
-                <NativeMarker
-                  key={treasure.treasureId || `treasure-marker-${index}`}
-                  coordinate={{
-                    latitude: treasure.location.latitude,
-                    longitude: treasure.location.longitude,
-                  }}
-                  title={treasure.title}
-                  description={`Hidden by ${treasure.creatorName || 'Unknown explorer'}`}
-                  onPress={() => handleMarkerPress(treasure)}
-                >
-                  <View style={styles.customMarker}>
-                    <MaterialCommunityIcons name="treasure-chest" size={14} color="#F3ECD8" />
-                  </View>
-                </NativeMarker>
-              ))}
-            </NativeMapView>
-          );
-        })()}
+      {/* ================================================================ */}
+      {/* FIELD MAP                                                        */}
+      {/* ================================================================ */}
 
-        {/* Compass Banner */}
-        <View style={styles.compassOverlay} aria-hidden={true}>
-          <Ionicons name="compass-outline" size={16} color="#2A2420" />
-          <Text style={styles.compassText}>N</Text>
-        </View>
+      <View
+        style={
+          isLandscape
+            ? styles.leftViewportLandscape
+            : styles.leftViewportPortrait
+        }
+      >
+        <FieldMap
+          ref={mapRef}
+          initialRegion={
+            region
+          }
+          userLocation={
+            mapUserLocation
+          }
+          treasures={
+            mapTreasures
+          }
+          onTreasurePress={
+            handleTreasureMarkerPress
+          }
+          onReady={
+            handleMapReady
+          }
+        />
 
-        {/* Range Lock Badge */}
-        <View style={styles.radiusBadge} aria-hidden={true}>
-          <MaterialCommunityIcons name="radar" size={12} color="#2A2420" style={{ marginRight: 4 }} />
-          <Text style={styles.radiusBadgeText}>20KM RANGE LOCK ({nearbyTreasures.length})</Text>
-        </View>
+        {/* Compass */}
 
-        {/* Recenter Map Button */}
-        <TouchableOpacity
-          style={styles.recenterButton}
-          onPress={handleRecenterMap}
-          accessible={true}
-          accessibilityRole="button"
-          accessibilityLabel="Recenter map on current GPS location"
+        <View
+          style={
+            styles.compassOverlay
+          }
+          accessible={false}
         >
-          <Ionicons name="locate-sharp" size={16} color="#2A2420" />
+          <Ionicons
+            name="compass-outline"
+            size={16}
+            color="#2A2420"
+          />
+
+          <Text
+            style={
+              styles.compassText
+            }
+          >
+            N
+          </Text>
+        </View>
+
+        {/* Radius indicator */}
+
+        <View
+          style={
+            styles.radiusBadge
+          }
+          accessible={false}
+        >
+          <MaterialCommunityIcons
+            name="radar"
+            size={12}
+            color="#2A2420"
+            style={{
+              marginRight: 4,
+            }}
+          />
+
+          <Text
+            style={
+              styles.radiusBadgeText
+            }
+          >
+            {userLocation
+              ? `20KM RANGE LOCK (${nearbyTreasures.length})`
+              : `CACHE FIELD (${nearbyTreasures.length})`}
+          </Text>
+        </View>
+
+        {/* Recenter */}
+
+        <TouchableOpacity
+          style={
+            styles.recenterButton
+          }
+          onPress={
+            handleRecenterMap
+          }
+          accessible
+          accessibilityRole="button"
+          accessibilityLabel="Recenter map on current location"
+        >
+          <Ionicons
+            name="locate-sharp"
+            size={16}
+            color="#2A2420"
+          />
         </TouchableOpacity>
 
-        {/* Live Location Telemetry Badge */}
-        <Animated.View style={[styles.locationBadge, animatedBadgeStyle]}>
+        {/* Location status */}
+
+        <Animated.View
+          style={[
+            styles.locationBadge,
+            animatedBadgeStyle,
+          ]}
+        >
           <Ionicons
             name="radio-sharp"
             size={12}
             color={
-              userLocation?.coords?.accuracy && userLocation.coords.accuracy > 100
+              userLocation
+                ?.coords
+                ?.accuracy &&
+              userLocation.coords
+                .accuracy >
+                GPS_ACCURACY_WARNING_METERS
                 ? '#B08D57'
                 : '#A64B2A'
             }
-            style={{ marginRight: 4 }}
+            style={{
+              marginRight: 4,
+            }}
           />
-          <Text style={styles.locationBadgeText}>
-            {isInitializingLocation
-              ? 'ACQUIRING SATELLITE FIX...'
-              : userLocation
-              ? userLocation.coords.accuracy && userLocation.coords.accuracy > 100
-                ? `WEAK FIX (±${Math.round(userLocation.coords.accuracy)}M)`
-                : 'GPS SIGNAL LOCK'
-              : 'TELEMETRY OFFLINE'}
+
+          <Text
+            style={
+              styles.locationBadgeText
+            }
+          >
+            {
+              locationStatusText
+            }
           </Text>
         </Animated.View>
 
-        {/* GPS Error Banner */}
-        {locationError && (
-          <View style={styles.mapErrorBanner}>
-            <Ionicons name="warning-outline" size={14} color="#F3ECD8" style={{ marginRight: 6 }} />
-            <Text style={styles.mapErrorText}>{locationError}</Text>
-            <TouchableOpacity style={styles.retryButton} onPress={initializeLocationService}>
-              <Text style={styles.retryButtonText}>RETRY</Text>
+        {/* Location error */}
+
+        {locationError ? (
+          <View
+            style={
+              styles.mapErrorBanner
+            }
+          >
+            <Ionicons
+              name="warning-outline"
+              size={14}
+              color="#F3ECD8"
+              style={{
+                marginRight: 6,
+              }}
+            />
+
+            <Text
+              style={
+                styles.mapErrorText
+              }
+            >
+              {locationError}
+            </Text>
+
+            <TouchableOpacity
+              style={
+                styles.retryButton
+              }
+              onPress={() => {
+                void startLocationService();
+              }}
+            >
+              <Text
+                style={
+                  styles.retryButtonText
+                }
+              >
+                RETRY
+              </Text>
             </TouchableOpacity>
           </View>
-        )}
+        ) : null}
 
-        {(isInitializingLocation || (!isMapReady && Platform.OS !== 'web')) && (
-          <View style={styles.loadingContainer}>
-            <ActivityIndicator size="small" color="#A64B2A" />
+        {/* Initial loader */}
+
+        {(
+          isInitializingLocation ||
+          !isMapReady
+        ) && (
+          <View
+            style={
+              styles.loadingContainer
+            }
+            pointerEvents="none"
+          >
+            <ActivityIndicator
+              size="small"
+              color="#A64B2A"
+            />
           </View>
         )}
       </View>
 
-      {/* RIGHT VIEWPORT: Command Console */}
-      <View style={isLandscape ? styles.rightViewportLandscape : styles.rightViewportPortrait}>
-        {firestoreError && (
-          <View style={styles.firestoreErrorCard}>
-            <Ionicons name="cloud-offline-outline" size={12} color="#F3ECD8" style={{ marginRight: 4 }} />
-            <Text style={styles.firestoreErrorText}>{firestoreError}</Text>
-          </View>
-        )}
+      {/* ================================================================ */}
+      {/* COMMAND CONSOLE                                                  */}
+      {/* ================================================================ */}
 
-        {/* User Stats Card */}
-        <View style={styles.statusCard}>
-          <View style={styles.statusHeaderRow}>
-            <MaterialCommunityIcons name="star-four-points" size={12} color="#B08D57" />
-            <Text style={styles.statusHeader}>FIELD STATUS</Text>
-            <MaterialCommunityIcons name="star-four-points" size={12} color="#B08D57" />
-          </View>
+      <View
+        style={
+          isLandscape
+            ? styles.rightViewportLandscape
+            : styles.rightViewportPortrait
+        }
+      >
+        {/* Firestore error */}
 
-          <View style={styles.scoreRow}>
-            <Text style={styles.scoreText}>
-              {(userData?.totalPoints ?? 0).toLocaleString()}
+        {firestoreError ? (
+          <View
+            style={
+              styles.firestoreErrorCard
+            }
+          >
+            <Ionicons
+              name="cloud-offline-outline"
+              size={12}
+              color="#F3ECD8"
+              style={{
+                marginRight: 4,
+              }}
+            />
+
+            <Text
+              style={
+                styles.firestoreErrorText
+              }
+            >
+              {firestoreError}
             </Text>
-            <Text style={styles.ptsText}>PTS</Text>
           </View>
-          <Text style={styles.rankText}>{getRankTitle(userData?.totalPoints)}</Text>
+        ) : null}
+
+        {/* Field status */}
+
+        <View
+          style={
+            styles.statusCard
+          }
+        >
+          <View
+            style={
+              styles.statusHeaderRow
+            }
+          >
+            <MaterialCommunityIcons
+              name="star-four-points"
+              size={12}
+              color="#B08D57"
+            />
+
+            <Text
+              style={
+                styles.statusHeader
+              }
+            >
+              FIELD STATUS
+            </Text>
+
+            <MaterialCommunityIcons
+              name="star-four-points"
+              size={12}
+              color="#B08D57"
+            />
+          </View>
+
+          <View
+            style={
+              styles.scoreRow
+            }
+          >
+            <Text
+              style={
+                styles.scoreText
+              }
+            >
+              {(
+                userData
+                  ?.totalPoints ??
+                0
+              ).toLocaleString()}
+            </Text>
+
+            <Text
+              style={
+                styles.ptsText
+              }
+            >
+              PTS
+            </Text>
+          </View>
+
+          <Text
+            style={
+              styles.rankText
+            }
+          >
+            {getRankTitle(
+              userData
+                ?.totalPoints ??
+                0,
+            )}
+          </Text>
         </View>
 
-        {/* Field Signals Stream */}
-        <View style={styles.signalsContainer}>
-          <View style={styles.sectionHeaderRow}>
-            <MaterialCommunityIcons name="radio-handheld" size={14} color="#B08D57" />
-            <Text style={styles.sectionTitle}>RECENT SIGNALS</Text>
+        {/* Recent activity */}
+
+        <View
+          style={
+            styles.signalsContainer
+          }
+        >
+          <View
+            style={
+              styles.sectionHeaderRow
+            }
+          >
+            <MaterialCommunityIcons
+              name="radio-handheld"
+              size={14}
+              color="#B08D57"
+            />
+
+            <Text
+              style={
+                styles.sectionTitle
+              }
+            >
+              RECENT SIGNALS
+            </Text>
           </View>
 
           {isLoadingFeed ? (
-            <ActivityIndicator size="small" color="#B08D57" style={{ marginTop: 12 }} />
-          ) : activityFeed.length === 0 ? (
-            <View style={styles.emptyFeedBox}>
-              <Text style={styles.emptyFeedText}>NO FIELD SIGNALS DETECTED</Text>
+            <ActivityIndicator
+              size="small"
+              color="#B08D57"
+              style={{
+                marginTop: 12,
+              }}
+            />
+          ) : activityFeed.length ===
+            0 ? (
+            <View
+              style={
+                styles.emptyFeedBox
+              }
+            >
+              <Text
+                style={
+                  styles.emptyFeedText
+                }
+              >
+                NO FIELD SIGNALS DETECTED
+              </Text>
             </View>
           ) : (
             <ScrollView
-              style={styles.signalsScroll}
-              showsVerticalScrollIndicator={false}
-              contentContainerStyle={{ gap: 8 }}
+              style={
+                styles.signalsScroll
+              }
+              showsVerticalScrollIndicator={
+                false
+              }
+              contentContainerStyle={{
+                gap: 8,
+              }}
             >
-              {activityFeed.map((item, index) => (
-                <Animated.View
-                  key={item.activityId || `activity-signal-${index}`}
-                  entering={FadeInDown.delay(index * 100).duration(400)}
-                  style={styles.signalCard}
-                >
-                  <View style={styles.signalHeader}>
-                    <View style={styles.authorRow}>
-                      <Ionicons name="radio-outline" size={12} color="#A64B2A" style={{ marginRight: 4 }} />
-                      <Text style={styles.signalAuthor}>{getDisplayUsername(item)}</Text>
+              {activityFeed.map(
+                (
+                  item,
+                  index,
+                ) => (
+                  <Animated.View
+                    key={
+                      item.activityId ||
+                      `activity-${index}`
+                    }
+                    entering={FadeInDown.delay(
+                      Math.min(
+                        index * 80,
+                        400,
+                      ),
+                    ).duration(
+                      350,
+                    )}
+                    style={
+                      styles.signalCard
+                    }
+                  >
+                    <View
+                      style={
+                        styles.signalHeader
+                      }
+                    >
+                      <View
+                        style={
+                          styles.authorRow
+                        }
+                      >
+                        <Ionicons
+                          name="radio-outline"
+                          size={12}
+                          color="#A64B2A"
+                          style={{
+                            marginRight: 4,
+                          }}
+                        />
+
+                        <Text
+                          style={
+                            styles.signalAuthor
+                          }
+                        >
+                          {getDisplayUsername(
+                            item,
+                          )}
+                        </Text>
+                      </View>
+
+                      <Text
+                        style={
+                          styles.signalTimeTag
+                        }
+                      >
+                        {formatRelativeTime(
+                          item.createdAt,
+                        )}
+                      </Text>
                     </View>
-                    <Text style={styles.signalTimeTag}>{formatRelativeTime(item.createdAt)}</Text>
-                  </View>
-                  <Text style={styles.signalBody}>{item.message}</Text>
-                </Animated.View>
-              ))}
+
+                    <Text
+                      style={
+                        styles.signalBody
+                      }
+                    >
+                      {item.message ||
+                        'FIELD SIGNAL RECEIVED'}
+                    </Text>
+                  </Animated.View>
+                ),
+              )}
             </ScrollView>
           )}
         </View>
 
-        {/* Primary Action Button: Stamp Location */}
+        {/* Stamp location */}
+
         <AnimatedTouchableOpacity
-          style={[styles.stampButton, animatedButtonStyle]}
-          activeOpacity={0.85}
-          onPressIn={() => (buttonScale.value = withSpring(0.94))}
-          onPressOut={() => (buttonScale.value = withSpring(1.0))}
-          onPress={handleStampLocation}
-          accessible={true}
+          style={[
+            styles.stampButton,
+            animatedButtonStyle,
+          ]}
+          activeOpacity={
+            0.85
+          }
+          onPressIn={() => {
+            buttonScale.value =
+              withSpring(
+                0.94,
+              );
+          }}
+          onPressOut={() => {
+            buttonScale.value =
+              withSpring(
+                1,
+              );
+          }}
+          onPress={
+            handleStampLocation
+          }
+          accessible
           accessibilityRole="button"
           accessibilityLabel="Stamp Current Location"
         >
-          <Ionicons name="print-outline" size={16} color="#F3ECD8" style={{ marginRight: 6 }} />
-          <Text style={styles.stampButtonText}>STAMP LOCATION</Text>
+          <Ionicons
+            name="print-outline"
+            size={16}
+            color="#F3ECD8"
+            style={{
+              marginRight: 6,
+            }}
+          />
+
+          <Text
+            style={
+              styles.stampButtonText
+            }
+          >
+            STAMP LOCATION
+          </Text>
         </AnimatedTouchableOpacity>
 
-        {/* Navigation Bar */}
-        <FieldNavBar currentTab="MAP" onNavigate={onNavigate} />
+        <FieldNavBar
+          currentTab="MAP"
+          onNavigate={
+            onNavigate
+          }
+        />
       </View>
 
-      {/* TREASURE DETAILS MODAL */}
+      {/* ================================================================ */}
+      {/* TREASURE DETAILS                                                 */}
+      {/* ================================================================ */}
+
       <Modal
-        visible={!!selectedTreasure}
-        transparent={true}
+        visible={
+          Boolean(
+            selectedTreasure,
+          )
+        }
+        transparent
         animationType="fade"
-        onRequestClose={() => setSelectedTreasure(null)}
+        onRequestClose={() =>
+          setSelectedTreasure(
+            null,
+          )
+        }
       >
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalCard}>
-            <View style={styles.modalHeaderRow}>
-              <MaterialCommunityIcons name="treasure-chest" size={20} color="#A64B2A" />
-              <Text style={styles.modalTitle}>
-                {selectedTreasure?.title?.toUpperCase() || 'TREASURE CACHE'}
-              </Text>
-              <TouchableOpacity
-                onPress={() => setSelectedTreasure(null)}
-                accessible={true}
-                accessibilityRole="button"
-                accessibilityLabel="Close treasure modal"
+        <View
+          style={
+            styles.modalOverlay
+          }
+        >
+          <View
+            style={
+              styles.modalCard
+            }
+          >
+            <View
+              style={
+                styles.modalHeaderRow
+              }
+            >
+              <MaterialCommunityIcons
+                name="treasure-chest"
+                size={20}
+                color="#A64B2A"
+              />
+
+              <Text
+                style={
+                  styles.modalTitle
+                }
+                numberOfLines={
+                  2
+                }
               >
-                <Ionicons name="close-sharp" size={20} color="#2A2420" />
+                {normaliseUsername(
+                  selectedTreasure
+                    ?.title,
+                  'TREASURE CACHE',
+                )}
+              </Text>
+
+              <TouchableOpacity
+                onPress={() =>
+                  setSelectedTreasure(
+                    null,
+                  )
+                }
+                accessible
+                accessibilityRole="button"
+                accessibilityLabel="Close treasure details"
+              >
+                <Ionicons
+                  name="close-sharp"
+                  size={20}
+                  color="#2A2420"
+                />
               </TouchableOpacity>
             </View>
 
-            <View style={styles.modalDivider} />
+            <View
+              style={
+                styles.modalDivider
+              }
+            />
 
-            <ScrollView style={styles.modalScrollBody}>
-              <View style={styles.modalMetaRow}>
-                <Ionicons name="person-outline" size={12} color="#B08D57" />
-                <Text style={styles.modalMetaLabel}>CREATOR:</Text>
-                <Text style={styles.modalMetaValue}>
-                  {selectedTreasure?.creatorName || 'UNKNOWN EXPLORER'}
+            <ScrollView
+              style={
+                styles.modalScrollBody
+              }
+              showsVerticalScrollIndicator={
+                false
+              }
+            >
+              <View
+                style={
+                  styles.modalMetaRow
+                }
+              >
+                <Ionicons
+                  name="person-outline"
+                  size={12}
+                  color="#B08D57"
+                />
+
+                <Text
+                  style={
+                    styles.modalMetaLabel
+                  }
+                >
+                  CREATOR:
+                </Text>
+
+                <Text
+                  style={
+                    styles.modalMetaValue
+                  }
+                >
+                  {selectedTreasure
+                    ?.creatorName ||
+                    'UNKNOWN EXPLORER'}
                 </Text>
               </View>
 
-              <View style={styles.modalMetaRow}>
-                <Ionicons name="navigate-outline" size={12} color="#B08D57" />
-                <Text style={styles.modalMetaLabel}>DISTANCE:</Text>
-                <Text style={styles.modalMetaValue}>
-                  {selectedDistance !== null
-                    ? formatDistanceText(selectedDistance)
-                    : 'CALCULATING...'}
+              <View
+                style={
+                  styles.modalMetaRow
+                }
+              >
+                <Ionicons
+                  name="navigate-outline"
+                  size={12}
+                  color="#B08D57"
+                />
+
+                <Text
+                  style={
+                    styles.modalMetaLabel
+                  }
+                >
+                  DISTANCE:
+                </Text>
+
+                <Text
+                  style={
+                    styles.modalMetaValue
+                  }
+                >
+                  {selectedDistance !==
+                  null
+                    ? formatDistanceText(
+                        selectedDistance,
+                      )
+                    : 'LOCATION FIX REQUIRED'}
                 </Text>
               </View>
 
-              {selectedTreasure?.location && (
-                <View style={styles.modalMetaRow}>
-                  <Ionicons name="location-outline" size={12} color="#B08D57" />
-                  <Text style={styles.modalMetaLabel}>COORDINATES:</Text>
-                  <Text style={styles.modalMetaValue}>
-                    {`${selectedTreasure.location.latitude.toFixed(
-                      4
-                    )}, ${selectedTreasure.location.longitude.toFixed(4)}`}
+              {selectedTreasure
+                ?.location &&
+              isValidCoordinate(
+                selectedTreasure
+                  .location
+                  .latitude,
+                selectedTreasure
+                  .location
+                  .longitude,
+              ) ? (
+                <View
+                  style={
+                    styles.modalMetaRow
+                  }
+                >
+                  <Ionicons
+                    name="location-outline"
+                    size={12}
+                    color="#B08D57"
+                  />
+
+                  <Text
+                    style={
+                      styles.modalMetaLabel
+                    }
+                  >
+                    COORDINATES:
                   </Text>
-                </View>
-              )}
 
-              {selectedTreasure?.hint ? (
-                <View style={styles.modalHintBox}>
-                  <Text style={styles.modalHintTitle}>CACHE HINT:</Text>
-                  <Text style={styles.modalHintText}>{selectedTreasure.hint}</Text>
+                  <Text
+                    style={
+                      styles.modalMetaValue
+                    }
+                  >
+                    {`${selectedTreasure.location.latitude.toFixed(
+                      4,
+                    )}, ${selectedTreasure.location.longitude.toFixed(
+                      4,
+                    )}`}
+                  </Text>
                 </View>
               ) : null}
 
-              {selectedTreasure?.imageUrl ? (
+              {selectedTreasure
+                ?.hint ? (
+                <View
+                  style={
+                    styles.modalHintBox
+                  }
+                >
+                  <Text
+                    style={
+                      styles.modalHintTitle
+                    }
+                  >
+                    CACHE HINT:
+                  </Text>
+
+                  <Text
+                    style={
+                      styles.modalHintText
+                    }
+                  >
+                    {
+                      selectedTreasure.hint
+                    }
+                  </Text>
+                </View>
+              ) : null}
+
+              {selectedTreasure
+                ?.imageUrl ? (
                 <Image
-                  source={{ uri: selectedTreasure.imageUrl }}
-                  style={styles.modalTreasureImage}
+                  source={{
+                    uri:
+                      selectedTreasure.imageUrl,
+                  }}
+                  style={
+                    styles.modalTreasureImage
+                  }
                   resizeMode="cover"
                 />
               ) : null}
             </ScrollView>
 
-            <View style={styles.modalActionsRow}>
+            <View
+              style={
+                styles.modalActionsRow
+              }
+            >
               {isSelectedTreasureCreator ? (
                 <TouchableOpacity
-                  style={[styles.modalActionButton, styles.modalArchiveButton]}
-                  disabled={isArchiving}
+                  style={[
+                    styles.modalActionButton,
+                    styles.modalArchiveButton,
+
+                    isArchiving && {
+                      opacity:
+                        0.6,
+                    },
+                  ]}
+                  disabled={
+                    isArchiving
+                  }
                   onPress={() => {
+                    const treasureId =
+                      selectedTreasure
+                        ?.treasureId;
+
+                    if (
+                      !treasureId
+                    ) {
+                      return;
+                    }
+
                     Alert.alert(
                       'CONFIRM ARCHIVE',
                       'Deactivate this treasure cache from the field map?',
                       [
-                        { text: 'CANCEL', style: 'cancel' },
                         {
-                          text: 'ARCHIVE',
-                          style: 'destructive',
-                          onPress: () => handleArchiveTreasure(selectedTreasure!.treasureId),
+                          text:
+                            'CANCEL',
+                          style:
+                            'cancel',
                         },
-                      ]
+
+                        {
+                          text:
+                            'ARCHIVE',
+                          style:
+                            'destructive',
+
+                          onPress:
+                            () => {
+                              void handleArchiveTreasure(
+                                treasureId,
+                              );
+                            },
+                        },
+                      ],
                     );
                   }}
                 >
                   {isArchiving ? (
-                    <ActivityIndicator size="small" color="#F3ECD8" />
+                    <ActivityIndicator
+                      size="small"
+                      color="#F3ECD8"
+                    />
                   ) : (
                     <>
-                      <Ionicons name="archive-outline" size={14} color="#F3ECD8" style={{ marginRight: 4 }} />
-                      <Text style={styles.modalButtonText}>ARCHIVE CACHE</Text>
+                      <Ionicons
+                        name="archive-outline"
+                        size={14}
+                        color="#F3ECD8"
+                        style={{
+                          marginRight: 4,
+                        }}
+                      />
+
+                      <Text
+                        style={
+                          styles.modalButtonText
+                        }
+                      >
+                        ARCHIVE CACHE
+                      </Text>
                     </>
                   )}
                 </TouchableOpacity>
               ) : (
                 <TouchableOpacity
-                  style={[styles.modalActionButton, styles.modalTrackButton]}
+                  style={[
+                    styles.modalActionButton,
+                    styles.modalTrackButton,
+                  ]}
                   onPress={() => {
-                    const target = selectedTreasure;
-                    setSelectedTreasure(null);
-                    if (target) {
-                      safeNavigate('HUNT', {
-                        treasureId: target.treasureId,
-                        mode: 'hunt',
-                        latitude: target.location.latitude,
-                        longitude: target.location.longitude,
-                      });
+                    const target =
+                      selectedTreasure;
+
+                    if (
+                      !target ||
+                      !target.treasureId ||
+                      !target.location
+                    ) {
+                      return;
                     }
+
+                    setSelectedTreasure(
+                      null,
+                    );
+
+                    safeNavigate(
+                      'HUNT',
+                      {
+                        treasureId:
+                          target.treasureId,
+
+                        mode:
+                          'hunt',
+
+                        latitude:
+                          target.location
+                            .latitude,
+
+                        longitude:
+                          target.location
+                            .longitude,
+                      },
+                    );
                   }}
                 >
-                  <Ionicons name="compass-outline" size={14} color="#F3ECD8" style={{ marginRight: 4 }} />
-                  <Text style={styles.modalButtonText}>TRACK IN HUNT</Text>
+                  <Ionicons
+                    name="compass-outline"
+                    size={14}
+                    color="#F3ECD8"
+                    style={{
+                      marginRight: 4,
+                    }}
+                  />
+
+                  <Text
+                    style={
+                      styles.modalButtonText
+                    }
+                  >
+                    TRACK IN HUNT
+                  </Text>
                 </TouchableOpacity>
               )}
 
               <TouchableOpacity
-                style={[styles.modalActionButton, styles.modalCloseButton]}
-                onPress={() => setSelectedTreasure(null)}
+                style={[
+                  styles.modalActionButton,
+                  styles.modalCloseButton,
+                ]}
+                onPress={() =>
+                  setSelectedTreasure(
+                    null,
+                  )
+                }
               >
-                <Text style={styles.modalCloseButtonText}>DISMISS</Text>
+                <Text
+                  style={
+                    styles.modalCloseButtonText
+                  }
+                >
+                  DISMISS
+                </Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -1052,437 +2836,928 @@ body{overflow:hidden;font-family:Arial,sans-serif;}
   );
 };
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#2C3B2E',
-  },
-  leftViewportLandscape: {
-    flex: 0.6,
-    position: 'relative',
-    backgroundColor: '#E8DCC0',
-    borderRightWidth: 3,
-    borderColor: '#B08D57',
-  },
-  leftViewportPortrait: {
-    height: '45%',
-    position: 'relative',
-    backgroundColor: '#E8DCC0',
-    borderBottomWidth: 3,
-    borderColor: '#B08D57',
-  },
-  rightViewportLandscape: {
-    flex: 0.4,
-    backgroundColor: '#2C3B2E',
-    padding: 12,
-    justifyContent: 'space-between',
-  },
-  rightViewportPortrait: {
-    flex: 1,
-    backgroundColor: '#2C3B2E',
-    padding: 12,
-    justifyContent: 'space-between',
-  },
-  webMapContainer: {
-    flex: 1,
-    width: '100%',
-    height: '100%',
-    backgroundColor: '#E8DCC0',
-    overflow: 'hidden',
-  },
-  webMapLoadingOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: 'rgba(232,220,192,0.82)',
-    gap: 8,
-  },
-  webMapLoadingText: {
-    color: '#2A2420',
-    fontSize: 9,
-    fontWeight: 'bold',
-    letterSpacing: 1,
-  },
+/* -------------------------------------------------------------------------- */
+/* Styles                                                                     */
+/* -------------------------------------------------------------------------- */
 
-  loadingContainer: {
-    position: 'absolute',
-    bottom: 16,
-    right: 16,
-    backgroundColor: '#E8DCC0',
-    padding: 6,
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor: '#B08D57',
-  },
-  compassOverlay: {
-    position: 'absolute',
-    top: 12,
-    left: 12,
-    backgroundColor: '#E8DCC0',
-    borderWidth: 1,
-    borderColor: '#2A2420',
-    borderRadius: 20,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-  },
-  compassText: {
-    fontSize: 12,
-    fontWeight: 'bold',
-    color: '#2A2420',
-  },
-  radiusBadge: {
-    position: 'absolute',
-    bottom: 12,
-    left: 12,
-    backgroundColor: '#E8DCC0',
-    borderWidth: 1,
-    borderColor: '#B08D57',
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 2,
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  radiusBadgeText: {
-    fontSize: 9,
-    fontWeight: 'bold',
-    color: '#2A2420',
-    letterSpacing: 1,
-  },
-  recenterButton: {
-    position: 'absolute',
-    bottom: 12,
-    right: 12,
-    backgroundColor: '#E8DCC0',
-    borderWidth: 1,
-    borderColor: '#B08D57',
-    padding: 8,
-    borderRadius: 20,
-    elevation: 3,
-  },
-  locationBadge: {
-    position: 'absolute',
-    top: 12,
-    alignSelf: 'center',
-    backgroundColor: '#F3ECD8',
-    borderWidth: 1,
-    borderColor: '#B08D57',
-    paddingHorizontal: 10,
-    paddingVertical: 3,
-    borderRadius: 2,
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  locationBadgeText: {
-    fontSize: 10,
-    fontWeight: 'bold',
-    color: '#2A2420',
-    letterSpacing: 1,
-  },
-  mapErrorBanner: {
-    position: 'absolute',
-    top: 45,
-    alignSelf: 'center',
-    backgroundColor: '#A64B2A',
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 4,
-    flexDirection: 'row',
-    alignItems: 'center',
-    maxWidth: '90%',
-  },
-  mapErrorText: {
-    color: '#F3ECD8',
-    fontSize: 9,
-    fontWeight: 'bold',
-    letterSpacing: 0.5,
-    flexShrink: 1,
-  },
-  retryButton: {
-    backgroundColor: '#F3ECD8',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 2,
-    marginLeft: 8,
-  },
-  retryButtonText: {
-    color: '#2A2420',
-    fontSize: 8,
-    fontWeight: 'bold',
-  },
-  customMarker: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    backgroundColor: '#A64B2A',
-    borderWidth: 2,
-    borderColor: '#F3ECD8',
-    alignItems: 'center',
-    justifyContent: 'center',
-    elevation: 4,
-  },
-  statusCard: {
-    backgroundColor: '#E8DCC0',
-    borderWidth: 2,
-    borderColor: '#B08D57',
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    alignItems: 'center',
-    position: 'relative',
-    borderRadius: 2,
-  },
-  statusHeaderRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-  },
-  statusHeader: {
-    color: '#2A2420',
-    fontSize: 11,
-    fontWeight: 'bold',
-    letterSpacing: 1.5,
-  },
-  scoreRow: {
-    flexDirection: 'row',
-    alignItems: 'baseline',
-    marginVertical: 2,
-  },
-  scoreText: {
-    fontSize: 26,
-    fontWeight: 'bold',
-    color: '#A64B2A',
-    letterSpacing: 1,
-  },
-  ptsText: {
-    fontSize: 12,
-    fontWeight: 'bold',
-    color: '#A64B2A',
-    marginLeft: 4,
-  },
-  rankText: {
-    color: '#2A2420',
-    fontSize: 9,
-    fontWeight: 'bold',
-    letterSpacing: 1,
-  },
-  firestoreErrorCard: {
-    backgroundColor: '#A64B2A',
-    padding: 4,
-    borderRadius: 2,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 4,
-  },
-  firestoreErrorText: {
-    color: '#F3ECD8',
-    fontSize: 8,
-    fontWeight: 'bold',
-  },
-  signalsContainer: {
-    flex: 1,
-    marginVertical: 8,
-  },
-  sectionHeaderRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    marginBottom: 6,
-  },
-  sectionTitle: {
-    color: '#B08D57',
-    fontSize: 10,
-    fontWeight: 'bold',
-    letterSpacing: 1.5,
-  },
-  signalsScroll: {
-    flex: 1,
-  },
-  emptyFeedBox: {
-    padding: 12,
-    borderWidth: 1,
-    borderColor: '#B08D57',
-    borderStyle: 'dashed',
-    borderRadius: 4,
-    alignItems: 'center',
-    marginTop: 6,
-  },
-  emptyFeedText: {
-    color: '#E8DCC0',
-    fontSize: 9,
-    letterSpacing: 1,
-  },
-  signalCard: {
-    backgroundColor: '#F3ECD8',
-    borderRadius: 4,
-    borderWidth: 1,
-    borderColor: '#B08D57',
-    padding: 8,
-  },
-  signalHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 4,
-  },
-  authorRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  signalAuthor: {
-    color: '#A64B2A',
-    fontWeight: 'bold',
-    fontSize: 10,
-  },
-  signalTimeTag: {
-    color: '#8C8275',
-    fontSize: 8,
-    fontWeight: 'bold',
-  },
-  signalBody: {
-    color: '#2A2420',
-    fontSize: 10,
-    lineHeight: 13,
-  },
-  stampButton: {
-    backgroundColor: '#A64B2A',
-    paddingVertical: 10,
-    borderRadius: 4,
-    borderWidth: 1,
-    borderColor: '#B08D57',
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 8,
-    minHeight: 48,
-  },
-  stampButtonText: {
-    color: '#F3ECD8',
-    fontWeight: 'bold',
-    fontSize: 12,
-    letterSpacing: 2,
-  },
+const styles =
+  StyleSheet.create({
+    container: {
+      flex: 1,
 
-  // Modal Styles
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.65)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 16,
-  },
-  modalCard: {
-    width: '100%',
-    maxWidth: 420,
-    backgroundColor: '#F3ECD8',
-    borderRadius: 6,
-    borderWidth: 2,
-    borderColor: '#B08D57',
-    padding: 16,
-    maxHeight: '85%',
-  },
-  modalHeaderRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 8,
-  },
-  modalTitle: {
-    flex: 1,
-    fontSize: 14,
-    fontWeight: 'bold',
-    color: '#2A2420',
-    letterSpacing: 1,
-  },
-  modalDivider: {
-    height: 1,
-    backgroundColor: '#B08D57',
-    marginVertical: 10,
-  },
-  modalScrollBody: {
-    marginBottom: 12,
-  },
-  modalMetaRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    marginBottom: 6,
-  },
-  modalMetaLabel: {
-    fontSize: 10,
-    fontWeight: 'bold',
-    color: '#8C8275',
-  },
-  modalMetaValue: {
-    fontSize: 10,
-    fontWeight: 'bold',
-    color: '#2A2420',
-  },
-  modalHintBox: {
-    backgroundColor: '#E8DCC0',
-    borderWidth: 1,
-    borderColor: '#B08D57',
-    padding: 8,
-    borderRadius: 4,
-    marginTop: 8,
-  },
-  modalHintTitle: {
-    fontSize: 9,
-    fontWeight: 'bold',
-    color: '#A64B2A',
-    marginBottom: 2,
-  },
-  modalHintText: {
-    fontSize: 11,
-    color: '#2A2420',
-    lineHeight: 15,
-  },
-  modalTreasureImage: {
-    width: '100%',
-    height: 140,
-    borderRadius: 4,
-    marginTop: 10,
-    borderWidth: 1,
-    borderColor: '#B08D57',
-  },
-  modalActionsRow: {
-    flexDirection: 'row',
-    gap: 8,
-    justifyContent: 'flex-end',
-  },
-  modalActionButton: {
-    flex: 1,
-    paddingVertical: 10,
-    borderRadius: 4,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  modalTrackButton: {
-    backgroundColor: '#2C3B2E',
-  },
-  modalArchiveButton: {
-    backgroundColor: '#A64B2A',
-  },
-  modalCloseButton: {
-    backgroundColor: 'transparent',
-    borderWidth: 1,
-    borderColor: '#B08D57',
-    flex: 0.5,
-  },
-  modalButtonText: {
-    color: '#F3ECD8',
-    fontSize: 10,
-    fontWeight: 'bold',
-    letterSpacing: 1,
-  },
-  modalCloseButtonText: {
-    color: '#2A2420',
-    fontSize: 10,
-    fontWeight: 'bold',
-    letterSpacing: 1,
-  },
-});
+      backgroundColor:
+        '#2C3B2E',
+    },
+
+    /* -------------------------------------------------------------------- */
+    /* Layout                                                               */
+    /* -------------------------------------------------------------------- */
+
+    leftViewportLandscape: {
+      flex: 0.6,
+
+      position:
+        'relative',
+
+      backgroundColor:
+        '#E8DCC0',
+
+      borderRightWidth:
+        3,
+
+      borderColor:
+        '#B08D57',
+
+      overflow:
+        'hidden',
+    },
+
+    leftViewportPortrait: {
+      height:
+        '45%',
+
+      position:
+        'relative',
+
+      backgroundColor:
+        '#E8DCC0',
+
+      borderBottomWidth:
+        3,
+
+      borderColor:
+        '#B08D57',
+
+      overflow:
+        'hidden',
+    },
+
+    rightViewportLandscape: {
+      flex: 0.4,
+
+      backgroundColor:
+        '#2C3B2E',
+
+      padding: 12,
+
+      justifyContent:
+        'space-between',
+
+      minWidth: 0,
+    },
+
+    rightViewportPortrait: {
+      flex: 1,
+
+      backgroundColor:
+        '#2C3B2E',
+
+      padding: 12,
+
+      justifyContent:
+        'space-between',
+
+      minHeight: 0,
+    },
+
+    /* -------------------------------------------------------------------- */
+    /* Map overlays                                                         */
+    /* -------------------------------------------------------------------- */
+
+    loadingContainer: {
+      position:
+        'absolute',
+
+      bottom: 16,
+
+      right: 16,
+
+      backgroundColor:
+        '#E8DCC0',
+
+      padding: 6,
+
+      borderRadius: 20,
+
+      borderWidth: 1,
+
+      borderColor:
+        '#B08D57',
+    },
+
+    compassOverlay: {
+      position:
+        'absolute',
+
+      top: 12,
+
+      left: 12,
+
+      backgroundColor:
+        '#E8DCC0',
+
+      borderWidth: 1,
+
+      borderColor:
+        '#2A2420',
+
+      borderRadius: 20,
+
+      paddingHorizontal:
+        8,
+
+      paddingVertical:
+        4,
+
+      flexDirection:
+        'row',
+
+      alignItems:
+        'center',
+
+      gap: 4,
+    },
+
+    compassText: {
+      fontSize: 12,
+
+      fontWeight:
+        'bold',
+
+      color:
+        '#2A2420',
+    },
+
+    radiusBadge: {
+      position:
+        'absolute',
+
+      bottom: 12,
+
+      left: 12,
+
+      backgroundColor:
+        '#E8DCC0',
+
+      borderWidth: 1,
+
+      borderColor:
+        '#B08D57',
+
+      paddingHorizontal:
+        8,
+
+      paddingVertical:
+        4,
+
+      borderRadius: 2,
+
+      flexDirection:
+        'row',
+
+      alignItems:
+        'center',
+    },
+
+    radiusBadgeText: {
+      fontSize: 9,
+
+      fontWeight:
+        'bold',
+
+      color:
+        '#2A2420',
+
+      letterSpacing: 1,
+    },
+
+    recenterButton: {
+      position:
+        'absolute',
+
+      bottom: 12,
+
+      right: 12,
+
+      backgroundColor:
+        '#E8DCC0',
+
+      borderWidth: 1,
+
+      borderColor:
+        '#B08D57',
+
+      padding: 8,
+
+      borderRadius: 20,
+
+      elevation: 3,
+
+      shadowColor:
+        '#000',
+
+      shadowOpacity:
+        0.15,
+
+      shadowRadius: 3,
+
+      shadowOffset: {
+        width: 0,
+        height: 2,
+      },
+    },
+
+    locationBadge: {
+      position:
+        'absolute',
+
+      top: 12,
+
+      alignSelf:
+        'center',
+
+      backgroundColor:
+        '#F3ECD8',
+
+      borderWidth: 1,
+
+      borderColor:
+        '#B08D57',
+
+      paddingHorizontal:
+        10,
+
+      paddingVertical:
+        3,
+
+      borderRadius: 2,
+
+      flexDirection:
+        'row',
+
+      alignItems:
+        'center',
+
+      maxWidth:
+        '70%',
+    },
+
+    locationBadgeText: {
+      fontSize: 10,
+
+      fontWeight:
+        'bold',
+
+      color:
+        '#2A2420',
+
+      letterSpacing: 1,
+
+      flexShrink: 1,
+    },
+
+    mapErrorBanner: {
+      position:
+        'absolute',
+
+      top: 45,
+
+      alignSelf:
+        'center',
+
+      backgroundColor:
+        '#A64B2A',
+
+      paddingHorizontal:
+        10,
+
+      paddingVertical:
+        6,
+
+      borderRadius: 4,
+
+      flexDirection:
+        'row',
+
+      alignItems:
+        'center',
+
+      maxWidth:
+        '92%',
+    },
+
+    mapErrorText: {
+      color:
+        '#F3ECD8',
+
+      fontSize: 9,
+
+      fontWeight:
+        'bold',
+
+      letterSpacing:
+        0.5,
+
+      flex: 1,
+
+      flexShrink: 1,
+    },
+
+    retryButton: {
+      backgroundColor:
+        '#F3ECD8',
+
+      paddingHorizontal:
+        7,
+
+      paddingVertical:
+        4,
+
+      borderRadius: 2,
+
+      marginLeft: 8,
+    },
+
+    retryButtonText: {
+      color:
+        '#2A2420',
+
+      fontSize: 8,
+
+      fontWeight:
+        'bold',
+    },
+
+    /* -------------------------------------------------------------------- */
+    /* Status panel                                                         */
+    /* -------------------------------------------------------------------- */
+
+    statusCard: {
+      backgroundColor:
+        '#E8DCC0',
+
+      borderWidth: 2,
+
+      borderColor:
+        '#B08D57',
+
+      paddingVertical: 8,
+
+      paddingHorizontal:
+        12,
+
+      alignItems:
+        'center',
+
+      position:
+        'relative',
+
+      borderRadius: 2,
+    },
+
+    statusHeaderRow: {
+      flexDirection:
+        'row',
+
+      alignItems:
+        'center',
+
+      gap: 6,
+    },
+
+    statusHeader: {
+      color:
+        '#2A2420',
+
+      fontSize: 11,
+
+      fontWeight:
+        'bold',
+
+      letterSpacing:
+        1.5,
+    },
+
+    scoreRow: {
+      flexDirection:
+        'row',
+
+      alignItems:
+        'baseline',
+
+      marginVertical: 2,
+    },
+
+    scoreText: {
+      fontSize: 26,
+
+      fontWeight:
+        'bold',
+
+      color:
+        '#A64B2A',
+
+      letterSpacing: 1,
+    },
+
+    ptsText: {
+      fontSize: 12,
+
+      fontWeight:
+        'bold',
+
+      color:
+        '#A64B2A',
+
+      marginLeft: 4,
+    },
+
+    rankText: {
+      color:
+        '#2A2420',
+
+      fontSize: 9,
+
+      fontWeight:
+        'bold',
+
+      letterSpacing: 1,
+    },
+
+    /* -------------------------------------------------------------------- */
+    /* Firestore error                                                      */
+    /* -------------------------------------------------------------------- */
+
+    firestoreErrorCard: {
+      backgroundColor:
+        '#A64B2A',
+
+      padding: 5,
+
+      borderRadius: 2,
+
+      flexDirection:
+        'row',
+
+      alignItems:
+        'center',
+
+      justifyContent:
+        'center',
+
+      marginBottom: 4,
+    },
+
+    firestoreErrorText: {
+      color:
+        '#F3ECD8',
+
+      fontSize: 8,
+
+      fontWeight:
+        'bold',
+
+      flexShrink: 1,
+    },
+
+    /* -------------------------------------------------------------------- */
+    /* Activity feed                                                        */
+    /* -------------------------------------------------------------------- */
+
+    signalsContainer: {
+      flex: 1,
+
+      marginVertical: 8,
+
+      minHeight: 0,
+    },
+
+    sectionHeaderRow: {
+      flexDirection:
+        'row',
+
+      alignItems:
+        'center',
+
+      gap: 4,
+
+      marginBottom: 6,
+    },
+
+    sectionTitle: {
+      color:
+        '#B08D57',
+
+      fontSize: 10,
+
+      fontWeight:
+        'bold',
+
+      letterSpacing:
+        1.5,
+    },
+
+    signalsScroll: {
+      flex: 1,
+    },
+
+    emptyFeedBox: {
+      padding: 12,
+
+      borderWidth: 1,
+
+      borderColor:
+        '#B08D57',
+
+      borderStyle:
+        'dashed',
+
+      borderRadius: 4,
+
+      alignItems:
+        'center',
+
+      marginTop: 6,
+    },
+
+    emptyFeedText: {
+      color:
+        '#E8DCC0',
+
+      fontSize: 9,
+
+      letterSpacing: 1,
+
+      textAlign:
+        'center',
+    },
+
+    signalCard: {
+      backgroundColor:
+        '#F3ECD8',
+
+      borderRadius: 4,
+
+      borderWidth: 1,
+
+      borderColor:
+        '#B08D57',
+
+      padding: 8,
+    },
+
+    signalHeader: {
+      flexDirection:
+        'row',
+
+      justifyContent:
+        'space-between',
+
+      alignItems:
+        'center',
+
+      marginBottom: 4,
+
+      gap: 8,
+    },
+
+    authorRow: {
+      flexDirection:
+        'row',
+
+      alignItems:
+        'center',
+
+      flex: 1,
+
+      minWidth: 0,
+    },
+
+    signalAuthor: {
+      color:
+        '#A64B2A',
+
+      fontWeight:
+        'bold',
+
+      fontSize: 10,
+
+      flexShrink: 1,
+    },
+
+    signalTimeTag: {
+      color:
+        '#8C8275',
+
+      fontSize: 8,
+
+      fontWeight:
+        'bold',
+    },
+
+    signalBody: {
+      color:
+        '#2A2420',
+
+      fontSize: 10,
+
+      lineHeight: 13,
+    },
+
+    /* -------------------------------------------------------------------- */
+    /* Stamp button                                                         */
+    /* -------------------------------------------------------------------- */
+
+    stampButton: {
+      backgroundColor:
+        '#A64B2A',
+
+      paddingVertical: 10,
+
+      borderRadius: 4,
+
+      borderWidth: 1,
+
+      borderColor:
+        '#B08D57',
+
+      flexDirection:
+        'row',
+
+      alignItems:
+        'center',
+
+      justifyContent:
+        'center',
+
+      marginBottom: 8,
+
+      minHeight: 48,
+    },
+
+    stampButtonText: {
+      color:
+        '#F3ECD8',
+
+      fontWeight:
+        'bold',
+
+      fontSize: 12,
+
+      letterSpacing: 2,
+    },
+
+    /* -------------------------------------------------------------------- */
+    /* Modal                                                                */
+    /* -------------------------------------------------------------------- */
+
+    modalOverlay: {
+      flex: 1,
+
+      backgroundColor:
+        'rgba(0, 0, 0, 0.65)',
+
+      justifyContent:
+        'center',
+
+      alignItems:
+        'center',
+
+      padding: 16,
+    },
+
+    modalCard: {
+      width:
+        '100%',
+
+      maxWidth: 420,
+
+      backgroundColor:
+        '#F3ECD8',
+
+      borderRadius: 6,
+
+      borderWidth: 2,
+
+      borderColor:
+        '#B08D57',
+
+      padding: 16,
+
+      maxHeight:
+        '85%',
+    },
+
+    modalHeaderRow: {
+      flexDirection:
+        'row',
+
+      alignItems:
+        'center',
+
+      justifyContent:
+        'space-between',
+
+      gap: 8,
+    },
+
+    modalTitle: {
+      flex: 1,
+
+      fontSize: 14,
+
+      fontWeight:
+        'bold',
+
+      color:
+        '#2A2420',
+
+      letterSpacing: 1,
+    },
+
+    modalDivider: {
+      height: 1,
+
+      backgroundColor:
+        '#B08D57',
+
+      marginVertical: 10,
+    },
+
+    modalScrollBody: {
+      marginBottom: 12,
+    },
+
+    modalMetaRow: {
+      flexDirection:
+        'row',
+
+      alignItems:
+        'center',
+
+      gap: 6,
+
+      marginBottom: 6,
+
+      flexWrap:
+        'wrap',
+    },
+
+    modalMetaLabel: {
+      fontSize: 10,
+
+      fontWeight:
+        'bold',
+
+      color:
+        '#8C8275',
+    },
+
+    modalMetaValue: {
+      fontSize: 10,
+
+      fontWeight:
+        'bold',
+
+      color:
+        '#2A2420',
+
+      flexShrink: 1,
+    },
+
+    modalHintBox: {
+      backgroundColor:
+        '#E8DCC0',
+
+      borderWidth: 1,
+
+      borderColor:
+        '#B08D57',
+
+      padding: 8,
+
+      borderRadius: 4,
+
+      marginTop: 8,
+    },
+
+    modalHintTitle: {
+      fontSize: 9,
+
+      fontWeight:
+        'bold',
+
+      color:
+        '#A64B2A',
+
+      marginBottom: 2,
+    },
+
+    modalHintText: {
+      fontSize: 11,
+
+      color:
+        '#2A2420',
+
+      lineHeight: 15,
+    },
+
+    modalTreasureImage: {
+      width:
+        '100%',
+
+      height: 140,
+
+      borderRadius: 4,
+
+      marginTop: 10,
+
+      borderWidth: 1,
+
+      borderColor:
+        '#B08D57',
+    },
+
+    modalActionsRow: {
+      flexDirection:
+        'row',
+
+      gap: 8,
+
+      justifyContent:
+        'flex-end',
+    },
+
+    modalActionButton: {
+      flex: 1,
+
+      paddingVertical: 10,
+
+      borderRadius: 4,
+
+      flexDirection:
+        'row',
+
+      alignItems:
+        'center',
+
+      justifyContent:
+        'center',
+
+      minHeight: 42,
+    },
+
+    modalTrackButton: {
+      backgroundColor:
+        '#2C3B2E',
+    },
+
+    modalArchiveButton: {
+      backgroundColor:
+        '#A64B2A',
+    },
+
+    modalCloseButton: {
+      backgroundColor:
+        'transparent',
+
+      borderWidth: 1,
+
+      borderColor:
+        '#B08D57',
+
+      flex: 0.5,
+    },
+
+    modalButtonText: {
+      color:
+        '#F3ECD8',
+
+      fontSize: 10,
+
+      fontWeight:
+        'bold',
+
+      letterSpacing: 1,
+
+      textAlign:
+        'center',
+    },
+
+    modalCloseButtonText: {
+      color:
+        '#2A2420',
+
+      fontSize: 10,
+
+      fontWeight:
+        'bold',
+
+      letterSpacing: 1,
+
+      textAlign:
+        'center',
+    },
+  });
+
+export default DashboardScreen;
