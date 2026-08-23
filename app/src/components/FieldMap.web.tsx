@@ -1,5 +1,6 @@
 import React, {
   forwardRef,
+  useCallback,
   useEffect,
   useImperativeHandle,
   useMemo,
@@ -9,57 +10,347 @@ import React, {
 
 import {
   ActivityIndicator,
+  Platform,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
 
-import {
+import type {
   FieldMapHandle,
   FieldMapProps,
+  FieldMapRegion,
+  FieldMapTreasure,
+  FieldMapUserLocation,
 } from './FieldMap.types';
 
-export const FieldMap = forwardRef<
-  FieldMapHandle,
-  FieldMapProps
->(
-  (
-    {
-      initialRegion,
-      userLocation,
-      treasures,
-      onTreasurePress,
-      onReady,
-    },
-    ref,
-  ) => {
-    const iframeRef =
-      useRef<HTMLIFrameElement | null>(
-        null,
-      );
+/* -------------------------------------------------------------------------- */
+/* Constants                                                                  */
+/* -------------------------------------------------------------------------- */
 
-    const [ready, setReady] =
-      useState(false);
+const FIELD_RADIUS_METRES =
+  20_000;
 
-    const html = useMemo(
-      () => `
+const COLOURS = {
+  parchment: '#E8DCC0',
+  parchmentLight: '#F3ECD8',
+  ink: '#2A2420',
+  brass: '#B08D57',
+  sienna: '#A64B2A',
+  forest: '#2C3B2E',
+} as const;
+
+/* -------------------------------------------------------------------------- */
+/* Types                                                                      */
+/* -------------------------------------------------------------------------- */
+
+interface PendingView {
+  region: FieldMapRegion;
+  animated: boolean;
+}
+
+interface MapMessage {
+  channel?: unknown;
+  type?: unknown;
+  treasureId?: unknown;
+  message?: unknown;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Helpers                                                                    */
+/* -------------------------------------------------------------------------- */
+
+// Confirms that values are usable geographic coordinates.
+const isValidCoordinate = (
+  latitude: unknown,
+  longitude: unknown,
+): boolean =>
+  typeof latitude ===
+    'number' &&
+  typeof longitude ===
+    'number' &&
+  Number.isFinite(
+    latitude,
+  ) &&
+  Number.isFinite(
+    longitude,
+  ) &&
+  latitude >= -90 &&
+  latitude <= 90 &&
+  longitude >= -180 &&
+  longitude <= 180;
+
+// Keeps geographic deltas inside safe map limits.
+const normaliseDelta = (
+  value: number,
+  maximum: number,
+): number => {
+  if (
+    !Number.isFinite(
+      value,
+    )
+  ) {
+    return 0.08;
+  }
+
+  return Math.min(
+    maximum,
+    Math.max(
+      0.0005,
+      Math.abs(
+        value,
+      ),
+    ),
+  );
+};
+
+// Sanitises map regions before sending them into the iframe.
+const normaliseRegion = (
+  region: FieldMapRegion,
+): FieldMapRegion => ({
+  latitude:
+    Number.isFinite(
+      region.latitude,
+    )
+      ? Math.min(
+          90,
+          Math.max(
+            -90,
+            region.latitude,
+          ),
+        )
+      : 0,
+
+  longitude:
+    Number.isFinite(
+      region.longitude,
+    )
+      ? Math.min(
+          180,
+          Math.max(
+            -180,
+            region.longitude,
+          ),
+        )
+      : 0,
+
+  latitudeDelta:
+    normaliseDelta(
+      region.latitudeDelta,
+      180,
+    ),
+
+  longitudeDelta:
+    normaliseDelta(
+      region.longitudeDelta,
+      360,
+    ),
+});
+
+// Rejects malformed treasure records before crossing the iframe boundary.
+const isRenderableTreasure = (
+  treasure: FieldMapTreasure,
+): boolean =>
+  typeof treasure.id ===
+    'string' &&
+  treasure.id.trim()
+    .length > 0 &&
+  isValidCoordinate(
+    treasure.latitude,
+    treasure.longitude,
+  );
+
+// Provides a validated user position or null.
+const normaliseUserLocation = (
+  location:
+    FieldMapUserLocation | null,
+): FieldMapUserLocation | null => {
+  if (
+    !location ||
+    !isValidCoordinate(
+      location.latitude,
+      location.longitude,
+    )
+  ) {
+    return null;
+  }
+
+  return {
+    latitude:
+      location.latitude,
+
+    longitude:
+      location.longitude,
+  };
+};
+
+/* -------------------------------------------------------------------------- */
+/* Web map                                                                    */
+/* -------------------------------------------------------------------------- */
+
+export const FieldMap =
+  forwardRef<
+    FieldMapHandle,
+    FieldMapProps
+  >(
+    (
+      {
+        initialRegion,
+        userLocation,
+        treasures,
+        onTreasurePress,
+        onReady,
+      },
+      ref,
+    ) => {
+      const iframeRef =
+        useRef<HTMLIFrameElement | null>(
+          null,
+        );
+
+      const readyNotifiedRef =
+        useRef(false);
+
+      const pendingViewRef =
+        useRef<PendingView | null>(
+          null,
+        );
+
+      /*
+       * initialRegion is intentionally captured once.
+       * Changing Dashboard region state must not reload the Leaflet iframe.
+       */
+      const initialRegionRef =
+        useRef<FieldMapRegion>(
+          normaliseRegion(
+            initialRegion,
+          ),
+        );
+
+      /*
+       * Each iframe receives its own private message channel.
+       * This prevents unrelated postMessage traffic from controlling the map.
+       */
+      const channelIdRef =
+        useRef(
+          `treasi-map-${Date.now()}-${Math.random()
+            .toString(36)
+            .slice(2)}`,
+        );
+
+      const [
+        ready,
+        setReady,
+      ] =
+        useState(false);
+
+      const [
+        mapError,
+        setMapError,
+      ] =
+        useState<
+          string | null
+        >(null);
+
+      /* -------------------------------------------------------------------- */
+      /* Validated data                                                       */
+      /* -------------------------------------------------------------------- */
+
+      const validTreasures =
+        useMemo(
+          () =>
+            treasures
+              .filter(
+                isRenderableTreasure,
+              )
+              .map(
+                (
+                  treasure,
+                ) => ({
+                  id:
+                    treasure.id,
+
+                  title:
+                    treasure.title
+                      ?.trim() ||
+                    'Treasure cache',
+
+                  creatorName:
+                    treasure.creatorName
+                      ?.trim() ||
+                    'Unknown explorer',
+
+                  latitude:
+                    treasure.latitude,
+
+                  longitude:
+                    treasure.longitude,
+                }),
+              ),
+          [
+            treasures,
+          ],
+        );
+
+      const validUserLocation =
+        useMemo(
+          () =>
+            normaliseUserLocation(
+              userLocation,
+            ),
+          [
+            userLocation,
+          ],
+        );
+
+      /* -------------------------------------------------------------------- */
+      /* Embedded Leaflet document                                            */
+      /* -------------------------------------------------------------------- */
+
+      const html =
+        useMemo(
+          () => {
+            const safeInitialRegion =
+              initialRegionRef.current;
+
+            const channel =
+              JSON.stringify(
+                channelIdRef.current,
+              );
+
+            const region =
+              JSON.stringify(
+                safeInitialRegion,
+              );
+
+            return `
 <!doctype html>
 
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8" />
 
   <meta
     name="viewport"
-    content="width=device-width, initial-scale=1.0"
+    content="width=device-width, initial-scale=1.0, maximum-scale=1.0"
+  />
+
+  <meta
+    name="referrer"
+    content="no-referrer"
   />
 
   <link
     rel="stylesheet"
     href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    crossorigin=""
   />
 
   <style>
+    :root {
+      color-scheme: light;
+    }
+
     html,
     body,
     #map {
@@ -72,34 +363,71 @@ export const FieldMap = forwardRef<
     html,
     body {
       overflow: hidden;
-      background: #E8DCC0;
-      font-family: Arial, sans-serif;
+      background: ${COLOURS.parchment};
+      font-family:
+        ui-monospace,
+        "SFMono-Regular",
+        Consolas,
+        "Liberation Mono",
+        monospace;
+    }
+
+    #map {
+      outline: none;
     }
 
     .leaflet-container {
-      background: #E8DCC0;
+      background:
+        ${COLOURS.parchment};
     }
 
     .leaflet-tile-pane {
       filter:
-        sepia(.22)
+        sepia(.24)
         saturate(.72)
-        contrast(.95);
+        contrast(.94)
+        brightness(1.02);
+    }
+
+    .leaflet-control-zoom {
+      border:
+        1px solid
+        ${COLOURS.brass}
+        !important;
     }
 
     .leaflet-control-zoom a {
-      background: #F3ECD8;
-      color: #2A2420;
-      border-color: #B08D57;
+      background:
+        ${COLOURS.parchmentLight};
+      color:
+        ${COLOURS.ink};
+      border-color:
+        ${COLOURS.brass};
+      min-width: 32px;
+      min-height: 32px;
+      line-height: 32px;
+    }
+
+    .leaflet-control-zoom a:focus-visible {
+      outline:
+        3px solid
+        ${COLOURS.sienna};
+      outline-offset:
+        2px;
     }
 
     .leaflet-control-attribution {
       background:
-        rgba(243,236,216,.88)
+        rgba(
+          243,
+          236,
+          216,
+          .92
+        )
         !important;
 
       color:
-        #2A2420
+        ${COLOURS.ink}
         !important;
 
       font-size:
@@ -107,461 +435,1184 @@ export const FieldMap = forwardRef<
         !important;
     }
 
+    .leaflet-control-attribution a {
+      color:
+        ${COLOURS.forest};
+    }
+
     .leaflet-popup-content-wrapper,
     .leaflet-popup-tip {
-      background: #F3ECD8;
-      color: #2A2420;
+      background:
+        ${COLOURS.parchmentLight};
+
+      color:
+        ${COLOURS.ink};
+    }
+
+    .leaflet-popup-content-wrapper {
+      border:
+        1px solid
+        ${COLOURS.brass};
+
+      border-radius:
+        5px;
     }
 
     .treasi-popup {
+      min-width: 145px;
       font-size: 12px;
-      line-height: 1.35;
+      line-height: 1.45;
+    }
+
+    .treasi-popup-title {
+      display: block;
+      margin-bottom: 3px;
+      font-weight: 700;
+      color:
+        ${COLOURS.ink};
+    }
+
+    .treasi-popup-creator {
+      color:
+        #5F4B32;
+    }
+
+    .treasi-marker-host {
+      background:
+        transparent
+        !important;
+
+      border:
+        0
+        !important;
+    }
+
+    .treasi-treasure-marker {
+      width: 32px;
+      height: 32px;
+
+      display: flex;
+      align-items: center;
+      justify-content: center;
+
+      border-radius: 50%;
+
+      box-sizing:
+        border-box;
+
+      border:
+        2px solid
+        ${COLOURS.parchmentLight};
+
+      background:
+        ${COLOURS.sienna};
+
+      color:
+        ${COLOURS.parchmentLight};
+
+      font-size: 16px;
+      font-weight: 800;
+
+      box-shadow:
+        0 2px 5px
+        rgba(
+          0,
+          0,
+          0,
+          .28
+        );
+    }
+
+    .leaflet-marker-icon:focus-visible {
+      outline:
+        3px solid
+        ${COLOURS.ink};
+
+      outline-offset:
+        3px;
+
+      border-radius:
+        50%;
     }
   </style>
 </head>
 
 <body>
-  <div id="map"></div>
+  <div
+    id="map"
+    role="application"
+    aria-label="Treasi field map"
+  ></div>
 
   <script
     src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    crossorigin=""
   ></script>
 
   <script>
     (function () {
-      const map = L.map(
-        'map',
-        {
-          zoomControl: true,
-          attributionControl: true
-        }
-      ).setView(
-        [
-          ${initialRegion.latitude},
-          ${initialRegion.longitude}
-        ],
-        13
-      );
+      'use strict';
 
-      L.tileLayer(
-        'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
-        {
-          maxZoom: 19,
-          attribution:
-            '&copy; OpenStreetMap contributors'
-        }
-      ).addTo(map);
+      const CHANNEL =
+        ${channel};
 
-      const treasureLayer =
-        L.layerGroup().addTo(map);
+      const INITIAL_REGION =
+        ${region};
 
-      let userMarker = null;
-      let radiusCircle = null;
+      const FIELD_RADIUS_METRES =
+        ${FIELD_RADIUS_METRES};
 
-      function send(message) {
+      function send(
+        message
+      ) {
         try {
           window.parent.postMessage(
-            message,
+            Object.assign(
+              {
+                channel:
+                  CHANNEL
+              },
+              message
+            ),
             '*'
           );
-        } catch (_) {}
+        } catch (_) {
+          // Parent communication is optional during iframe teardown.
+        }
       }
 
-      function escapeHtml(value) {
+      if (
+        typeof window.L ===
+        'undefined'
+      ) {
+        send({
+          type:
+            'TREASI_MAP_ERROR',
+
+          message:
+            'Leaflet could not be loaded.'
+        });
+
+        return;
+      }
+
+      function isCoordinate(
+        latitude,
+        longitude
+      ) {
+        return (
+          typeof latitude ===
+            'number' &&
+          typeof longitude ===
+            'number' &&
+          Number.isFinite(
+            latitude
+          ) &&
+          Number.isFinite(
+            longitude
+          ) &&
+          latitude >= -90 &&
+          latitude <= 90 &&
+          longitude >= -180 &&
+          longitude <= 180
+        );
+      }
+
+      function escapeHtml(
+        value
+      ) {
         return String(
-          value || ''
+          value == null
+            ? ''
+            : value
         ).replace(
           /[&<>'"]/g,
-          function (character) {
-            const chars = {
-              '&': '&amp;',
-              '<': '&lt;',
-              '>': '&gt;',
-              "'": '&#39;',
-              '"': '&quot;'
+          function (
+            character
+          ) {
+            const characters = {
+              '&':
+                '&amp;',
+
+              '<':
+                '&lt;',
+
+              '>':
+                '&gt;',
+
+              "'":
+                '&#39;',
+
+              '"':
+                '&quot;'
             };
 
-            return chars[
+            return (
+              characters[
+                character
+              ] ||
               character
-            ] || character;
+            );
           }
         );
       }
 
-      function updateUser(user) {
-        if (
-          !user ||
-          typeof user.latitude !== 'number' ||
-          typeof user.longitude !== 'number'
-        ) {
-          if (userMarker) {
+      function regionToZoom(
+        region
+      ) {
+        const latitudeDelta =
+          Number(
+            region.latitudeDelta
+          );
+
+        const longitudeDelta =
+          Number(
+            region.longitudeDelta
+          );
+
+        const delta =
+          Math.max(
+            Number.isFinite(
+              latitudeDelta
+            )
+              ? Math.abs(
+                  latitudeDelta
+                )
+              : 0.08,
+
+            Number.isFinite(
+              longitudeDelta
+            )
+              ? Math.abs(
+                  longitudeDelta
+                )
+              : 0.08,
+
+            0.0005
+          );
+
+        const zoom =
+          Math.round(
+            Math.log2(
+              360 /
+              delta
+            )
+          );
+
+        return Math.max(
+          2,
+          Math.min(
+            19,
+            zoom
+          )
+        );
+      }
+
+      try {
+        const map =
+          L.map(
+            'map',
+            {
+              zoomControl:
+                true,
+
+              attributionControl:
+                true,
+
+              keyboard:
+                true,
+
+              zoomAnimation:
+                true,
+
+              fadeAnimation:
+                true,
+
+              markerZoomAnimation:
+                true
+            }
+          );
+
+        map.setView(
+          [
+            INITIAL_REGION.latitude,
+            INITIAL_REGION.longitude
+          ],
+          regionToZoom(
+            INITIAL_REGION
+          ),
+          {
+            animate:
+              false
+          }
+        );
+
+        const tiles =
+          L.tileLayer(
+            'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+            {
+              minZoom:
+                2,
+
+              maxZoom:
+                19,
+
+              attribution:
+                '&copy; OpenStreetMap contributors'
+            }
+          );
+
+        tiles.on(
+          'tileerror',
+          function () {
+            /*
+             * Tile errors may be temporary, so the base parchment
+             * remains usable without forcing the map to unmount.
+             */
+          }
+        );
+
+        tiles.addTo(
+          map
+        );
+
+        const treasureLayer =
+          L.layerGroup()
+            .addTo(
+              map
+            );
+
+        let userMarker =
+          null;
+
+        let radiusCircle =
+          null;
+
+        function removeUserLayers() {
+          if (
+            userMarker
+          ) {
             map.removeLayer(
               userMarker
             );
 
-            userMarker = null;
+            userMarker =
+              null;
           }
 
-          if (radiusCircle) {
+          if (
+            radiusCircle
+          ) {
             map.removeLayer(
               radiusCircle
             );
 
-            radiusCircle = null;
+            radiusCircle =
+              null;
+          }
+        }
+
+        function updateUser(
+          user
+        ) {
+          if (
+            !user ||
+            !isCoordinate(
+              user.latitude,
+              user.longitude
+            )
+          ) {
+            removeUserLayers();
+
+            return;
           }
 
-          return;
-        }
+          const coordinates = [
+            user.latitude,
+            user.longitude
+          ];
 
-        const coords = [
-          user.latitude,
-          user.longitude
-        ];
-
-        if (userMarker) {
-          userMarker.setLatLng(
-            coords
-          );
-        } else {
-          userMarker =
-            L.circleMarker(
-              coords,
-              {
-                radius: 8,
-                color: '#F3ECD8',
-                weight: 2,
-                fillColor: '#2C3B2E',
-                fillOpacity: 1
-              }
-            )
-            .addTo(map)
-            .bindTooltip(
-              'YOUR POSITION'
+          if (
+            userMarker
+          ) {
+            userMarker.setLatLng(
+              coordinates
             );
-        }
-
-        if (radiusCircle) {
-          radiusCircle.setLatLng(
-            coords
-          );
-        } else {
-          radiusCircle =
-            L.circle(
-              coords,
-              {
-                radius: 20000,
-                color: '#B08D57',
-                weight: 1,
-                fillColor: '#B08D57',
-                fillOpacity: 0.08
-              }
-            ).addTo(map);
-        }
-      }
-
-      function updateTreasures(
-        treasures
-      ) {
-        treasureLayer.clearLayers();
-
-        (
-          Array.isArray(
-            treasures
-          )
-            ? treasures
-            : []
-        ).forEach(
-          function (treasure) {
-            if (
-              typeof treasure.latitude !== 'number' ||
-              typeof treasure.longitude !== 'number'
-            ) {
-              return;
-            }
-
-            const marker =
+          } else {
+            userMarker =
               L.circleMarker(
-                [
-                  treasure.latitude,
-                  treasure.longitude
-                ],
+                coordinates,
                 {
-                  radius: 9,
-                  color: '#F3ECD8',
-                  weight: 2,
-                  fillColor: '#A64B2A',
-                  fillOpacity: 1
+                  radius:
+                    8,
+
+                  color:
+                    '${COLOURS.parchmentLight}',
+
+                  weight:
+                    2,
+
+                  fillColor:
+                    '${COLOURS.forest}',
+
+                  fillOpacity:
+                    1,
+
+                  interactive:
+                    false
                 }
               ).addTo(
-                treasureLayer
+                map
               );
-
-            marker.bindPopup(
-              '<div class="treasi-popup">' +
-              '<strong>' +
-              escapeHtml(
-                treasure.title ||
-                'TREASURE CACHE'
-              ) +
-              '</strong><br />' +
-              'Hidden by ' +
-              escapeHtml(
-                treasure.creatorName ||
-                'Unknown explorer'
-              ) +
-              '</div>'
-            );
-
-            marker.on(
-              'click',
-              function () {
-                send({
-                  type:
-                    'TREASI_TREASURE_PRESS',
-
-                  treasureId:
-                    treasure.id
-                });
-              }
-            );
-          }
-        );
-      }
-
-      window.addEventListener(
-        'message',
-        function (event) {
-          const data =
-            event.data || {};
-
-          if (
-            data.type ===
-            'TREASI_UPDATE_MAP'
-          ) {
-            updateUser(
-              data.user
-            );
-
-            updateTreasures(
-              data.treasures
-            );
           }
 
           if (
-            data.type ===
-              'TREASI_SET_VIEW' &&
-            typeof data.latitude ===
-              'number' &&
-            typeof data.longitude ===
-              'number'
+            radiusCircle
           ) {
-            map.setView(
-              [
-                data.latitude,
-                data.longitude
-              ],
-              data.zoom || 14,
-              {
-                animate: true
-              }
+            radiusCircle.setLatLng(
+              coordinates
             );
+          } else {
+            radiusCircle =
+              L.circle(
+                coordinates,
+                {
+                  radius:
+                    FIELD_RADIUS_METRES,
+
+                  color:
+                    '${COLOURS.brass}',
+
+                  weight:
+                    1,
+
+                  fillColor:
+                    '${COLOURS.brass}',
+
+                  fillOpacity:
+                    0.08,
+
+                  interactive:
+                    false
+                }
+              ).addTo(
+                map
+              );
           }
         }
-      );
 
-      setTimeout(
-        function () {
-          map.invalidateSize();
+        function updateTreasures(
+          items
+        ) {
+          treasureLayer
+            .clearLayers();
 
-          send({
-            type:
-              'TREASI_MAP_READY'
-          });
-        },
-        100
-      );
+          const treasures =
+            Array.isArray(
+              items
+            )
+              ? items
+              : [];
+
+          treasures.forEach(
+            function (
+              treasure
+            ) {
+              if (
+                !treasure ||
+                typeof treasure.id !==
+                  'string' ||
+                !treasure.id ||
+                !isCoordinate(
+                  treasure.latitude,
+                  treasure.longitude
+                )
+              ) {
+                return;
+              }
+
+              const title =
+                String(
+                  treasure.title ||
+                  'Treasure cache'
+                );
+
+              const creator =
+                String(
+                  treasure.creatorName ||
+                  'Unknown explorer'
+                );
+
+              const markerIcon =
+                L.divIcon({
+                  className:
+                    'treasi-marker-host',
+
+                  html:
+                    '<div class="treasi-treasure-marker" aria-hidden="true">✦</div>',
+
+                  iconSize: [
+                    32,
+                    32
+                  ],
+
+                  iconAnchor: [
+                    16,
+                    16
+                  ],
+
+                  popupAnchor: [
+                    0,
+                    -18
+                  ]
+                });
+
+              const marker =
+                L.marker(
+                  [
+                    treasure.latitude,
+                    treasure.longitude
+                  ],
+                  {
+                    icon:
+                      markerIcon,
+
+                    keyboard:
+                      true,
+
+                    title:
+                      title,
+
+                    alt:
+                      title
+                  }
+                );
+
+              marker.bindPopup(
+                '<div class="treasi-popup">' +
+                  '<span class="treasi-popup-title">' +
+                    escapeHtml(
+                      title
+                    ) +
+                  '</span>' +
+                  '<span class="treasi-popup-creator">' +
+                    'Hidden by ' +
+                    escapeHtml(
+                      creator
+                    ) +
+                  '</span>' +
+                '</div>'
+              );
+
+              marker.on(
+                'click',
+                function () {
+                  send({
+                    type:
+                      'TREASI_TREASURE_PRESS',
+
+                    treasureId:
+                      treasure.id
+                  });
+                }
+              );
+
+              marker.addTo(
+                treasureLayer
+              );
+            }
+          );
+        }
+
+        function setView(
+          region,
+          animated
+        ) {
+          if (
+            !region ||
+            !isCoordinate(
+              region.latitude,
+              region.longitude
+            )
+          ) {
+            return;
+          }
+
+          const coordinates = [
+            region.latitude,
+            region.longitude
+          ];
+
+          const zoom =
+            regionToZoom(
+              region
+            );
+
+          if (
+            animated
+          ) {
+            map.flyTo(
+              coordinates,
+              zoom,
+              {
+                animate:
+                  true,
+
+                duration:
+                  0.45
+              }
+            );
+
+            return;
+          }
+
+          map.setView(
+            coordinates,
+            zoom,
+            {
+              animate:
+                false
+            }
+          );
+        }
+
+        function handleParentMessage(
+          event
+        ) {
+          const data =
+            event.data ||
+            {};
+
+          if (
+            data.channel !==
+            CHANNEL
+          ) {
+            return;
+          }
+
+          switch (
+            data.type
+          ) {
+            case 'TREASI_UPDATE_USER':
+              updateUser(
+                data.user
+              );
+              break;
+
+            case 'TREASI_UPDATE_TREASURES':
+              updateTreasures(
+                data.treasures
+              );
+              break;
+
+            case 'TREASI_SET_VIEW':
+              setView(
+                data.region,
+                data.animated !==
+                  false
+              );
+              break;
+
+            default:
+              break;
+          }
+        }
+
+        window.addEventListener(
+          'message',
+          handleParentMessage
+        );
+
+        const resizeMap =
+          function () {
+            map.invalidateSize(
+              false
+            );
+          };
+
+        window.addEventListener(
+          'resize',
+          resizeMap
+        );
+
+        let resizeObserver =
+          null;
+
+        if (
+          typeof ResizeObserver !==
+          'undefined'
+        ) {
+          resizeObserver =
+            new ResizeObserver(
+              resizeMap
+            );
+
+          resizeObserver.observe(
+            document.body
+          );
+        }
+
+        setTimeout(
+          function () {
+            map.invalidateSize(
+              false
+            );
+
+            send({
+              type:
+                'TREASI_MAP_READY'
+            });
+          },
+          100
+        );
+      } catch (
+        error
+      ) {
+        send({
+          type:
+            'TREASI_MAP_ERROR',
+
+          message:
+            error &&
+            typeof error.message ===
+              'string'
+              ? error.message
+              : 'The field map could not be initialised.'
+        });
+      }
     })();
   </script>
 </body>
 </html>
-      `,
-      [
-        initialRegion.latitude,
-        initialRegion.longitude,
-      ],
-    );
-
-    const sendToMap = (
-      payload: unknown,
-    ) => {
-      iframeRef.current
-        ?.contentWindow
-        ?.postMessage(
-          payload,
-          '*',
+            `;
+          },
+          [],
         );
-    };
 
-    useImperativeHandle(
-      ref,
-      () => ({
-        setView: (
-          region,
-        ) => {
-          sendToMap({
-            type:
-              'TREASI_SET_VIEW',
+      /* -------------------------------------------------------------------- */
+      /* Iframe communication                                                 */
+      /* -------------------------------------------------------------------- */
 
-            latitude:
-              region.latitude,
+      const sendToMap =
+        useCallback(
+          (
+            payload:
+              Record<
+                string,
+                unknown
+              >,
+          ): void => {
+            const frame =
+              iframeRef.current
+                ?.contentWindow;
 
-            longitude:
-              region.longitude,
+            if (!frame) {
+              return;
+            }
 
-            zoom: 15,
-          });
-        },
-      }),
-    );
+            frame.postMessage(
+              {
+                channel:
+                  channelIdRef.current,
 
-    useEffect(() => {
-      const handleMessage = (
-        event: MessageEvent,
-      ) => {
-        /*
-         * Ignore postMessage events that
-         * did not originate from our map.
-         */
+                ...payload,
+              },
+              '*',
+            );
+          },
+          [],
+        );
+
+      /* -------------------------------------------------------------------- */
+      /* Public API                                                           */
+      /* -------------------------------------------------------------------- */
+
+      useImperativeHandle(
+        ref,
+        () => ({
+          setView: (
+            region,
+            animated = true,
+          ) => {
+            const safeRegion =
+              normaliseRegion(
+                region,
+              );
+
+            if (!ready) {
+              pendingViewRef.current =
+                {
+                  region:
+                    safeRegion,
+
+                  animated,
+                };
+
+              return;
+            }
+
+            sendToMap({
+              type:
+                'TREASI_SET_VIEW',
+
+              region:
+                safeRegion,
+
+              animated,
+            });
+          },
+        }),
+        [
+          ready,
+          sendToMap,
+        ],
+      );
+
+      /* -------------------------------------------------------------------- */
+      /* Messages from iframe                                                 */
+      /* -------------------------------------------------------------------- */
+
+      useEffect(() => {
         if (
-          event.source !==
-          iframeRef.current
-            ?.contentWindow
+          Platform.OS !==
+          'web' ||
+          typeof window ===
+            'undefined'
         ) {
           return;
         }
 
-        const data =
-          event.data ?? {};
+        const handleMessage =
+          (
+            event: MessageEvent,
+          ): void => {
+            /*
+             * Only messages from this exact iframe are accepted.
+             */
+            if (
+              event.source !==
+              iframeRef.current
+                ?.contentWindow
+            ) {
+              return;
+            }
 
-        if (
-          data.type ===
-          'TREASI_MAP_READY'
-        ) {
-          setReady(true);
-          onReady?.();
-        }
+            const data =
+              (
+                event.data ??
+                {}
+              ) as MapMessage;
 
-        if (
-          data.type ===
-            'TREASI_TREASURE_PRESS' &&
-          typeof data.treasureId ===
-            'string'
-        ) {
-          onTreasurePress(
-            data.treasureId,
-          );
-        }
-      };
+            if (
+              data.channel !==
+              channelIdRef.current
+            ) {
+              return;
+            }
 
-      window.addEventListener(
-        'message',
-        handleMessage,
-      );
+            if (
+              data.type ===
+              'TREASI_MAP_READY'
+            ) {
+              setMapError(
+                null,
+              );
 
-      return () => {
-        window.removeEventListener(
+              setReady(
+                true,
+              );
+
+              if (
+                !readyNotifiedRef.current
+              ) {
+                readyNotifiedRef.current =
+                  true;
+
+                onReady?.();
+              }
+
+              return;
+            }
+
+            if (
+              data.type ===
+                'TREASI_TREASURE_PRESS' &&
+              typeof data.treasureId ===
+                'string'
+            ) {
+              onTreasurePress(
+                data.treasureId,
+              );
+
+              return;
+            }
+
+            if (
+              data.type ===
+              'TREASI_MAP_ERROR'
+            ) {
+              setMapError(
+                typeof data.message ===
+                  'string' &&
+                data.message.trim()
+                  ? data.message
+                  : 'The web field map could not be loaded.',
+              );
+            }
+          };
+
+        window.addEventListener(
           'message',
           handleMessage,
         );
-      };
-    }, [
-      onReady,
-      onTreasurePress,
-    ]);
 
-    useEffect(() => {
-      if (!ready) {
-        return;
-      }
+        return () => {
+          window.removeEventListener(
+            'message',
+            handleMessage,
+          );
+        };
+      }, [
+        onReady,
+        onTreasurePress,
+      ]);
 
-      sendToMap({
-        type:
-          'TREASI_UPDATE_MAP',
+      /* -------------------------------------------------------------------- */
+      /* Apply pending viewport                                               */
+      /* -------------------------------------------------------------------- */
 
-        user: userLocation,
-
-        treasures,
-      });
-    }, [
-      ready,
-      treasures,
-      userLocation,
-    ]);
-
-    return (
-      <View
-        style={
-          styles.container
+      useEffect(() => {
+        if (
+          !ready ||
+          !pendingViewRef.current
+        ) {
+          return;
         }
-      >
-        {React.createElement(
-          'iframe',
-          {
-            ref: iframeRef,
 
-            title:
-              'Treasi Field Map',
+        const pending =
+          pendingViewRef.current;
 
-            srcDoc: html,
+        pendingViewRef.current =
+          null;
 
-            style: {
-              width: '100%',
-              height: '100%',
-              border: '0',
-              display: 'block',
+        sendToMap({
+          type:
+            'TREASI_SET_VIEW',
+
+          region:
+            pending.region,
+
+          animated:
+            pending.animated,
+        });
+      }, [
+        ready,
+        sendToMap,
+      ]);
+
+      /* -------------------------------------------------------------------- */
+      /* User position                                                        */
+      /* -------------------------------------------------------------------- */
+
+      useEffect(() => {
+        if (!ready) {
+          return;
+        }
+
+        sendToMap({
+          type:
+            'TREASI_UPDATE_USER',
+
+          user:
+            validUserLocation,
+        });
+      }, [
+        ready,
+        sendToMap,
+        validUserLocation,
+      ]);
+
+      /* -------------------------------------------------------------------- */
+      /* Treasure markers                                                     */
+      /* -------------------------------------------------------------------- */
+
+      useEffect(() => {
+        if (!ready) {
+          return;
+        }
+
+        sendToMap({
+          type:
+            'TREASI_UPDATE_TREASURES',
+
+          treasures:
+            validTreasures,
+        });
+      }, [
+        ready,
+        sendToMap,
+        validTreasures,
+      ]);
+
+      /* -------------------------------------------------------------------- */
+      /* Render                                                               */
+      /* -------------------------------------------------------------------- */
+
+      return (
+        <View
+          style={
+            styles.container
+          }
+          accessible={
+            false
+          }
+        >
+          {React.createElement(
+            'iframe',
+            {
+              ref:
+                iframeRef,
+
+              title:
+                'Treasi Field Map',
+
+              'aria-label':
+                'Treasi interactive field map showing your position and active treasure caches',
+
+              srcDoc:
+                html,
+
+              sandbox:
+                'allow-scripts',
+
+              referrerPolicy:
+                'no-referrer',
+
+              allow:
+                "geolocation 'none'; camera 'none'; microphone 'none'",
+
+              tabIndex:
+                0,
+
+              style: {
+                width:
+                  '100%',
+
+                height:
+                  '100%',
+
+                border:
+                  '0',
+
+                display:
+                  'block',
+
+                background:
+                  COLOURS.parchment,
+              },
             },
-          },
-        )}
+          )}
 
-        {!ready && (
-          <View
-            style={
-              styles.loading
-            }
-            pointerEvents="none"
-          >
-            <ActivityIndicator
-              size="small"
-              color="#A64B2A"
-            />
-
-            <Text
+          {!ready &&
+          !mapError ? (
+            <View
+              accessible
+              accessibilityRole="progressbar"
+              accessibilityLabel="Loading Treasi field map"
+              accessibilityLiveRegion="polite"
               style={
-                styles.loadingText
+                styles.loading
+              }
+              pointerEvents="none"
+            >
+              <ActivityIndicator
+                size="small"
+                color={
+                  COLOURS.sienna
+                }
+              />
+
+              <Text
+                maxFontSizeMultiplier={
+                  1.5
+                }
+                style={
+                  styles.loadingText
+                }
+              >
+                LOADING FIELD MAP...
+              </Text>
+            </View>
+          ) : null}
+
+          {mapError ? (
+            <View
+              accessible
+              accessibilityRole="alert"
+              accessibilityLiveRegion="assertive"
+              style={
+                styles.errorOverlay
               }
             >
-              LOADING FIELD MAP...
-            </Text>
-          </View>
-        )}
-      </View>
-    );
-  },
-);
+              <Text
+                style={
+                  styles.errorTitle
+                }
+              >
+                FIELD MAP OFFLINE
+              </Text>
+
+              <Text
+                maxFontSizeMultiplier={
+                  1.7
+                }
+                style={
+                  styles.errorText
+                }
+              >
+                {mapError}
+              </Text>
+
+              <Text
+                maxFontSizeMultiplier={
+                  1.7
+                }
+                style={
+                  styles.errorHelpText
+                }
+              >
+                Check your internet connection and reload Treasi. Location and treasure data remain separate from map tile loading.
+              </Text>
+            </View>
+          ) : null}
+        </View>
+      );
+    },
+  );
 
 FieldMap.displayName =
   'FieldMapWeb';
+
+export default FieldMap;
+
+/* -------------------------------------------------------------------------- */
+/* Styles                                                                     */
+/* -------------------------------------------------------------------------- */
 
 const styles =
   StyleSheet.create({
     container: {
       flex: 1,
-      width: '100%',
-      height: '100%',
-      position: 'relative',
+      width:
+        '100%',
+      height:
+        '100%',
+      position:
+        'relative',
+      overflow:
+        'hidden',
       backgroundColor:
-        '#E8DCC0',
-      overflow: 'hidden',
+        COLOURS.parchment,
     },
 
     loading: {
@@ -569,27 +1620,74 @@ const styles =
 
       alignItems:
         'center',
-
       justifyContent:
         'center',
-
       gap: 8,
 
       backgroundColor:
-        'rgba(232,220,192,0.82)',
+        'rgba(232, 220, 192, 0.88)',
     },
 
     loadingText: {
       color:
-        '#2A2420',
-
-      fontSize: 9,
-
+        COLOURS.ink,
+      fontSize: 10,
+      lineHeight: 15,
       fontWeight:
-        'bold',
+        '700',
+      letterSpacing: 0.8,
+    },
 
+    errorOverlay: {
+      ...StyleSheet.absoluteFillObject,
+
+      alignItems:
+        'center',
+      justifyContent:
+        'center',
+
+      paddingHorizontal:
+        28,
+      paddingVertical:
+        20,
+
+      backgroundColor:
+        'rgba(232, 220, 192, 0.96)',
+    },
+
+    errorTitle: {
+      color:
+        COLOURS.sienna,
+      fontSize: 14,
+      lineHeight: 20,
+      fontWeight:
+        '800',
       letterSpacing: 1,
+      textAlign:
+        'center',
+      marginBottom: 6,
+    },
+
+    errorText: {
+      color:
+        COLOURS.ink,
+      fontSize: 11,
+      lineHeight: 17,
+      fontWeight:
+        '700',
+      textAlign:
+        'center',
+      maxWidth: 460,
+    },
+
+    errorHelpText: {
+      color:
+        '#5F4B32',
+      fontSize: 10,
+      lineHeight: 16,
+      textAlign:
+        'center',
+      maxWidth: 460,
+      marginTop: 8,
     },
   });
-
-export default FieldMap;

@@ -1,34 +1,49 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
+
 import {
+  AccessibilityInfo,
   Alert,
   Animated,
   Easing,
+  Platform,
   StyleSheet,
   Text,
   useWindowDimensions,
   View,
 } from 'react-native';
 
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as ScreenOrientation from 'expo-screen-orientation';
 import { StatusBar } from 'expo-status-bar';
+
 import {
   SafeAreaProvider,
   initialWindowMetrics,
 } from 'react-native-safe-area-context';
 
-import AsyncStorage from '@react-native-async-storage/async-storage';
-
 import {
   onAuthStateChanged,
   signOut,
-  User,
+  type User,
 } from 'firebase/auth';
 
 import {
   doc,
   getDoc,
+  serverTimestamp,
+  updateDoc,
 } from 'firebase/firestore';
 
-import { auth, db } from '../app/src/config/firebase';
+import {
+  auth,
+  db,
+} from './src/config/firebase';
 
 /* -------------------------------------------------------------------------- */
 /* Screens                                                                    */
@@ -48,7 +63,7 @@ import { InventoryScreen } from './src/screens/InventoryScreen';
 import { ProfileSettingsScreen } from './src/screens/ProfileSettingsScreen';
 
 /* -------------------------------------------------------------------------- */
-/* Navigation Types                                                           */
+/* Navigation types                                                           */
 /* -------------------------------------------------------------------------- */
 
 export type ScreenState =
@@ -66,45 +81,104 @@ export type ScreenState =
 export interface NavigationParams {
   treasureId?: string;
   mode?: 'hunt' | 'create';
-
   latitude?: number;
   longitude?: number;
-
   [key: string]: unknown;
+}
+
+interface Coordinates {
+  latitude: number;
+  longitude: number;
 }
 
 /* -------------------------------------------------------------------------- */
 /* Constants                                                                  */
 /* -------------------------------------------------------------------------- */
 
+// Final onboarding storage key used by Treasi.
 const ONBOARDING_STORAGE_KEY =
   '@treasi_onboarding_completed';
 
-const PROTECTED_SCREENS: ScreenState[] = [
-  'DASHBOARD',
-  'HUNT',
-  'LEADERBOARD',
-  'SOCIAL',
-  'INVENTORY',
-  'PROFILE',
-];
+// Earlier builds used this key; it is migrated and removed automatically.
+const LEGACY_ONBOARDING_STORAGE_KEY =
+  '@treasi_device_onboarding_complete';
+
+const PROTECTED_SCREENS =
+  new Set<ScreenState>([
+    'DASHBOARD',
+    'HUNT',
+    'LEADERBOARD',
+    'SOCIAL',
+    'INVENTORY',
+    'PROFILE',
+  ]);
 
 /* -------------------------------------------------------------------------- */
-/* Helpers                                                                    */
+/* Development logging                                                        */
 /* -------------------------------------------------------------------------- */
 
+// Keeps development diagnostics out of production console output.
+const logDevelopmentWarning = (
+  message: string,
+  error?: unknown,
+): void => {
+  if (__DEV__) {
+    console.warn(
+      message,
+      error ?? '',
+    );
+  }
+};
+
+/* -------------------------------------------------------------------------- */
+/* Onboarding persistence                                                     */
+/* -------------------------------------------------------------------------- */
+
+// Stores onboarding completion under the final canonical key.
+const persistLocalOnboardingCompletion =
+  async (): Promise<void> => {
+    try {
+      await AsyncStorage.setItem(
+        ONBOARDING_STORAGE_KEY,
+        'true',
+      );
+
+      // Remove the obsolete development key.
+      await AsyncStorage.removeItem(
+        LEGACY_ONBOARDING_STORAGE_KEY,
+      );
+    } catch (error: unknown) {
+      logDevelopmentWarning(
+        '[Treasi] Unable to persist local onboarding state:',
+        error,
+      );
+    }
+  };
+
+// Reads and migrates onboarding state from earlier app builds.
 const readLocalOnboardingState =
   async (): Promise<boolean> => {
     try {
-      const storedValue =
-        await AsyncStorage.getItem(
+      const values =
+        await AsyncStorage.multiGet([
           ONBOARDING_STORAGE_KEY,
+          LEGACY_ONBOARDING_STORAGE_KEY,
+        ]);
+
+      const onboardingComplete =
+        values.some(
+          ([, value]) =>
+            value === 'true',
         );
 
-      return storedValue === 'true';
-    } catch (error) {
-      console.warn(
-        '[Treasi] Unable to read onboarding state:',
+      if (onboardingComplete) {
+        await persistLocalOnboardingCompletion();
+      }
+
+      return onboardingComplete;
+    } catch (error: unknown) {
+      logDevelopmentWarning(
+        '[Treasi] Unable to read local onboarding state:',
         error,
       );
 
@@ -112,995 +186,1389 @@ const readLocalOnboardingState =
     }
   };
 
-const hasValidCoordinates = (
+// Combines local and Firestore onboarding state.
+const resolveOnboardingState =
+  async (
+    user: User | null,
+  ): Promise<boolean> => {
+    const localOnboardingComplete =
+      await readLocalOnboardingState();
+
+    if (!user) {
+      return localOnboardingComplete;
+    }
+
+    try {
+      const userDocumentRef =
+        doc(
+          db,
+          'users',
+          user.uid,
+        );
+
+      const userSnapshot =
+        await getDoc(
+          userDocumentRef,
+        );
+
+      /*
+       * Firebase Authentication can become active slightly before
+       * SignUpScreen finishes creating the Firestore profile.
+       */
+      if (!userSnapshot.exists()) {
+        return localOnboardingComplete;
+      }
+
+      const data =
+        userSnapshot.data();
+
+      const remoteOnboardingComplete =
+        data.hasCompletedOnboarding ===
+        true;
+
+      if (remoteOnboardingComplete) {
+        /*
+         * Keep the device state synchronised with an account that has
+         * already completed onboarding.
+         */
+        if (
+          !localOnboardingComplete
+        ) {
+          await persistLocalOnboardingCompletion();
+        }
+
+        return true;
+      }
+
+      /*
+       * Older accounts could have completed onboarding locally before
+       * their Firestore profile stored the new field.
+       */
+      if (localOnboardingComplete) {
+        try {
+          await updateDoc(
+            userDocumentRef,
+            {
+              hasCompletedOnboarding:
+                true,
+
+              updatedAt:
+                serverTimestamp(),
+            },
+          );
+        } catch (
+          error: unknown
+        ) {
+          /*
+           * A network problem should not force an already-onboarded
+           * user back through the onboarding flow.
+           */
+          logDevelopmentWarning(
+            '[Treasi] Unable to synchronise onboarding state to Firestore:',
+            error,
+          );
+        }
+
+        return true;
+      }
+
+      return false;
+    } catch (error: unknown) {
+      logDevelopmentWarning(
+        '[Treasi] Unable to resolve Firestore onboarding state:',
+        error,
+      );
+
+      /*
+       * Local state provides a safe fallback when Firestore is
+       * temporarily unavailable.
+       */
+      return localOnboardingComplete;
+    }
+  };
+
+// Persists onboarding after the final onboarding step.
+const markCurrentUserOnboardingComplete =
+  async (): Promise<void> => {
+    await persistLocalOnboardingCompletion();
+
+    const user =
+      auth.currentUser;
+
+    if (!user) {
+      return;
+    }
+
+    try {
+      const userDocumentRef =
+        doc(
+          db,
+          'users',
+          user.uid,
+        );
+
+      const userSnapshot =
+        await getDoc(
+          userDocumentRef,
+        );
+
+      /*
+       * A user document may not exist yet when onboarding occurs
+       * before registration.
+       */
+      if (!userSnapshot.exists()) {
+        return;
+      }
+
+      await updateDoc(
+        userDocumentRef,
+        {
+          hasCompletedOnboarding:
+            true,
+
+          updatedAt:
+            serverTimestamp(),
+        },
+      );
+    } catch (error: unknown) {
+      logDevelopmentWarning(
+        '[Treasi] Unable to mark onboarding complete in Firestore:',
+        error,
+      );
+    }
+  };
+
+/* -------------------------------------------------------------------------- */
+/* Helpers                                                                    */
+/* -------------------------------------------------------------------------- */
+
+// Validates coordinates before passing them between screens.
+const getValidCoordinates = (
   latitude: unknown,
   longitude: unknown,
-): latitude is number => {
-  return (
-    typeof latitude === 'number' &&
-    typeof longitude === 'number' &&
-    Number.isFinite(latitude) &&
-    Number.isFinite(longitude) &&
-    latitude >= -90 &&
-    latitude <= 90 &&
-    longitude >= -180 &&
-    longitude <= 180
+): Coordinates | null => {
+  if (
+    typeof latitude !== 'number' ||
+    typeof longitude !== 'number' ||
+    !Number.isFinite(latitude) ||
+    !Number.isFinite(longitude) ||
+    latitude < -90 ||
+    latitude > 90 ||
+    longitude < -180 ||
+    longitude > 180
+  ) {
+    return null;
+  }
+
+  return {
+    latitude,
+    longitude,
+  };
+};
+
+// Announces important alerts for screen-reader users.
+const announceAndAlert = (
+  title: string,
+  message: string,
+): void => {
+  AccessibilityInfo
+    .announceForAccessibility(
+      `${title}. ${message}`,
+    );
+
+  Alert.alert(
+    title,
+    message,
   );
 };
 
 /* -------------------------------------------------------------------------- */
-/* Animated Screen Wrapper                                                    */
+/* Animated screen wrapper                                                    */
 /* -------------------------------------------------------------------------- */
 
 interface AnimatedScreenWrapperProps {
   children: React.ReactNode;
+  reduceMotionEnabled: boolean;
   screenKey: ScreenState;
 }
 
-const AnimatedScreenWrapper: React.FC<
-  AnimatedScreenWrapperProps
-> = ({
-  children,
-  screenKey,
-}) => {
-  const fadeAnim = useRef(
-    new Animated.Value(0),
-  ).current;
+const AnimatedScreenWrapper:
+  React.FC<
+    AnimatedScreenWrapperProps
+  > = ({
+    children,
+    reduceMotionEnabled,
+    screenKey,
+  }) => {
+    const fadeAnim =
+      useRef(
+        new Animated.Value(1),
+      ).current;
 
-  const scaleAnim = useRef(
-    new Animated.Value(0.985),
-  ).current;
+    const scaleAnim =
+      useRef(
+        new Animated.Value(1),
+      ).current;
 
-  useEffect(() => {
-    fadeAnim.stopAnimation();
-    scaleAnim.stopAnimation();
+    useEffect(() => {
+      fadeAnim.stopAnimation();
+      scaleAnim.stopAnimation();
 
-    fadeAnim.setValue(0);
-    scaleAnim.setValue(0.985);
+      /*
+       * Respect the user's Reduce Motion accessibility preference.
+       */
+      if (
+        reduceMotionEnabled
+      ) {
+        fadeAnim.setValue(1);
+        scaleAnim.setValue(1);
 
-    const animation = Animated.parallel([
-      Animated.timing(fadeAnim, {
-        toValue: 1,
-        duration: 220,
-        easing: Easing.out(
-          Easing.cubic,
-        ),
-        useNativeDriver: true,
-      }),
+        return;
+      }
 
-      Animated.timing(scaleAnim, {
-        toValue: 1,
-        duration: 220,
-        easing: Easing.out(
-          Easing.cubic,
-        ),
-        useNativeDriver: true,
-      }),
+      fadeAnim.setValue(0);
+      scaleAnim.setValue(
+        0.985,
+      );
+
+      const animation =
+        Animated.parallel([
+          Animated.timing(
+            fadeAnim,
+            {
+              toValue: 1,
+              duration: 220,
+
+              easing:
+                Easing.out(
+                  Easing.cubic,
+                ),
+
+              useNativeDriver:
+                true,
+            },
+          ),
+
+          Animated.timing(
+            scaleAnim,
+            {
+              toValue: 1,
+              duration: 220,
+
+              easing:
+                Easing.out(
+                  Easing.cubic,
+                ),
+
+              useNativeDriver:
+                true,
+            },
+          ),
+        ]);
+
+      animation.start();
+
+      return () => {
+        animation.stop();
+      };
+    }, [
+      fadeAnim,
+      reduceMotionEnabled,
+      scaleAnim,
+      screenKey,
     ]);
 
-    animation.start();
+    return (
+      <Animated.View
+        style={[
+          styles.animatedWrapper,
 
-    return () => {
-      animation.stop();
-    };
-  }, [
-    screenKey,
-    fadeAnim,
-    scaleAnim,
-  ]);
+          {
+            opacity:
+              fadeAnim,
 
-  return (
-    <Animated.View
-      style={[
-        styles.animatedWrapper,
-        {
-          opacity: fadeAnim,
-          transform: [
-            {
-              scale: scaleAnim,
-            },
-          ],
-        },
-      ]}
-    >
-      {children}
-    </Animated.View>
-  );
-};
+            transform: [
+              {
+                scale:
+                  scaleAnim,
+              },
+            ],
+          },
+        ]}
+      >
+        {children}
+      </Animated.View>
+    );
+  };
 
 /* -------------------------------------------------------------------------- */
-/* Main Navigator                                                             */
+/* Main navigator                                                             */
 /* -------------------------------------------------------------------------- */
 
-const MainNavigator: React.FC = () => {
-  const {
-    width,
-    height,
-  } = useWindowDimensions();
+const MainNavigator:
+  React.FC = () => {
+    const {
+      width,
+      height,
+    } =
+      useWindowDimensions();
 
-  const isLandscape =
-    width > height;
+    const isLandscape =
+      width > height;
 
-  /* ---------------------------------------------------------------------- */
-  /* Screen state                                                           */
-  /* ---------------------------------------------------------------------- */
+    /* ---------------------------------------------------------------------- */
+    /* Navigation state                                                       */
+    /* ---------------------------------------------------------------------- */
 
-  const [
-    currentScreen,
-    setCurrentScreen,
-  ] =
-    useState<ScreenState>(
-      'SPLASH',
-    );
+    const [
+      currentScreen,
+      setCurrentScreen,
+    ] =
+      useState<ScreenState>(
+        'SPLASH',
+      );
 
-  const [
-    navigationParams,
-    setNavigationParams,
-  ] =
-    useState<NavigationParams>(
-      {},
-    );
+    const [
+      navigationParams,
+      setNavigationParams,
+    ] =
+      useState<NavigationParams>(
+        {},
+      );
 
-  const [
-    selectedTreasureId,
-    setSelectedTreasureId,
-  ] =
-    useState<
-      string | undefined
-    >(undefined);
+    const [
+      selectedTreasureId,
+      setSelectedTreasureId,
+    ] =
+      useState<
+        string | undefined
+      >(undefined);
 
-  /* ---------------------------------------------------------------------- */
-  /* Startup state                                                          */
-  /* ---------------------------------------------------------------------- */
+    /* ---------------------------------------------------------------------- */
+    /* Startup state                                                          */
+    /* ---------------------------------------------------------------------- */
 
-  const [
-    isSplashFinished,
-    setIsSplashFinished,
-  ] =
-    useState(false);
+    const [
+      isSplashFinished,
+      setIsSplashFinished,
+    ] =
+      useState(false);
 
-  const [
-    isAuthResolved,
-    setIsAuthResolved,
-  ] =
-    useState(false);
+    const [
+      isAuthResolved,
+      setIsAuthResolved,
+    ] =
+      useState(false);
 
-  const [
-    currentUser,
-    setCurrentUser,
-  ] =
-    useState<User | null>(
-      null,
-    );
+    const [
+      currentUser,
+      setCurrentUser,
+    ] =
+      useState<User | null>(
+        null,
+      );
 
-  const [
-    hasCompletedOnboarding,
-    setHasCompletedOnboarding,
-  ] =
-    useState(false);
+    const [
+      hasCompletedOnboarding,
+      setHasCompletedOnboarding,
+    ] =
+      useState(false);
 
-  const [
-    isInitialBootDone,
-    setIsInitialBootDone,
-  ] =
-    useState(false);
+    const [
+      isInitialBootDone,
+      setIsInitialBootDone,
+    ] =
+      useState(false);
 
-  /* ---------------------------------------------------------------------- */
-  /* Authentication listener                                                */
-  /* ---------------------------------------------------------------------- */
+    const [
+      reduceMotionEnabled,
+      setReduceMotionEnabled,
+    ] =
+      useState(false);
 
-  useEffect(() => {
-    let mounted = true;
+    /*
+     * Prevents an older asynchronous auth lookup from overwriting
+     * a newer authentication event.
+     */
+    const authResolutionSequenceRef =
+      useRef(0);
 
-    const unsubscribe =
-      onAuthStateChanged(
-        auth,
-        async (user) => {
-          try {
-            if (!mounted) {
-              return;
+    /* ---------------------------------------------------------------------- */
+    /* Native landscape lock                                                  */
+    /* ---------------------------------------------------------------------- */
+
+    useEffect(() => {
+      /*
+       * Browser windows cannot be physically orientation-locked.
+       * Native iPhone and Android builds are explicitly locked.
+       */
+      if (
+        Platform.OS ===
+        'web'
+      ) {
+        return;
+      }
+
+      ScreenOrientation
+        .lockAsync(
+          ScreenOrientation
+            .OrientationLock
+            .LANDSCAPE,
+        )
+        .catch(
+          (
+            error: unknown,
+          ) => {
+            logDevelopmentWarning(
+              '[Treasi] Unable to lock the device to landscape:',
+              error,
+            );
+          },
+        );
+    }, []);
+
+    /* ---------------------------------------------------------------------- */
+    /* Reduced motion preference                                              */
+    /* ---------------------------------------------------------------------- */
+
+    useEffect(() => {
+      let mounted = true;
+
+      AccessibilityInfo
+        .isReduceMotionEnabled()
+        .then(
+          (
+            enabled,
+          ) => {
+            if (
+              mounted
+            ) {
+              setReduceMotionEnabled(
+                enabled,
+              );
             }
+          },
+        )
+        .catch(
+          (
+            error: unknown,
+          ) => {
+            logDevelopmentWarning(
+              '[Treasi] Unable to read reduced-motion preference:',
+              error,
+            );
+          },
+        );
+
+      const subscription =
+        AccessibilityInfo
+          .addEventListener(
+            'reduceMotionChanged',
+            setReduceMotionEnabled,
+          );
+
+      return () => {
+        mounted = false;
+
+        subscription.remove();
+      };
+    }, []);
+
+    /* ---------------------------------------------------------------------- */
+    /* Authentication listener                                                */
+    /* ---------------------------------------------------------------------- */
+
+    useEffect(() => {
+      let mounted = true;
+
+      const unsubscribe =
+        onAuthStateChanged(
+          auth,
+
+          (user) => {
+            const resolutionId =
+              ++authResolutionSequenceRef.current;
 
             setCurrentUser(
               user ?? null,
             );
 
-            let onboardingComplete =
-              false;
+            setIsAuthResolved(
+              false,
+            );
 
-            if (user) {
-              try {
-                const userDocumentRef =
-                  doc(
-                    db,
-                    'users',
-                    user.uid,
+            void resolveOnboardingState(
+              user ?? null,
+            )
+              .then(
+                (
+                  onboardingComplete,
+                ) => {
+                  if (
+                    !mounted ||
+                    resolutionId !==
+                      authResolutionSequenceRef.current
+                  ) {
+                    return;
+                  }
+
+                  setHasCompletedOnboarding(
+                    onboardingComplete,
                   );
 
-                const userSnapshot =
-                  await getDoc(
-                    userDocumentRef,
+                  setIsAuthResolved(
+                    true,
+                  );
+                },
+              )
+              .catch(
+                (
+                  error: unknown,
+                ) => {
+                  if (
+                    !mounted ||
+                    resolutionId !==
+                      authResolutionSequenceRef.current
+                  ) {
+                    return;
+                  }
+
+                  logDevelopmentWarning(
+                    '[Treasi] Authentication state resolution failed:',
+                    error,
                   );
 
-                if (!mounted) {
-                  return;
-                }
+                  setHasCompletedOnboarding(
+                    false,
+                  );
 
-                if (
-                  userSnapshot.exists()
-                ) {
-                  const data =
-                    userSnapshot.data();
+                  setIsAuthResolved(
+                    true,
+                  );
+                },
+              );
+          },
 
-                  onboardingComplete =
-                    data
-                      ?.hasCompletedOnboarding ===
-                    true;
-                } else {
-                  onboardingComplete =
-                    await readLocalOnboardingState();
-                }
-              } catch (error) {
-                console.warn(
-                  '[Treasi] Unable to read user profile:',
-                  error,
-                );
-
-                onboardingComplete =
-                  await readLocalOnboardingState();
-              }
-            } else {
-              onboardingComplete =
-                await readLocalOnboardingState();
-            }
-
-            if (!mounted) {
+          (error) => {
+            if (
+              !mounted
+            ) {
               return;
             }
 
-            setHasCompletedOnboarding(
-              onboardingComplete,
-            );
-          } catch (error) {
-            console.error(
-              '[Treasi] Authentication resolver failed:',
+            logDevelopmentWarning(
+              '[Treasi] Firebase auth listener failed:',
               error,
             );
 
-            if (mounted) {
-              setCurrentUser(
-                null,
-              );
-            }
-          } finally {
-            if (mounted) {
-              setIsAuthResolved(
-                true,
-              );
-            }
-          }
-        },
-        (error) => {
-          console.error(
-            '[Treasi] Firebase auth listener failed:',
-            error,
-          );
+            setCurrentUser(
+              null,
+            );
 
-          if (mounted) {
-            setCurrentUser(null);
+            setHasCompletedOnboarding(
+              false,
+            );
+
             setIsAuthResolved(
               true,
             );
-          }
-        },
-      );
-
-    return () => {
-      mounted = false;
-      unsubscribe();
-    };
-  }, []);
-
-  /* ---------------------------------------------------------------------- */
-  /* Initial startup routing                                                */
-  /* ---------------------------------------------------------------------- */
-
-  useEffect(() => {
-    if (
-      isInitialBootDone ||
-      !isSplashFinished ||
-      !isAuthResolved
-    ) {
-      return;
-    }
-
-    setIsInitialBootDone(
-      true,
-    );
-
-    if (currentUser) {
-      setCurrentScreen(
-        hasCompletedOnboarding
-          ? 'DASHBOARD'
-          : 'ONBOARDING',
-      );
-
-      return;
-    }
-
-    setCurrentScreen(
-      hasCompletedOnboarding
-        ? 'LOGIN'
-        : 'ONBOARDING',
-    );
-  }, [
-    currentUser,
-    hasCompletedOnboarding,
-    isAuthResolved,
-    isInitialBootDone,
-    isSplashFinished,
-  ]);
-
-  /* ---------------------------------------------------------------------- */
-  /* Protected screen auth guard                                            */
-  /* ---------------------------------------------------------------------- */
-
-  useEffect(() => {
-    if (
-      !isInitialBootDone ||
-      !isAuthResolved
-    ) {
-      return;
-    }
-
-    if (
-      !currentUser &&
-      PROTECTED_SCREENS.includes(
-        currentScreen,
-      )
-    ) {
-      setNavigationParams(
-        {},
-      );
-
-      setSelectedTreasureId(
-        undefined,
-      );
-
-      setCurrentScreen(
-        'LOGIN',
-      );
-    }
-  }, [
-    currentScreen,
-    currentUser,
-    isAuthResolved,
-    isInitialBootDone,
-  ]);
-
-  /* ---------------------------------------------------------------------- */
-  /* Navigation                                                             */
-  /* ---------------------------------------------------------------------- */
-
-  const handleNavigate = (
-    target: string,
-    params?: NavigationParams,
-  ) => {
-    const normalizedTarget =
-      String(target ?? '')
-        .trim()
-        .toUpperCase();
-
-    let targetScreen:
-      ScreenState;
-
-    switch (
-      normalizedTarget
-    ) {
-      case 'MAP':
-      case 'DASHBOARD':
-      case 'HOME':
-        targetScreen =
-          'DASHBOARD';
-        break;
-
-      case 'HUNT':
-        targetScreen =
-          'HUNT';
-        break;
-
-      case 'RANKS':
-      case 'RANK':
-      case 'LEADERBOARD':
-        targetScreen =
-          'LEADERBOARD';
-        break;
-
-      /*
-       * Social aliases.
-       *
-       * Leaderboard's ADD FRIEND and DISPATCH TELEGRAM
-       * buttons can both call:
-       *
-       * onNavigate('SOCIAL')
-       */
-      case 'SOCIAL':
-      case 'FRIENDS':
-      case 'FRIEND':
-      case 'TELEGRAM':
-      case 'COMMUNITY':
-      case 'COMMS':
-        targetScreen =
-          'SOCIAL';
-        break;
-
-      case 'BAG':
-      case 'INVENTORY':
-        targetScreen =
-          'INVENTORY';
-        break;
-
-      case 'PROFILE':
-      case 'SETTINGS':
-        targetScreen =
-          'PROFILE';
-        break;
-
-      case 'LOGIN':
-        targetScreen =
-          'LOGIN';
-        break;
-
-      case 'SIGNUP':
-      case 'REGISTER':
-        targetScreen =
-          'SIGNUP';
-        break;
-
-      case 'ONBOARDING':
-        targetScreen =
-          'ONBOARDING';
-        break;
-
-      case 'SPLASH':
-        targetScreen =
-          'SPLASH';
-        break;
-
-      default:
-        console.warn(
-          `[Treasi] Unknown route "${target}". Falling back to DASHBOARD.`,
+          },
         );
 
-        targetScreen =
-          'DASHBOARD';
-        break;
-    }
+      return () => {
+        mounted = false;
 
-    /* ------------------------------------------------------------------ */
-    /* Authentication guard                                               */
-    /* ------------------------------------------------------------------ */
+        authResolutionSequenceRef.current +=
+          1;
 
-    if (
-      PROTECTED_SCREENS.includes(
-        targetScreen,
-      ) &&
-      !currentUser
-    ) {
+        unsubscribe();
+      };
+    }, []);
+
+    /* ---------------------------------------------------------------------- */
+    /* Initial startup routing                                                */
+    /* ---------------------------------------------------------------------- */
+
+    useEffect(() => {
+      if (
+        isInitialBootDone ||
+        !isSplashFinished ||
+        !isAuthResolved
+      ) {
+        return;
+      }
+
+      setIsInitialBootDone(
+        true,
+      );
+
       setNavigationParams(
         {},
       );
 
-      setCurrentScreen(
-        'LOGIN',
-      );
-
-      return;
-    }
-
-    /* ------------------------------------------------------------------ */
-    /* Hunt route                                                         */
-    /* ------------------------------------------------------------------ */
-
-    if (
-      targetScreen ===
-      'HUNT'
-    ) {
-      const requestedTreasureId =
-        typeof params
-          ?.treasureId ===
-        'string'
-          ? params.treasureId
-          : undefined;
-
-      const activeTreasureId =
-        requestedTreasureId ||
-        selectedTreasureId;
-
       if (
-        !activeTreasureId
+        currentUser
       ) {
-        Alert.alert(
-          'NO ACTIVE TARGET',
-          'Select a treasure from the field map before entering Hunt mode.',
+        setCurrentScreen(
+          hasCompletedOnboarding
+            ? 'DASHBOARD'
+            : 'ONBOARDING',
         );
 
         return;
       }
 
-      setSelectedTreasureId(
-        activeTreasureId,
-      );
-
-      setNavigationParams({
-        ...params,
-        treasureId:
-          activeTreasureId,
-      });
-
       setCurrentScreen(
-        'HUNT',
+        hasCompletedOnboarding
+          ? 'LOGIN'
+          : 'ONBOARDING',
       );
+    }, [
+      currentUser,
+      hasCompletedOnboarding,
+      isAuthResolved,
+      isInitialBootDone,
+      isSplashFinished,
+    ]);
 
-      return;
-    }
+    /* ---------------------------------------------------------------------- */
+    /* Protected-screen authentication guard                                  */
+    /* ---------------------------------------------------------------------- */
 
-    /* ------------------------------------------------------------------ */
-    /* Inventory create route                                             */
-    /* ------------------------------------------------------------------ */
-
-    if (
-      targetScreen ===
-      'INVENTORY'
-    ) {
+    useEffect(() => {
       if (
-        params?.mode ===
-        'create'
+        !isInitialBootDone ||
+        !isAuthResolved
       ) {
-        setNavigationParams({
-          mode: 'create',
-
-          latitude:
-            typeof params.latitude ===
-            'number'
-              ? params.latitude
-              : undefined,
-
-          longitude:
-            typeof params.longitude ===
-            'number'
-              ? params.longitude
-              : undefined,
-
-          treasureId:
-            typeof params.treasureId ===
-            'string'
-              ? params.treasureId
-              : undefined,
-        });
-      } else {
-        setNavigationParams(
-          {},
-        );
+        return;
       }
 
-      setCurrentScreen(
-        'INVENTORY',
-      );
-
-      return;
-    }
-
-    /* ------------------------------------------------------------------ */
-    /* Social route                                                       */
-    /* ------------------------------------------------------------------ */
-
-    if (
-      targetScreen ===
-      'SOCIAL'
-    ) {
-      /*
-       * Preserve coordinates if a caller provides them.
-       * SocialScreen may use these for nearby-agent distance.
-       */
       if (
-        hasValidCoordinates(
-          params?.latitude,
-          params?.longitude,
+        !currentUser &&
+        PROTECTED_SCREENS.has(
+          currentScreen,
         )
       ) {
-        setNavigationParams({
-          latitude:
-            params?.latitude,
-          longitude:
-            params?.longitude,
-        });
-      } else {
         setNavigationParams(
           {},
-        );
-      }
-
-      setCurrentScreen(
-        'SOCIAL',
-      );
-
-      return;
-    }
-
-    /* ------------------------------------------------------------------ */
-    /* Standard navigation                                                */
-    /* ------------------------------------------------------------------ */
-
-    setNavigationParams(
-      {},
-    );
-
-    setCurrentScreen(
-      targetScreen,
-    );
-  };
-
-  /* ---------------------------------------------------------------------- */
-  /* Back                                                                  */
-  /* ---------------------------------------------------------------------- */
-
-  const handleBackToDashboard =
-    () => {
-      setNavigationParams(
-        {},
-      );
-
-      setCurrentScreen(
-        'DASHBOARD',
-      );
-    };
-
-  /* ---------------------------------------------------------------------- */
-  /* Logout                                                                */
-  /* ---------------------------------------------------------------------- */
-
-  const handleSignOut =
-    async () => {
-      try {
-        await signOut(auth);
-
-        setCurrentUser(
-          null,
         );
 
         setSelectedTreasureId(
           undefined,
         );
 
-        setNavigationParams(
-          {},
-        );
-
         setCurrentScreen(
           'LOGIN',
         );
-      } catch (error) {
-        console.error(
-          '[Treasi] Sign out failed:',
-          error,
-        );
-
-        Alert.alert(
-          'SIGN OUT FAILED',
-          'Unable to end the current explorer session. Please try again.',
-        );
       }
-    };
+    }, [
+      currentScreen,
+      currentUser,
+      isAuthResolved,
+      isInitialBootDone,
+    ]);
 
-  /* ---------------------------------------------------------------------- */
-  /* Social coordinates                                                    */
-  /* ---------------------------------------------------------------------- */
+    /* ---------------------------------------------------------------------- */
+    /* Successful authentication                                              */
+    /* ---------------------------------------------------------------------- */
 
-  const socialCoordinates =
-    hasValidCoordinates(
-      navigationParams.latitude,
-      navigationParams.longitude,
-    )
-      ? {
-          latitude:
-            navigationParams.latitude,
-          longitude:
-            navigationParams.longitude as number,
-        }
-      : null;
+    const handleAuthenticationSuccess =
+      useCallback(
+        async (): Promise<void> => {
+          const user =
+            auth.currentUser;
 
-  /* ---------------------------------------------------------------------- */
-  /* Screen rendering                                                      */
-  /* ---------------------------------------------------------------------- */
+          if (!user) {
+            setCurrentUser(
+              null,
+            );
 
-  const renderActiveScreen =
-    () => {
-      let screen:
-        React.ReactNode;
+            setNavigationParams(
+              {},
+            );
 
-      switch (
-        currentScreen
-      ) {
-        case 'SPLASH':
-          screen = (
-            <SplashScreen
-              onFinish={() =>
-                setIsSplashFinished(
-                  true,
-                )
-              }
-            />
+            setCurrentScreen(
+              'LOGIN',
+            );
+
+            return;
+          }
+
+          /*
+           * Re-evaluate onboarding after login/sign-up because the
+           * Firestore profile may have just been created.
+           */
+          const onboardingComplete =
+            await resolveOnboardingState(
+              user,
+            );
+
+          setCurrentUser(
+            user,
           );
-          break;
 
-        case 'ONBOARDING':
-          screen = (
-            <OnboardingScreen
-              onComplete={
-                async () => {
-                  try {
-                    await AsyncStorage.setItem(
-                      ONBOARDING_STORAGE_KEY,
-                      'true',
-                    );
-                  } catch (
-                    error
-                  ) {
-                    console.warn(
-                      '[Treasi] Unable to persist onboarding state:',
-                      error,
-                    );
+          setHasCompletedOnboarding(
+            onboardingComplete,
+          );
+
+          setNavigationParams(
+            {},
+          );
+
+          setSelectedTreasureId(
+            undefined,
+          );
+
+          setCurrentScreen(
+            onboardingComplete
+              ? 'DASHBOARD'
+              : 'ONBOARDING',
+          );
+        },
+        [],
+      );
+
+    /* ---------------------------------------------------------------------- */
+    /* Onboarding completion                                                  */
+    /* ---------------------------------------------------------------------- */
+
+    const handleOnboardingComplete =
+      useCallback(
+        async (): Promise<void> => {
+          /*
+           * This also repairs older accounts whose Firestore profile
+           * still says onboarding has not been completed.
+           */
+          await markCurrentUserOnboardingComplete();
+
+          setHasCompletedOnboarding(
+            true,
+          );
+
+          setNavigationParams(
+            {},
+          );
+
+          if (
+            auth.currentUser
+          ) {
+            setCurrentUser(
+              auth.currentUser,
+            );
+
+            setCurrentScreen(
+              'DASHBOARD',
+            );
+
+            return;
+          }
+
+          setCurrentScreen(
+            'LOGIN',
+          );
+        },
+        [],
+      );
+
+    /* ---------------------------------------------------------------------- */
+    /* Navigation                                                             */
+    /* ---------------------------------------------------------------------- */
+
+    const handleNavigate =
+      useCallback(
+        (
+          target: string,
+          params?: NavigationParams,
+        ): void => {
+          const normalisedTarget =
+            String(
+              target ?? '',
+            )
+              .trim()
+              .toUpperCase();
+
+          let targetScreen:
+            ScreenState;
+
+          switch (
+            normalisedTarget
+          ) {
+            case 'MAP':
+            case 'DASHBOARD':
+            case 'HOME':
+              targetScreen =
+                'DASHBOARD';
+              break;
+
+            case 'HUNT':
+              targetScreen =
+                'HUNT';
+              break;
+
+            case 'RANKS':
+            case 'RANK':
+            case 'LEADERBOARD':
+              targetScreen =
+                'LEADERBOARD';
+              break;
+
+            case 'SOCIAL':
+            case 'FRIENDS':
+            case 'FRIEND':
+            case 'TELEGRAM':
+            case 'COMMUNITY':
+            case 'COMMS':
+              targetScreen =
+                'SOCIAL';
+              break;
+
+            case 'BAG':
+            case 'INVENTORY':
+              targetScreen =
+                'INVENTORY';
+              break;
+
+            case 'PROFILE':
+            case 'SETTINGS':
+              targetScreen =
+                'PROFILE';
+              break;
+
+            case 'LOGIN':
+              targetScreen =
+                'LOGIN';
+              break;
+
+            case 'SIGNUP':
+            case 'REGISTER':
+              targetScreen =
+                'SIGNUP';
+              break;
+
+            case 'ONBOARDING':
+              targetScreen =
+                'ONBOARDING';
+              break;
+
+            /*
+             * Splash is only a startup state. It should not normally
+             * be navigated to after boot.
+             */
+            case 'SPLASH':
+              targetScreen =
+                auth.currentUser
+                  ? 'DASHBOARD'
+                  : 'LOGIN';
+              break;
+
+            default:
+              logDevelopmentWarning(
+                `[Treasi] Unknown route "${target}". Falling back to Dashboard.`,
+              );
+
+              targetScreen =
+                'DASHBOARD';
+              break;
+          }
+
+          /* ---------------------------------------------------------------- */
+          /* Authentication guard                                             */
+          /* ---------------------------------------------------------------- */
+
+          if (
+            PROTECTED_SCREENS.has(
+              targetScreen,
+            ) &&
+            !auth.currentUser
+          ) {
+            setNavigationParams(
+              {},
+            );
+
+            setSelectedTreasureId(
+              undefined,
+            );
+
+            setCurrentScreen(
+              'LOGIN',
+            );
+
+            return;
+          }
+
+          /* ---------------------------------------------------------------- */
+          /* Hunt                                                             */
+          /* ---------------------------------------------------------------- */
+
+          if (
+            targetScreen ===
+            'HUNT'
+          ) {
+            const requestedTreasureId =
+              typeof params
+                ?.treasureId ===
+                'string' &&
+              params.treasureId.trim()
+                ? params.treasureId.trim()
+                : undefined;
+
+            const activeTreasureId =
+              requestedTreasureId ??
+              selectedTreasureId;
+
+            if (
+              !activeTreasureId
+            ) {
+              announceAndAlert(
+                'NO ACTIVE TARGET',
+                'Select a treasure from the field map before entering Hunt mode.',
+              );
+
+              return;
+            }
+
+            setSelectedTreasureId(
+              activeTreasureId,
+            );
+
+            setNavigationParams({
+              ...params,
+
+              treasureId:
+                activeTreasureId,
+            });
+
+            setCurrentScreen(
+              'HUNT',
+            );
+
+            return;
+          }
+
+          /* ---------------------------------------------------------------- */
+          /* Inventory                                                        */
+          /* ---------------------------------------------------------------- */
+
+          if (
+            targetScreen ===
+            'INVENTORY'
+          ) {
+            if (
+              params?.mode ===
+              'create'
+            ) {
+              const coordinates =
+                getValidCoordinates(
+                  params.latitude,
+                  params.longitude,
+                );
+
+              setNavigationParams({
+                mode: 'create',
+
+                /*
+                 * Coordinates are only forwarded when both values
+                 * form a valid geographic pair.
+                 */
+                ...(coordinates ??
+                  {}),
+              });
+            } else {
+              setNavigationParams(
+                {},
+              );
+            }
+
+            setCurrentScreen(
+              'INVENTORY',
+            );
+
+            return;
+          }
+
+          /* ---------------------------------------------------------------- */
+          /* Social                                                           */
+          /* ---------------------------------------------------------------- */
+
+          if (
+            targetScreen ===
+            'SOCIAL'
+          ) {
+            const coordinates =
+              getValidCoordinates(
+                params?.latitude,
+                params?.longitude,
+              );
+
+            setNavigationParams(
+              coordinates
+                ? {
+                    ...coordinates,
                   }
+                : {},
+            );
 
-                  setHasCompletedOnboarding(
+            setCurrentScreen(
+              'SOCIAL',
+            );
+
+            return;
+          }
+
+          /* ---------------------------------------------------------------- */
+          /* Standard route                                                   */
+          /* ---------------------------------------------------------------- */
+
+          setNavigationParams(
+            {},
+          );
+
+          setCurrentScreen(
+            targetScreen,
+          );
+        },
+        [
+          selectedTreasureId,
+        ],
+      );
+
+    /* ---------------------------------------------------------------------- */
+    /* Back                                                                   */
+    /* ---------------------------------------------------------------------- */
+
+    const handleBackToDashboard =
+      useCallback(
+        (): void => {
+          setNavigationParams(
+            {},
+          );
+
+          setCurrentScreen(
+            auth.currentUser
+              ? 'DASHBOARD'
+              : 'LOGIN',
+          );
+        },
+        [],
+      );
+
+    /* ---------------------------------------------------------------------- */
+    /* Sign out                                                               */
+    /* ---------------------------------------------------------------------- */
+
+    const handleSignOut =
+      useCallback(
+        async (): Promise<void> => {
+          try {
+            await signOut(
+              auth,
+            );
+
+            setCurrentUser(
+              null,
+            );
+
+            setSelectedTreasureId(
+              undefined,
+            );
+
+            setNavigationParams(
+              {},
+            );
+
+            setCurrentScreen(
+              'LOGIN',
+            );
+          } catch (
+            error: unknown
+          ) {
+            logDevelopmentWarning(
+              '[Treasi] Sign out failed:',
+              error,
+            );
+
+            announceAndAlert(
+              'SIGN OUT FAILED',
+              'Unable to end the current Explorer session. Please try again.',
+            );
+          }
+        },
+        [],
+      );
+
+    /* ---------------------------------------------------------------------- */
+    /* Derived route data                                                     */
+    /* ---------------------------------------------------------------------- */
+
+    const socialCoordinates =
+      useMemo(
+        () =>
+          getValidCoordinates(
+            navigationParams.latitude,
+            navigationParams.longitude,
+          ),
+        [
+          navigationParams.latitude,
+          navigationParams.longitude,
+        ],
+      );
+
+    /* ---------------------------------------------------------------------- */
+    /* Active screen                                                          */
+    /* ---------------------------------------------------------------------- */
+
+    const renderActiveScreen =
+      (): React.ReactNode => {
+        let screen:
+          React.ReactNode;
+
+        switch (
+          currentScreen
+        ) {
+          case 'SPLASH':
+            screen = (
+              <SplashScreen
+                onFinish={() => {
+                  setIsSplashFinished(
                     true,
                   );
+                }}
+              />
+            );
+            break;
 
+          case 'ONBOARDING':
+            screen = (
+              <OnboardingScreen
+                onComplete={
+                  handleOnboardingComplete
+                }
+              />
+            );
+            break;
+
+          case 'LOGIN':
+            screen = (
+              <LoginScreen
+                onNavigateSignUp={() => {
                   setNavigationParams(
                     {},
                   );
 
-                  /*
-                   * Use state from the auth listener rather than
-                   * accessing currentUser.displayName or assuming
-                   * Firebase has already restored the session.
-                   */
-                  if (
-                    auth.currentUser
-                  ) {
-                    setCurrentScreen(
-                      'DASHBOARD',
-                    );
-                  } else {
-                    setCurrentScreen(
-                      'LOGIN',
-                    );
-                  }
+                  setCurrentScreen(
+                    'SIGNUP',
+                  );
+                }}
+                onLoginSuccess={() => {
+                  void handleAuthenticationSuccess();
+                }}
+              />
+            );
+            break;
+
+          case 'SIGNUP':
+            screen = (
+              <SignUpScreen
+                onNavigateLogin={() => {
+                  setNavigationParams(
+                    {},
+                  );
+
+                  setCurrentScreen(
+                    'LOGIN',
+                  );
+                }}
+                onSignUpSuccess={() => {
+                  void handleAuthenticationSuccess();
+                }}
+              />
+            );
+            break;
+
+          case 'DASHBOARD':
+            screen = (
+              <DashboardScreen
+                onNavigate={
+                  handleNavigate
                 }
-              }
-            />
-          );
-          break;
+              />
+            );
+            break;
 
-        case 'LOGIN':
-          screen = (
-            <LoginScreen
-              onNavigateSignUp={() => {
-                setNavigationParams(
-                  {},
-                );
+          case 'HUNT':
+            screen = (
+              <HuntScreen
+                treasureId={
+                  navigationParams
+                    .treasureId ??
+                  selectedTreasureId
+                }
+                onBack={
+                  handleBackToDashboard
+                }
+              />
+            );
+            break;
 
-                setCurrentScreen(
-                  'SIGNUP',
-                );
-              }}
-              onLoginSuccess={() => {
-                setNavigationParams(
-                  {},
-                );
+          case 'LEADERBOARD':
+            screen = (
+              <LeaderboardScreen
+                onBack={
+                  handleBackToDashboard
+                }
+                onNavigate={
+                  handleNavigate
+                }
+              />
+            );
+            break;
 
-                setCurrentScreen(
-                  'DASHBOARD',
-                );
-              }}
-            />
-          );
-          break;
+          case 'SOCIAL':
+            screen = (
+              <SocialScreen
+                onNavigate={
+                  handleNavigate
+                }
+                userCoordinates={
+                  socialCoordinates
+                }
+              />
+            );
+            break;
 
-        case 'SIGNUP':
-          screen = (
-            <SignUpScreen
-              onNavigateLogin={() => {
-                setNavigationParams(
-                  {},
-                );
+          case 'INVENTORY':
+            screen = (
+              <InventoryScreen
+                initialParams={
+                  navigationParams
+                }
+                onBack={
+                  handleBackToDashboard
+                }
+                onNavigate={
+                  handleNavigate
+                }
+              />
+            );
+            break;
 
-                setCurrentScreen(
-                  'LOGIN',
-                );
-              }}
-              onSignUpSuccess={() => {
-                setNavigationParams(
-                  {},
-                );
+          case 'PROFILE':
+            screen = (
+              <ProfileSettingsScreen
+                onBack={
+                  handleBackToDashboard
+                }
+                onSignOut={
+                  handleSignOut
+                }
+                onNavigate={
+                  handleNavigate
+                }
+              />
+            );
+            break;
 
-                setCurrentScreen(
-                  'DASHBOARD',
-                );
-              }}
-            />
-          );
-          break;
+          default:
+            screen = (
+              <DashboardScreen
+                onNavigate={
+                  handleNavigate
+                }
+              />
+            );
+            break;
+        }
 
-        case 'DASHBOARD':
-          screen = (
-            <DashboardScreen
-              onNavigate={
-                handleNavigate
-              }
-            />
-          );
-          break;
-
-        case 'HUNT':
-          screen = (
-            <HuntScreen
-              treasureId={
-                navigationParams.treasureId ||
-                selectedTreasureId
-              }
-              onBack={
-                handleBackToDashboard
-              }
-            />
-          );
-          break;
-
-        case 'LEADERBOARD':
-          screen = (
-            <LeaderboardScreen
-              onBack={
-                handleBackToDashboard
-              }
-              onNavigate={
-                handleNavigate
-              }
-            />
-          );
-          break;
-
-        case 'SOCIAL':
-          screen = (
-            <SocialScreen
-              onNavigate={
-                handleNavigate
-              }
-              userCoordinates={
-                socialCoordinates
-              }
-            />
-          );
-          break;
-
-        case 'INVENTORY':
-          screen = (
-            <InventoryScreen
-              initialParams={
-                navigationParams
-              }
-              onBack={
-                handleBackToDashboard
-              }
-              onNavigate={
-                handleNavigate
-              }
-            />
-          );
-          break;
-
-        case 'PROFILE':
-          screen = (
-            <ProfileSettingsScreen
-              onBack={
-                handleBackToDashboard
-              }
-              onSignOut={
-                handleSignOut
-              }
-            />
-          );
-          break;
-
-        default:
-          screen = (
-            <DashboardScreen
-              onNavigate={
-                handleNavigate
-              }
-            />
-          );
-          break;
-      }
-
-      return (
-        <AnimatedScreenWrapper
-          screenKey={
-            currentScreen
-          }
-        >
-          {screen}
-        </AnimatedScreenWrapper>
-      );
-    };
-
-  /* ---------------------------------------------------------------------- */
-  /* Render                                                                */
-  /* ---------------------------------------------------------------------- */
-
-  return (
-    <View
-      style={
-        styles.container
-      }
-    >
-      <StatusBar
-        style="light"
-        hidden
-      />
-
-      {isLandscape ? (
-        renderActiveScreen()
-      ) : (
-        <View
-          style={
-            styles.orientationWarning
-          }
-        >
-          <Text
-            style={
-              styles.warningIcon
+        return (
+          <AnimatedScreenWrapper
+            reduceMotionEnabled={
+              reduceMotionEnabled
+            }
+            screenKey={
+              currentScreen
             }
           >
-            [ ! ]
-          </Text>
+            {screen}
+          </AnimatedScreenWrapper>
+        );
+      };
 
-          <Text
+    /* ---------------------------------------------------------------------- */
+    /* Render                                                                 */
+    /* ---------------------------------------------------------------------- */
+
+    return (
+      <View
+        style={
+          styles.container
+        }
+      >
+        <StatusBar
+          style="light"
+          hidden
+        />
+
+        {isLandscape ? (
+          renderActiveScreen()
+        ) : (
+          <View
+            accessible
+            accessibilityLiveRegion="polite"
+            accessibilityRole="alert"
+            accessibilityLabel="Treasi requires landscape orientation. Rotate your device horizontally to continue."
             style={
-              styles.warningTitle
+              styles.orientationWarning
             }
           >
-            TILT INSTRUMENT HORIZONTALLY
-          </Text>
+            <Text
+              accessible={
+                false
+              }
+              importantForAccessibility="no"
+              style={
+                styles.warningIcon
+              }
+            >
+              [ ! ]
+            </Text>
 
-          <Text
-            style={
-              styles.warningSubText
-            }
-          >
-            Treasi requires landscape alignment to calibrate the field interface.
-          </Text>
-        </View>
-      )}
-    </View>
-  );
-};
+            <Text
+              style={
+                styles.warningTitle
+              }
+            >
+              TILT INSTRUMENT HORIZONTALLY
+            </Text>
+
+            <Text
+              style={
+                styles.warningSubText
+              }
+            >
+              Treasi requires landscape alignment to calibrate the field interface.
+            </Text>
+          </View>
+        )}
+      </View>
+    );
+  };
 
 /* -------------------------------------------------------------------------- */
-/* Root App                                                                   */
+/* Root app                                                                   */
 /* -------------------------------------------------------------------------- */
 
-const App: React.FC = () => {
-  return (
-    <SafeAreaProvider
-      initialMetrics={
-        initialWindowMetrics
-      }
-    >
-      <MainNavigator />
-    </SafeAreaProvider>
-  );
-};
+const App:
+  React.FC = () => {
+    return (
+      <SafeAreaProvider
+        initialMetrics={
+          initialWindowMetrics
+        }
+      >
+        <MainNavigator />
+      </SafeAreaProvider>
+    );
+  };
 
 export default App;
 
@@ -1130,38 +1598,39 @@ const styles =
         'center',
       backgroundColor:
         '#1E281F',
-      padding: 32,
+      paddingHorizontal: 32,
+      paddingVertical: 24,
     },
 
+    /*
+     * The lighter rust shade keeps the warning accent readable
+     * against Treasi's dark forest background.
+     */
     warningIcon: {
       color:
-        '#A64B2A',
+        '#D47756',
       fontSize: 24,
-      fontWeight:
-        'bold',
+      fontWeight: '700',
       marginBottom: 12,
       letterSpacing: 2,
     },
 
     warningTitle: {
       color:
-        '#E8DCC0',
+        '#F3ECD8',
       fontSize: 18,
-      fontWeight:
-        'bold',
+      fontWeight: '700',
       letterSpacing: 1.5,
-      textAlign:
-        'center',
+      textAlign: 'center',
       marginBottom: 8,
     },
 
     warningSubText: {
       color:
         '#B08D57',
-      fontSize: 13,
-      textAlign:
-        'center',
-      maxWidth: 360,
-      lineHeight: 18,
+      fontSize: 14,
+      textAlign: 'center',
+      maxWidth: 420,
+      lineHeight: 20,
     },
   });

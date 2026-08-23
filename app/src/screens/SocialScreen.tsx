@@ -1,8 +1,19 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
+
 import {
+  AccessibilityInfo,
   ActivityIndicator,
   Alert,
+  AppState,
+  type AppStateStatus,
   KeyboardAvoidingView,
+  Linking,
   Modal,
   Platform,
   Pressable,
@@ -10,67 +21,74 @@ import {
   StyleSheet,
   Text,
   TextInput,
-  TouchableOpacity,
+  useWindowDimensions,
   View,
 } from 'react-native';
+
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import Svg, { Circle, Path, Polyline } from 'react-native-svg';
+
+import * as Location from 'expo-location';
+
+import {
+  Ionicons,
+  MaterialCommunityIcons,
+} from '@expo/vector-icons';
+
 import {
   collection,
   deleteDoc,
+  deleteField,
   doc,
   GeoPoint,
+  getDocs,
   limit,
   onSnapshot,
   query,
-  setDoc,
-  Timestamp,
+  serverTimestamp,
   updateDoc,
   where,
+  writeBatch,
+  type Timestamp,
 } from 'firebase/firestore';
-import { auth, db } from '../config/firebase';
-import { FriendshipDocument, UserDocument } from '../types/firestore';
-import { FieldNavBar, NavigationTab } from '../components/FieldNavBar';
 
-const UserPlusIcon = ({ color = '#E8DCC0', size = 16 }: { color?: string; size?: number }) => (
-  <Svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <Path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
-    <Circle cx="8.5" cy="7" r="4" />
-    <Path d="M20 8v6M23 11h-6" />
-  </Svg>
-);
+import {
+  auth,
+  db,
+} from '../config/firebase';
 
-const UserCheckIcon = ({ color = '#4CAF50', size = 16 }: { color?: string; size?: number }) => (
-  <Svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <Path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
-    <Circle cx="8.5" cy="7" r="4" />
-    <Polyline points="17 11 19 13 23 9" />
-  </Svg>
-);
+import {
+  FieldNavBar,
+  type NavigationTab,
+} from '../components/FieldNavBar';
 
-const UserXIcon = ({ color = '#A64B2A', size = 16 }: { color?: string; size?: number }) => (
-  <Svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <Path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
-    <Circle cx="8.5" cy="7" r="4" />
-    <Path d="M18 8l5 5M23 8l-5 5" />
-  </Svg>
-);
+import type {
+  FriendshipDocument,
+  FriendshipStatus,
+  MessageDocument,
+  UserDocument,
+} from '../types/firestore';
 
-const SendIcon = ({ color = '#E8DCC0', size = 16 }: { color?: string; size?: number }) => (
-  <Svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <Path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z" />
-  </Svg>
-);
+/* -------------------------------------------------------------------------- */
+/* Types                                                                      */
+/* -------------------------------------------------------------------------- */
 
-const CloseIcon = ({ color = '#B08D57', size = 18 }: { color?: string; size?: number }) => (
-  <Svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <Path d="M18 6L6 18M6 6l12 12" />
-  </Svg>
-);
+interface UserCoordinates {
+  latitude: number;
+  longitude: number;
+}
+
+interface DirectoryExplorer {
+  uid: string;
+  name: string;
+  initial: string;
+  telemetryEnabled: boolean;
+  location: UserCoordinates | null;
+}
 
 interface FriendshipMeta {
   docId: string;
-  status: 'pending' | 'accepted' | 'declined' | 'blocked';
+  targetUid: string;
+  status: FriendshipStatus;
   isRequester: boolean;
 }
 
@@ -83,1048 +101,7060 @@ interface NearbyExplorer {
   friendMeta?: FriendshipMeta;
 }
 
-interface Props {
-  onNavigate?: (tab: string) => void;
-  userCoordinates?: { latitude: number; longitude: number } | null;
+interface GlobalDispatch {
+  messageId: string;
+  senderId: string;
+  senderName: string;
+  text: string;
+  createdAt: Timestamp | null;
 }
 
+interface FriendshipErrors {
+  outgoing: string | null;
+  incoming: string | null;
+}
+
+type SocialLocationStatus =
+  | 'CHECKING'
+  | 'READY'
+  | 'PERMISSION_REQUIRED'
+  | 'DENIED'
+  | 'SERVICES_OFF'
+  | 'ERROR';
+
+interface Props {
+  onNavigate?: (
+    tab: string,
+  ) => void;
+
+  /*
+   * Coordinates supplied by App.tsx are used immediately when available.
+   * Social can also obtain its own fresh location if this value is null.
+   */
+  userCoordinates?: UserCoordinates | null;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Constants                                                                  */
+/* -------------------------------------------------------------------------- */
+
 const RADIUS_KM = 20;
+
 const MAX_EXPLORERS = 100;
 
-const isValidCoordinate = (latitude: unknown, longitude: unknown): boolean =>
-  typeof latitude === 'number' &&
-  typeof longitude === 'number' &&
-  Number.isFinite(latitude) &&
-  Number.isFinite(longitude) &&
+const MAX_GLOBAL_MESSAGES = 40;
+
+const MAX_TELEGRAM_LENGTH = 500;
+
+const MAX_CALLSIGN_LENGTH = 24;
+
+const LOCATION_PUBLISH_DISTANCE_KM =
+  0.02;
+
+const COLOURS = {
+  forest950: '#172018',
+  forest900: '#1C261D',
+  forest800: '#2C3B2E',
+  forest700: '#3D503F',
+
+  parchment100: '#F6EFD9',
+  parchment200: '#E8DCC0',
+
+  ink900: '#2A2420',
+  ink700: '#514A40',
+
+  bronze700: '#5F4B32',
+  bronze600: '#6B563A',
+  bronze500: '#B08D57',
+  bronze400: '#C3A06A',
+
+  rust800: '#71301C',
+  rust700: '#7F321B',
+  rust600: '#8C3A20',
+
+  success700: '#3E6546',
+  success300: '#BFE3C0',
+
+  warning300: '#E6C580',
+  danger300: '#FFB4A2',
+
+  white: '#FFFFFF',
+
+  overlay:
+    'rgba(10, 16, 11, 0.86)',
+} as const;
+
+const MONO_FONT =
+  Platform.OS === 'ios'
+    ? 'Courier'
+    : 'monospace';
+
+const MONO_BOLD_FONT =
+  Platform.OS === 'ios'
+    ? 'Courier-Bold'
+    : 'monospace';
+
+/* -------------------------------------------------------------------------- */
+/* Helpers                                                                    */
+/* -------------------------------------------------------------------------- */
+
+// Keeps development diagnostics out of production console output.
+const logDevelopmentWarning = (
+  message: string,
+  error?: unknown,
+): void => {
+  if (__DEV__) {
+    console.warn(
+      message,
+      error ?? '',
+    );
+  }
+};
+
+// Validates coordinates before any range calculation or Firestore write.
+const isValidCoordinate = (
+  latitude: unknown,
+  longitude: unknown,
+): boolean =>
+  typeof latitude ===
+    'number' &&
+  typeof longitude ===
+    'number' &&
+  Number.isFinite(
+    latitude,
+  ) &&
+  Number.isFinite(
+    longitude,
+  ) &&
   latitude >= -90 &&
   latitude <= 90 &&
   longitude >= -180 &&
   longitude <= 180;
 
+// Safely extracts coordinates from a Firestore GeoPoint-like value.
+const extractCoordinates = (
+  value: unknown,
+): UserCoordinates | null => {
+  if (
+    !value ||
+    typeof value !==
+      'object' ||
+    !(
+      'latitude' in value
+    ) ||
+    !(
+      'longitude' in value
+    )
+  ) {
+    return null;
+  }
+
+  const latitude =
+    Number(
+      value.latitude,
+    );
+
+  const longitude =
+    Number(
+      value.longitude,
+    );
+
+  if (
+    !isValidCoordinate(
+      latitude,
+      longitude,
+    )
+  ) {
+    return null;
+  }
+
+  return {
+    latitude,
+    longitude,
+  };
+};
+
+// Calculates straight-line geographic distance between two locations.
 const calculateHaversineDistanceKm = (
-  lat1: number,
-  lon1: number,
-  lat2: number,
-  lon2: number,
+  latitudeA: number,
+  longitudeA: number,
+  latitudeB: number,
+  longitudeB: number,
 ): number => {
-  const R = 6371;
-  const dLat = ((lat2 - lat1) * Math.PI) / 180;
-  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+  const earthRadiusKm =
+    6371;
+
+  const latitudeDifference =
+    ((latitudeB -
+      latitudeA) *
+      Math.PI) /
+    180;
+
+  const longitudeDifference =
+    ((longitudeB -
+      longitudeA) *
+      Math.PI) /
+    180;
+
   const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos((lat1 * Math.PI) / 180) *
-      Math.cos((lat2 * Math.PI) / 180) *
-      Math.sin(dLon / 2) ** 2;
-  return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
-};
-
-const getDeterministicFriendshipId = (uid1: string, uid2: string): string =>
-  [uid1, uid2].sort().join('_');
-
-const formatDistance = (distanceKm: number): string => {
-  if (distanceKm < 1) return `${Math.round(distanceKm * 1000)} m`;
-  return `${distanceKm.toFixed(1)} km`;
-};
-
-const normaliseName = (value: unknown): string => {
-  const name = typeof value === 'string' ? value.trim() : '';
-  return name ? name.toUpperCase() : 'AGENT';
-};
-
-export const SocialScreen: React.FC<Props> = ({
-  onNavigate,
-  userCoordinates = null,
-}) => {
-  const insets = useSafeAreaInsets();
-  const currentTab: NavigationTab = 'LEADERBOARD';
-  const currentUser = auth?.currentUser;
-  const currentUserId = currentUser?.uid ?? '';
-
-  const [allUsers, setAllUsers] = useState<
-    Array<{ uid: string; name: string; location: GeoPoint | null }>
-  >([]);
-  const [outgoingFriendships, setOutgoingFriendships] = useState<
-    Array<{ docId: string; targetUid: string; status: FriendshipMeta['status'] }>
-  >([]);
-  const [incomingFriendships, setIncomingFriendships] = useState<
-    Array<{ docId: string; targetUid: string; status: FriendshipMeta['status'] }>
-  >([]);
-
-  const [loadingExplorers, setLoadingExplorers] = useState(true);
-  const [explorerError, setExplorerError] = useState('');
-  const [explorerRetryKey, setExplorerRetryKey] = useState(0);
-
-  const [telegramText, setTelegramText] = useState('');
-  const [isTransmitting, setIsTransmitting] = useState(false);
-
-  const [friendModalVisible, setFriendModalVisible] = useState(false);
-  const [searchAgentTag, setSearchAgentTag] = useState('');
-  const [searchError, setSearchError] = useState('');
-  const [actionUid, setActionUid] = useState<string | null>(null);
-  const [isSearching, setIsSearching] = useState(false);
-
-  const friendshipsMap = useMemo<Record<string, FriendshipMeta>>(() => {
-    const map: Record<string, FriendshipMeta> = {};
-
-    for (const friendship of outgoingFriendships) {
-      map[friendship.targetUid] = {
-        docId: friendship.docId,
-        status: friendship.status,
-        isRequester: true,
-      };
-    }
-
-    for (const friendship of incomingFriendships) {
-      const existing = map[friendship.targetUid];
-      if (!existing || existing.status !== 'accepted') {
-        map[friendship.targetUid] = {
-          docId: friendship.docId,
-          status: friendship.status,
-          isRequester: false,
-        };
-      }
-    }
-
-    return map;
-  }, [incomingFriendships, outgoingFriendships]);
-
-  useEffect(() => {
-    if (!db || !currentUserId) {
-      setOutgoingFriendships([]);
-      setIncomingFriendships([]);
-      return;
-    }
-
-    const outgoingQuery = query(
-      collection(db, 'friendships'),
-      where('requesterId', '==', currentUserId),
-    );
-    const incomingQuery = query(
-      collection(db, 'friendships'),
-      where('receiverId', '==', currentUserId),
-    );
-
-    const unsubOutgoing = onSnapshot(
-      outgoingQuery,
-      (snapshot) => {
-        setOutgoingFriendships(
-          snapshot.docs
-            .map((docSnap) => {
-              const data = docSnap.data() as Partial<FriendshipDocument>;
-              if (typeof data.receiverId !== 'string' || typeof data.status !== 'string') {
-                return null;
-              }
-              return {
-                docId: docSnap.id,
-                targetUid: data.receiverId,
-                status: data.status as FriendshipMeta['status'],
-              };
-            })
-            .filter(Boolean) as Array<{
-            docId: string;
-            targetUid: string;
-            status: FriendshipMeta['status'];
-          }>,
-        );
-      },
-      () => setOutgoingFriendships([]),
-    );
-
-    const unsubIncoming = onSnapshot(
-      incomingQuery,
-      (snapshot) => {
-        setIncomingFriendships(
-          snapshot.docs
-            .map((docSnap) => {
-              const data = docSnap.data() as Partial<FriendshipDocument>;
-              if (typeof data.requesterId !== 'string' || typeof data.status !== 'string') {
-                return null;
-              }
-              return {
-                docId: docSnap.id,
-                targetUid: data.requesterId,
-                status: data.status as FriendshipMeta['status'],
-              };
-            })
-            .filter(Boolean) as Array<{
-            docId: string;
-            targetUid: string;
-            status: FriendshipMeta['status'];
-          }>,
-        );
-      },
-      () => setIncomingFriendships([]),
-    );
-
-    return () => {
-      unsubOutgoing();
-      unsubIncoming();
-    };
-  }, [currentUserId]);
-
-  useEffect(() => {
-    if (!db || !currentUserId) {
-      setAllUsers([]);
-      setLoadingExplorers(false);
-      return;
-    }
-
-    setLoadingExplorers(true);
-    setExplorerError('');
-
-    const usersQuery = query(collection(db, 'users'), limit(MAX_EXPLORERS));
-
-    return onSnapshot(
-      usersQuery,
-      (snapshot) => {
-        const users = snapshot.docs
-          .filter((docSnap) => docSnap.id !== currentUserId)
-          .map((docSnap) => {
-            const data = docSnap.data() as UserDocument & {
-              location?: GeoPoint | { latitude: number; longitude: number } | null;
-            };
-            const rawLocation = data.location;
-            const rawLatitude =
-              rawLocation && typeof rawLocation === 'object' && 'latitude' in rawLocation
-                ? Number(rawLocation.latitude)
-                : NaN;
-            const rawLongitude =
-              rawLocation && typeof rawLocation === 'object' && 'longitude' in rawLocation
-                ? Number(rawLocation.longitude)
-                : NaN;
-
-            return {
-              uid: docSnap.id,
-              name: normaliseName(data.username),
-              location: isValidCoordinate(rawLatitude, rawLongitude)
-                ? new GeoPoint(rawLatitude, rawLongitude)
-                : null,
-            };
-          });
-
-        setAllUsers(users);
-        setLoadingExplorers(false);
-      },
-      () => {
-        setExplorerError('Unable to scan nearby explorer telemetry.');
-        setLoadingExplorers(false);
-      },
-    );
-  }, [currentUserId, explorerRetryKey]);
-
-  const nearbyExplorers = useMemo<NearbyExplorer[]>(() => {
-    if (!userCoordinates || !isValidCoordinate(userCoordinates.latitude, userCoordinates.longitude)) {
-      return [];
-    }
-
-    const parsed: NearbyExplorer[] = [];
-
-    for (const user of allUsers) {
-      if (!user.location) continue;
-
-      const distanceKm = calculateHaversineDistanceKm(
-        userCoordinates.latitude,
-        userCoordinates.longitude,
-        user.location.latitude,
-        user.location.longitude,
-      );
-
-      if (distanceKm <= RADIUS_KM) {
-        parsed.push({
-          uid: user.uid,
-          name: user.name,
-          initial: user.name.charAt(0) || 'A',
-          distanceKm,
-          distanceFormatted: formatDistance(distanceKm),
-          friendMeta: friendshipsMap[user.uid],
-        });
-      }
-    }
-
-    return parsed.sort((a, b) => a.distanceKm - b.distanceKm);
-  }, [allUsers, friendshipsMap, userCoordinates]);
-
-  const handleSendFriendRequest = async (targetUid: string) => {
-    if (!db || !currentUserId || !targetUid || targetUid === currentUserId) {
-      if (targetUid === currentUserId) {
-        Alert.alert('CANNOT LINK SELF', 'You cannot create a friendship request with your own account.');
-      }
-      return;
-    }
-
-    if (actionUid) return;
-
-    const existingMeta = friendshipsMap[targetUid];
-
-    if (existingMeta) {
-      if (existingMeta.status === 'accepted') {
-        Alert.alert('LINK ACTIVE', 'You are already linked with this explorer.');
-        return;
-      }
-      if (existingMeta.status === 'pending') {
-        Alert.alert('REQUEST ACTIVE', 'A pending link request already exists with this explorer.');
-        return;
-      }
-      if (existingMeta.status === 'blocked') {
-        Alert.alert('LINK BLOCKED', 'This explorer cannot currently be linked.');
-        return;
-      }
-    }
-
-    try {
-      setActionUid(targetUid);
-      const friendshipId = getDeterministicFriendshipId(currentUserId, targetUid);
-
-      await setDoc(
-        doc(db, 'friendships', friendshipId),
-        {
-          friendshipId,
-          requesterId: currentUserId,
-          receiverId: targetUid,
-          status: 'pending',
-          createdAt: Timestamp.now(),
-          updatedAt: Timestamp.now(),
-        } as FriendshipDocument,
-        { merge: false },
-      );
-    } catch {
-      Alert.alert('TRANSMISSION ERROR', 'Failed to issue the friend link request.');
-    } finally {
-      setActionUid(null);
-    }
-  };
-
-  const handleAcceptFriendRequest = async (friendship: FriendshipMeta) => {
-    if (!db || !currentUserId || actionUid) return;
-
-    try {
-      setActionUid(friendship.docId);
-      await updateDoc(doc(db, 'friendships', friendship.docId), {
-        status: 'accepted',
-        updatedAt: Timestamp.now(),
-      });
-    } catch {
-      Alert.alert('LINK ERROR', 'Unable to accept the explorer link request.');
-    } finally {
-      setActionUid(null);
-    }
-  };
-
-  const handleRemoveFriendship = (friendship: FriendshipMeta, agentName: string) => {
-    if (!db || !currentUserId) return;
-
-    Alert.alert(
-      friendship.status === 'pending' && friendship.isRequester ? 'CANCEL REQUEST' : 'TERMINATE LINK',
-      friendship.status === 'pending' && friendship.isRequester
-        ? `Cancel the pending link request to ${agentName}?`
-        : `Disconnect telemetry link with ${agentName}?`,
-      [
-        { text: 'CANCEL', style: 'cancel' },
-        {
-          text: friendship.status === 'pending' && friendship.isRequester ? 'CANCEL REQUEST' : 'UNLINK',
-          style: 'destructive',
-          onPress: async () => {
-            if (actionUid) return;
-
-            try {
-              setActionUid(friendship.docId);
-              await deleteDoc(doc(db, 'friendships', friendship.docId));
-            } catch {
-              Alert.alert('LINK ERROR', 'Unable to update the friendship record.');
-            } finally {
-              setActionUid(null);
-            }
-          },
-        },
-      ],
-    );
-  };
-
-  const handleSearchAndLinkAgent = async () => {
-    if (!db || !currentUserId || isSearching) return;
-
-    const searchTag = searchAgentTag.trim().toLowerCase();
-    if (!searchTag) {
-      setSearchError('ENTER AN AGENT CALLSIGN');
-      return;
-    }
-
-    setSearchError('');
-    setIsSearching(true);
-
-    try {
-      const matchingExplorer = allUsers.find(
-        (user) => user.name.toLowerCase() === searchTag,
-      );
-
-      if (!matchingExplorer) {
-        setSearchError('AGENT CALLSIGN NOT FOUND');
-        return;
-      }
-
-      if (matchingExplorer.uid === currentUserId) {
-        setSearchError('CANNOT LINK SELF CALLSIGN');
-        return;
-      }
-
-      await handleSendFriendRequest(matchingExplorer.uid);
-      setFriendModalVisible(false);
-      setSearchAgentTag('');
-    } catch {
-      setSearchError('TRANSMISSION FAILED');
-    } finally {
-      setIsSearching(false);
-    }
-  };
-
-  const handleDispatchTelegram = async () => {
-    if (!db || !currentUserId || !telegramText.trim() || isTransmitting) {
-      if (!telegramText.trim()) {
-        Alert.alert('EMPTY TELEGRAM', 'Enter a message before transmitting the signal.');
-      }
-      return;
-    }
-
-    setIsTransmitting(true);
-
-    try {
-      const senderName = normaliseName(
-        currentUser?.displayName?.trim() ||
-          currentUser?.email?.trim() ||
-          'FIELD EXPLORER',
-      );
-      const message = telegramText.trim().slice(0, 500);
-
-      await setDoc(doc(collection(db, 'messages')), {
-        senderId: currentUserId,
-        senderName,
-        text: message,
-        createdAt: Timestamp.now(),
-        type: 'GLOBAL_DISPATCH',
-      });
-
-      await setDoc(doc(collection(db, 'activity_feed')), {
-        userId: currentUserId,
-        username: senderName,
-        type: 'TELEGRAM_DISPATCH',
-        message: `DISPATCHED TELEGRAM: "${message.length > 30 ? `${message.substring(0, 30)}...` : message}"`,
-        targetId: 'global',
-        createdAt: Timestamp.now(),
-      });
-
-      setTelegramText('');
-      Alert.alert('SIGNAL TRANSMITTED', 'Telegram broadcast dispatched to the active sector.');
-    } catch {
-      Alert.alert(
-        'TRANSMISSION FAILED',
-        'The Telegram could not be dispatched. Check your connection and try again.',
-      );
-    } finally {
-      setIsTransmitting(false);
-    }
-  };
+    Math.sin(
+      latitudeDifference /
+        2,
+    ) **
+      2 +
+    Math.cos(
+      (latitudeA *
+        Math.PI) /
+        180,
+    ) *
+      Math.cos(
+        (latitudeB *
+          Math.PI) /
+          180,
+      ) *
+      Math.sin(
+        longitudeDifference /
+          2,
+      ) **
+        2;
 
   return (
-    <View
-      style={[
-        styles.screen,
-        {
-          paddingLeft: Math.max(insets.left, 12),
-          paddingRight: Math.max(insets.right, 12),
-          paddingTop: Math.max(insets.top, 8),
-          paddingBottom: Math.max(insets.bottom, 8),
-        },
-      ]}
-    >
-      <View style={styles.splitWrapper}>
-        <View style={styles.telegramPanel}>
-          <View style={styles.panelHeader}>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.panelTitle}>BROADCAST TELEGRAM</Text>
-              <Text style={styles.subText}>SECTOR-WIDE DISPATCH CHANNEL</Text>
-            </View>
-            <SendIcon color="#B08D57" size={18} />
-          </View>
-
-          <Text style={styles.description}>
-            Broadcast a message to the active sector. Telegrams are public dispatches,
-            not private messages.
-          </Text>
-
-          <TextInput
-            style={styles.telegramInput}
-            placeholder="TYPE DISPATCH MESSAGE..."
-            placeholderTextColor="#8A7B66"
-            multiline
-            value={telegramText}
-            maxLength={500}
-            onChangeText={setTelegramText}
-            textAlignVertical="top"
-            accessibilityLabel="Telegram message"
-          />
-
-          <Text style={styles.charCount}>{telegramText.length}/500</Text>
-
-          <TouchableOpacity
-            style={[styles.sendButton, isTransmitting && { opacity: 0.6 }]}
-            onPress={handleDispatchTelegram}
-            disabled={isTransmitting}
-            accessibilityRole="button"
-          >
-            {isTransmitting ? (
-              <>
-                <ActivityIndicator size="small" color="#F3ECD8" />
-                <Text style={styles.sendButtonText}>TRANSMITTING...</Text>
-              </>
-            ) : (
-              <>
-                <SendIcon color="#F3ECD8" size={16} />
-                <Text style={styles.sendButtonText}>TRANSMIT SIGNAL</Text>
-              </>
-            )}
-          </TouchableOpacity>
-
-          <View style={styles.telegramInfo}>
-            <Text style={styles.infoLabel}>DISPATCH PROTOCOL</Text>
-            <Text style={styles.infoText}>
-              Messages are stored as GLOBAL_DISPATCH records and mirrored to the activity feed.
-            </Text>
-          </View>
-        </View>
-
-        <View style={styles.friendsPanel}>
-          <View style={styles.panelHeader}>
-            <View style={{ flex: 1 }}>
-              <Text style={[styles.panelTitle, styles.friendsPanelTitle]}>NEARBY AGENTS</Text>
-              <Text style={styles.subText}>ACTIVE UNITS WITHIN 20KM</Text>
-            </View>
-
-            <TouchableOpacity
-              style={styles.iconAddButton}
-              onPress={() => {
-                setSearchError('');
-                setSearchAgentTag('');
-                setFriendModalVisible(true);
-              }}
-              accessibilityLabel="Add friend"
-              accessibilityRole="button"
-            >
-              <UserPlusIcon color="#B08D57" size={16} />
-            </TouchableOpacity>
-          </View>
-
-          {loadingExplorers ? (
-            <View style={styles.loadingBox}>
-              <ActivityIndicator size="small" color="#E8DCC0" />
-              <Text style={styles.loadingTextDark}>SCANNING EXPLORER TELEMETRY...</Text>
-            </View>
-          ) : explorerError ? (
-            <View style={styles.loadingBox}>
-              <Text style={styles.errorTextDark}>{explorerError}</Text>
-              <TouchableOpacity
-                style={styles.darkRetryButton}
-                onPress={() => {
-                  setExplorerError('');
-                  setLoadingExplorers(true);
-                  setExplorerRetryKey((value) => value + 1);
-                }}
-              >
-                <Text style={styles.darkRetryText}>RECONNECT</Text>
-              </TouchableOpacity>
-            </View>
-          ) : !userCoordinates ? (
-            <View style={styles.loadingBox}>
-              <Text style={styles.emptyText}>YOUR LOCATION IS UNAVAILABLE</Text>
-              <Text style={styles.loadingTextDark}>
-                Nearby range cannot be verified without a valid GPS position.
-              </Text>
-            </View>
-          ) : nearbyExplorers.length === 0 ? (
-            <View style={styles.loadingBox}>
-              <Text style={styles.emptyText}>NO AGENTS DETECTED IN 20KM RADIUS</Text>
-            </View>
-          ) : (
-            <ScrollView
-              style={styles.cardsContainer}
-              showsVerticalScrollIndicator={false}
-              accessibilityLabel="Nearby explorers"
-            >
-              {nearbyExplorers.map((item) => {
-                const friendMeta = item.friendMeta;
-                const isPending = friendMeta?.status === 'pending';
-                const isAccepted = friendMeta?.status === 'accepted';
-                const isIncomingRequest = isPending && !friendMeta?.isRequester;
-                const isActing =
-                  actionUid === item.uid || actionUid === friendMeta?.docId;
-
-                return (
-                  <View key={item.uid} style={styles.explorerCard}>
-                    <View style={styles.cardLeft}>
-                      <View style={styles.avatarCircle}>
-                        <Text style={styles.avatarText}>{item.initial}</Text>
-                      </View>
-                      <View style={{ flex: 1, minWidth: 0 }}>
-                        <Text style={styles.explorerName} numberOfLines={1}>
-                          {item.name}
-                        </Text>
-                        <Text style={styles.explorerMeta}>
-                          RANGE: {item.distanceFormatted}
-                        </Text>
-                      </View>
-                    </View>
-
-                    <View style={styles.cardRight}>
-                      {!friendMeta && (
-                        <TouchableOpacity
-                          style={[styles.friendActionButton, isActing && { opacity: 0.5 }]}
-                          onPress={() => handleSendFriendRequest(item.uid)}
-                          disabled={isActing}
-                          accessibilityLabel={`Send friend request to ${item.name}`}
-                        >
-                          {isActing ? (
-                            <ActivityIndicator size="small" color="#2C3B2E" />
-                          ) : (
-                            <UserPlusIcon color="#2C3B2E" size={14} />
-                          )}
-                        </TouchableOpacity>
-                      )}
-
-                      {isIncomingRequest && (
-                        <>
-                          <TouchableOpacity
-                            style={[styles.friendActionButton, { backgroundColor: '#4CAF50' }]}
-                            onPress={() => handleAcceptFriendRequest(friendMeta)}
-                            disabled={isActing}
-                            accessibilityLabel={`Accept friend request from ${item.name}`}
-                          >
-                            <UserCheckIcon color="#FFFFFF" size={12} />
-                          </TouchableOpacity>
-                          <TouchableOpacity
-                            style={[styles.friendActionButton, { backgroundColor: '#A64B2A' }]}
-                            onPress={() => handleRemoveFriendship(friendMeta, item.name)}
-                            disabled={isActing}
-                            accessibilityLabel={`Decline friend request from ${item.name}`}
-                          >
-                            <UserXIcon color="#FFFFFF" size={12} />
-                          </TouchableOpacity>
-                        </>
-                      )}
-
-                      {isPending && friendMeta?.isRequester && (
-                        <TouchableOpacity
-                          style={[styles.friendActionButton, { backgroundColor: '#D9B98A' }]}
-                          onPress={() => handleRemoveFriendship(friendMeta, item.name)}
-                          disabled={isActing}
-                          accessibilityLabel={`Cancel pending friend request to ${item.name}`}
-                        >
-                          <Text style={styles.pendingText}>PENDING</Text>
-                        </TouchableOpacity>
-                      )}
-
-                      {isAccepted && (
-                        <TouchableOpacity
-                          style={[styles.friendActionButton, { backgroundColor: '#CBBBA0' }]}
-                          onPress={() => handleRemoveFriendship(friendMeta, item.name)}
-                          disabled={isActing}
-                          accessibilityLabel={`Remove friendship with ${item.name}`}
-                        >
-                          {isActing ? (
-                            <ActivityIndicator size="small" color="#2C3B2E" />
-                          ) : (
-                            <UserCheckIcon color="#2C3B2E" size={14} />
-                          )}
-                        </TouchableOpacity>
-                      )}
-
-                      {friendMeta?.status === 'declined' && (
-                        <Text style={styles.statusText}>DECLINED</Text>
-                      )}
-                      {friendMeta?.status === 'blocked' && (
-                        <Text style={styles.statusText}>BLOCKED</Text>
-                      )}
-                    </View>
-                  </View>
-                );
-              })}
-            </ScrollView>
-          )}
-        </View>
-      </View>
-
-      <FieldNavBar currentTab={currentTab} onNavigate={onNavigate} />
-
-      <Modal
-        visible={friendModalVisible}
-        transparent
-        animationType="fade"
-        presentationStyle="overFullScreen"
-        statusBarTranslucent
-        onRequestClose={() => {
-          if (!isSearching && !actionUid) setFriendModalVisible(false);
-        }}
-      >
-        <KeyboardAvoidingView
-          style={styles.modalOverlay}
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-        >
-          <Pressable
-            style={StyleSheet.absoluteFill}
-            onPress={() => {
-              if (!isSearching && !actionUid) setFriendModalVisible(false);
-            }}
-          />
-          <View style={styles.modalCard}>
-            <View style={styles.modalHeader}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.modalTitle}>LINK NEW EXPLORER</Text>
-                <Text style={styles.modalSub}>
-                  Enter an exact explorer callsign to issue a link request.
-                </Text>
-              </View>
-              <TouchableOpacity
-                onPress={() => {
-                  if (!isSearching && !actionUid) setFriendModalVisible(false);
-                }}
-                disabled={isSearching || !!actionUid}
-                style={styles.closeButton}
-              >
-                <CloseIcon color="#B08D57" size={18} />
-              </TouchableOpacity>
-            </View>
-
-            {searchError ? <Text style={styles.errorText}>{searchError}</Text> : null}
-
-            <TextInput
-              style={styles.tagInput}
-              placeholder="AGENT_CALLSIGN"
-              placeholderTextColor="#8A7B66"
-              autoCapitalize="none"
-              autoCorrect={false}
-              value={searchAgentTag}
-              onChangeText={(text) => {
-                setSearchAgentTag(text);
-                setSearchError('');
-              }}
-            />
-
-            <TouchableOpacity
-              style={[styles.sendButton, isSearching && { opacity: 0.6 }]}
-              onPress={handleSearchAndLinkAgent}
-              disabled={isSearching}
-            >
-              {isSearching ? (
-                <>
-                  <ActivityIndicator size="small" color="#F3ECD8" />
-                  <Text style={styles.sendButtonText}>SEARCHING...</Text>
-                </>
-              ) : (
-                <>
-                  <UserPlusIcon color="#F3ECD8" size={16} />
-                  <Text style={styles.sendButtonText}>SEND LINK REQUEST</Text>
-                </>
-              )}
-            </TouchableOpacity>
-          </View>
-        </KeyboardAvoidingView>
-      </Modal>
-    </View>
+    earthRadiusKm *
+    (
+      2 *
+      Math.atan2(
+        Math.sqrt(a),
+        Math.sqrt(
+          1 - a,
+        ),
+      )
+    )
   );
 };
 
-const styles = StyleSheet.create({
-  screen: {
-    flex: 1,
-    backgroundColor: '#1C281E',
-  },
-  splitWrapper: {
-    flex: 1,
-    flexDirection: 'row',
-    gap: 10,
-    marginBottom: 8,
-  },
-  telegramPanel: {
-    flex: 0.6,
-    minWidth: 0,
-    backgroundColor: '#E8DCC0',
-    borderRadius: 10,
-    padding: 16,
-  },
-  friendsPanel: {
-    flex: 0.4,
-    minWidth: 0,
-    backgroundColor: '#2C3B2E',
-    borderRadius: 10,
-    padding: 14,
-    borderWidth: 1,
-    borderColor: '#B08D57',
-  },
-  panelHeader: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    justifyContent: 'space-between',
-    gap: 10,
-    marginBottom: 10,
-  },
-  panelTitle: {
-    color: '#2A2420',
-    fontWeight: 'bold',
-    fontSize: 14,
-    letterSpacing: 1,
-  },
-  friendsPanelTitle: {
-    color: '#E8DCC0',
-  },
-  subText: {
-    color: '#8A7B66',
-    fontSize: 9,
-    marginTop: 3,
-    letterSpacing: 0.5,
-  },
-  description: {
-    color: '#6E6152',
-    fontSize: 10,
-    lineHeight: 15,
-    marginBottom: 14,
-    maxWidth: 600,
-  },
-  telegramInput: {
-    flex: 1,
-    backgroundColor: '#F3ECD8',
-    borderWidth: 1,
-    borderColor: '#B08D57',
-    borderRadius: 6,
-    padding: 12,
-    color: '#2A2420',
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-    minHeight: 140,
-    textAlignVertical: 'top',
-    fontSize: 12,
-  },
-  charCount: {
-    color: '#8A7B66',
-    fontSize: 8,
-    textAlign: 'right',
-    marginTop: 4,
-    marginBottom: 10,
-  },
-  sendButton: {
-    backgroundColor: '#2C3B2E',
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-    paddingVertical: 10,
-    borderRadius: 4,
-    minHeight: 44,
-  },
-  sendButtonText: {
-    color: '#F3ECD8',
-    fontWeight: 'bold',
-    fontSize: 11,
-    letterSpacing: 1,
-  },
-  telegramInfo: {
-    borderTopWidth: 1,
-    borderColor: '#CBBBA0',
-    marginTop: 14,
-    paddingTop: 12,
-  },
-  infoLabel: {
-    color: '#A64B2A',
-    fontSize: 9,
-    fontWeight: 'bold',
-    letterSpacing: 1,
-    marginBottom: 4,
-  },
-  infoText: {
-    color: '#6E6152',
-    fontSize: 9,
-    lineHeight: 14,
-  },
-  iconAddButton: {
-    borderWidth: 1,
-    borderColor: '#B08D57',
-    padding: 6,
-    borderRadius: 4,
-    minWidth: 40,
-    minHeight: 40,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#202C22',
-  },
-  cardsContainer: {
-    flex: 1,
-    marginTop: 4,
-  },
-  loadingBox: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    gap: 8,
-    paddingHorizontal: 8,
-  },
-  loadingTextDark: {
-    color: '#B08D57',
-    fontSize: 9,
-    fontWeight: 'bold',
-    letterSpacing: 0.5,
-    textAlign: 'center',
-  },
-  errorTextDark: {
-    color: '#E8DCC0',
-    fontSize: 9,
-    fontWeight: 'bold',
-    textAlign: 'center',
-    marginBottom: 6,
-  },
-  emptyText: {
-    color: '#B08D57',
-    fontSize: 9,
-    fontWeight: 'bold',
-    letterSpacing: 1,
-    textAlign: 'center',
-  },
-  darkRetryButton: {
-    backgroundColor: '#A64B2A',
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    minHeight: 40,
-    borderRadius: 4,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginTop: 8,
-  },
-  darkRetryText: {
-    color: '#F3ECD8',
-    fontSize: 9,
-    fontWeight: 'bold',
-    letterSpacing: 1,
-  },
-  explorerCard: {
-    backgroundColor: '#E8DCC0',
-    borderRadius: 6,
-    padding: 8,
-    marginBottom: 6,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    minHeight: 52,
-  },
-  cardLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    flex: 1,
-    minWidth: 0,
-  },
-  avatarCircle: {
-    width: 30,
-    height: 30,
-    borderRadius: 15,
-    backgroundColor: '#2C3B3E',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  avatarText: {
-    color: '#E8DCC0',
-    fontWeight: 'bold',
-    fontSize: 11,
-  },
-  explorerName: {
-    color: '#2A2420',
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-    fontWeight: 'bold',
-    fontSize: 11,
-  },
-  explorerMeta: {
-    color: '#6E6152',
-    fontSize: 8,
-    marginTop: 1,
-  },
-  cardRight: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    marginLeft: 4,
-  },
-  friendActionButton: {
-    backgroundColor: '#CBBBA0',
-    paddingVertical: 4,
-    paddingHorizontal: 8,
-    minWidth: 38,
-    minHeight: 38,
-    borderRadius: 4,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  pendingText: {
-    color: '#2A2420',
-    fontSize: 8,
-    fontWeight: 'bold',
-  },
-  statusText: {
-    color: '#B08D57',
-    fontSize: 8,
-    fontWeight: 'bold',
-  },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(10, 16, 11, 0.82)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 20,
-  },
-  modalCard: {
-    width: '90%',
-    maxWidth: 600,
-    backgroundColor: '#E8DCC0',
-    borderRadius: 8,
-    borderWidth: 2,
-    borderColor: '#B08D57',
-    padding: 16,
-  },
-  modalHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    gap: 12,
-  },
-  modalTitle: {
-    color: '#2A2420',
-    fontWeight: 'bold',
-    fontSize: 14,
-    letterSpacing: 1,
-  },
-  modalSub: {
-    color: '#6E6152',
-    fontSize: 10,
-    marginTop: 4,
-    marginBottom: 12,
-    lineHeight: 15,
-  },
-  closeButton: {
-    minWidth: 40,
-    minHeight: 40,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  errorText: {
-    color: '#A64B2A',
-    fontSize: 9,
-    fontWeight: 'bold',
-    marginBottom: 6,
-    letterSpacing: 1,
-  },
-  tagInput: {
-    backgroundColor: '#F3ECD8',
-    borderWidth: 1,
-    borderColor: '#B08D57',
-    borderRadius: 4,
-    padding: 10,
-    color: '#2A2420',
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-    fontSize: 12,
-    marginBottom: 12,
-    minHeight: 44,
-  },
-});
+// Provides a compact distance for nearby Explorer cards.
+const formatDistance = (
+  distanceKm: number,
+): string => {
+  if (
+    distanceKm < 1
+  ) {
+    return `${Math.round(
+      distanceKm * 1000,
+    )} M`;
+  }
+
+  return `${distanceKm.toFixed(
+    1,
+  )} KM`;
+};
+
+// Normalises callsigns for the field interface.
+const normaliseName = (
+  value: unknown,
+  fallback =
+    'EXPLORER',
+): string => {
+  const name =
+    typeof value ===
+    'string'
+      ? value.trim()
+      : '';
+
+  return name
+    ? name.toUpperCase()
+    : fallback;
+};
+
+// Creates one relationship ID regardless of who initiated the request.
+const getDeterministicFriendshipId = (
+  uidA: string,
+  uidB: string,
+): string =>
+  [
+    uidA,
+    uidB,
+  ]
+    .sort()
+    .join('_');
+
+// Protects runtime friendship parsing from malformed Firestore values.
+const isFriendshipStatus = (
+  value: unknown,
+): value is FriendshipStatus =>
+  value ===
+    'pending' ||
+  value ===
+    'accepted' ||
+  value ===
+    'declined' ||
+  value ===
+    'blocked';
+
+// Formats Telegram timestamps without inventing local activity.
+const formatRelativeTime = (
+  timestamp:
+    Timestamp | null,
+): string => {
+  if (!timestamp) {
+    return 'JUST NOW';
+  }
+
+  try {
+    const differenceSeconds =
+      Math.max(
+        0,
+        Math.floor(
+          (
+            Date.now() -
+            timestamp.toMillis()
+          ) /
+            1000,
+        ),
+      );
+
+    if (
+      differenceSeconds <
+      60
+    ) {
+      return 'JUST NOW';
+    }
+
+    if (
+      differenceSeconds <
+      3600
+    ) {
+      return `${Math.floor(
+        differenceSeconds /
+          60,
+      )}M AGO`;
+    }
+
+    if (
+      differenceSeconds <
+      86400
+    ) {
+      return `${Math.floor(
+        differenceSeconds /
+          3600,
+      )}H AGO`;
+    }
+
+    return `${Math.floor(
+      differenceSeconds /
+        86400,
+    )}D AGO`;
+  } catch {
+    return 'RECENT';
+  }
+};
+
+// Announces the same feedback that is shown in a native alert.
+const showAccessibleAlert = (
+  title: string,
+  message: string,
+): void => {
+  AccessibilityInfo
+    .announceForAccessibility(
+      `${title}. ${message}`,
+    );
+
+  Alert.alert(
+    title,
+    message,
+  );
+};
+
+/* -------------------------------------------------------------------------- */
+/* Social Screen                                                              */
+/* -------------------------------------------------------------------------- */
+
+export const SocialScreen:
+  React.FC<Props> = ({
+    onNavigate,
+    userCoordinates =
+      null,
+  }) => {
+    const {
+      width,
+      height,
+    } =
+      useWindowDimensions();
+
+    const insets =
+      useSafeAreaInsets();
+
+    const isLandscape =
+      width > height;
+
+    /*
+     * Social is reached through the Leaderboard community area.
+     * FieldNavBar currently has no separate SOCIAL navigation tab.
+     */
+    const currentTab:
+      NavigationTab =
+      'LEADERBOARD';
+
+    const currentUser =
+      auth.currentUser;
+
+    const currentUserId =
+      currentUser?.uid ??
+      '';
+
+    const isMountedRef =
+      useRef(true);
+
+    const lastPublishedLocationRef =
+      useRef<string | null>(
+        null,
+      );
+
+    const isPublishingLocationRef =
+      useRef(false);
+
+    /* ---------------------------------------------------------------------- */
+    /* Accessibility                                                         */
+    /* ---------------------------------------------------------------------- */
+
+    const [
+      reduceMotionEnabled,
+      setReduceMotionEnabled,
+    ] =
+      useState(false);
+
+    /* ---------------------------------------------------------------------- */
+    /* Current Explorer                                                       */
+    /* ---------------------------------------------------------------------- */
+
+    const [
+      currentUserProfile,
+      setCurrentUserProfile,
+    ] =
+      useState<UserDocument | null>(
+        null,
+      );
+
+    const [
+      profileError,
+      setProfileError,
+    ] =
+      useState<string | null>(
+        null,
+      );
+
+    /* ---------------------------------------------------------------------- */
+    /* User directory                                                         */
+    /* ---------------------------------------------------------------------- */
+
+    const [
+      allUsers,
+      setAllUsers,
+    ] =
+      useState<
+        DirectoryExplorer[]
+      >([]);
+
+    const [
+      loadingExplorers,
+      setLoadingExplorers,
+    ] =
+      useState(true);
+
+    const [
+      explorerError,
+      setExplorerError,
+    ] =
+      useState<string | null>(
+        null,
+      );
+
+    /* ---------------------------------------------------------------------- */
+    /* Friendships                                                            */
+    /* ---------------------------------------------------------------------- */
+
+    const [
+      outgoingFriendships,
+      setOutgoingFriendships,
+    ] =
+      useState<
+        FriendshipMeta[]
+      >([]);
+
+    const [
+      incomingFriendships,
+      setIncomingFriendships,
+    ] =
+      useState<
+        FriendshipMeta[]
+      >([]);
+
+    const [
+      friendshipErrors,
+      setFriendshipErrors,
+    ] =
+      useState<FriendshipErrors>({
+        outgoing: null,
+        incoming: null,
+      });
+
+    const [
+      actionUid,
+      setActionUid,
+    ] =
+      useState<string | null>(
+        null,
+      );
+
+    /* ---------------------------------------------------------------------- */
+    /* Telegram                                                               */
+    /* ---------------------------------------------------------------------- */
+
+    const [
+      telegramText,
+      setTelegramText,
+    ] =
+      useState('');
+
+    const [
+      globalDispatches,
+      setGlobalDispatches,
+    ] =
+      useState<
+        GlobalDispatch[]
+      >([]);
+
+    const [
+      loadingDispatches,
+      setLoadingDispatches,
+    ] =
+      useState(true);
+
+    const [
+      telegramError,
+      setTelegramError,
+    ] =
+      useState<string | null>(
+        null,
+      );
+
+    const [
+      isTransmitting,
+      setIsTransmitting,
+    ] =
+      useState(false);
+
+    /* ---------------------------------------------------------------------- */
+    /* Location                                                               */
+    /* ---------------------------------------------------------------------- */
+
+    const [
+      currentCoordinates,
+      setCurrentCoordinates,
+    ] =
+      useState<UserCoordinates | null>(
+        isValidCoordinate(
+          userCoordinates
+            ?.latitude,
+          userCoordinates
+            ?.longitude,
+        )
+          ? {
+              latitude:
+                userCoordinates
+                  ?.latitude as number,
+
+              longitude:
+                userCoordinates
+                  ?.longitude as number,
+            }
+          : null,
+      );
+
+    const [
+      locationStatus,
+      setLocationStatus,
+    ] =
+      useState<SocialLocationStatus>(
+        isValidCoordinate(
+          userCoordinates
+            ?.latitude,
+          userCoordinates
+            ?.longitude,
+        )
+          ? 'READY'
+          : 'CHECKING',
+      );
+
+    const [
+      locationPermissionStatus,
+      setLocationPermissionStatus,
+    ] =
+      useState<Location.PermissionStatus | null>(
+        null,
+      );
+
+    const [
+      canAskLocationAgain,
+      setCanAskLocationAgain,
+    ] =
+      useState(true);
+
+    const [
+      locationServicesEnabled,
+      setLocationServicesEnabled,
+    ] =
+      useState<boolean | null>(
+        null,
+      );
+
+    const [
+      locationPublishError,
+      setLocationPublishError,
+    ] =
+      useState<string | null>(
+        null,
+      );
+
+    /* ---------------------------------------------------------------------- */
+    /* Friend search modal                                                    */
+    /* ---------------------------------------------------------------------- */
+
+    const [
+      friendModalVisible,
+      setFriendModalVisible,
+    ] =
+      useState(false);
+
+    const [
+      searchAgentTag,
+      setSearchAgentTag,
+    ] =
+      useState('');
+
+    const [
+      searchError,
+      setSearchError,
+    ] =
+      useState<string | null>(
+        null,
+      );
+
+    const [
+      isSearching,
+      setIsSearching,
+    ] =
+      useState(false);
+
+    /* ---------------------------------------------------------------------- */
+    /* Retry                                                                  */
+    /* ---------------------------------------------------------------------- */
+
+    const [
+      retryKey,
+      setRetryKey,
+    ] =
+      useState(0);
+
+    /* ---------------------------------------------------------------------- */
+    /* Lifecycle                                                              */
+    /* ---------------------------------------------------------------------- */
+
+    useEffect(() => {
+      isMountedRef.current =
+        true;
+
+      return () => {
+        isMountedRef.current =
+          false;
+      };
+    }, []);
+
+    /* ---------------------------------------------------------------------- */
+    /* Reduce Motion                                                          */
+    /* ---------------------------------------------------------------------- */
+
+    useEffect(() => {
+      let mounted =
+        true;
+
+      AccessibilityInfo
+        .isReduceMotionEnabled()
+        .then(
+          (
+            enabled,
+          ) => {
+            if (
+              mounted
+            ) {
+              setReduceMotionEnabled(
+                enabled,
+              );
+            }
+          },
+        )
+        .catch(() => {
+          // Static behaviour remains safe if this preference is unavailable.
+        });
+
+      const subscription =
+        AccessibilityInfo
+          .addEventListener(
+            'reduceMotionChanged',
+            setReduceMotionEnabled,
+          );
+
+      return () => {
+        mounted =
+          false;
+
+        subscription.remove();
+      };
+    }, []);
+
+    /* ---------------------------------------------------------------------- */
+    /* Coordinates supplied by App                                            */
+    /* ---------------------------------------------------------------------- */
+
+    useEffect(() => {
+      if (
+        !isValidCoordinate(
+          userCoordinates
+            ?.latitude,
+          userCoordinates
+            ?.longitude,
+        )
+      ) {
+        return;
+      }
+
+      setCurrentCoordinates({
+        latitude:
+          userCoordinates
+            ?.latitude as number,
+
+        longitude:
+          userCoordinates
+            ?.longitude as number,
+      });
+
+      setLocationStatus(
+        'READY',
+      );
+    }, [
+      userCoordinates
+        ?.latitude,
+      userCoordinates
+        ?.longitude,
+    ]);
+
+    /* ---------------------------------------------------------------------- */
+    /* Current profile                                                        */
+    /* ---------------------------------------------------------------------- */
+
+    useEffect(() => {
+      if (
+        !currentUserId
+      ) {
+        setCurrentUserProfile(
+          null,
+        );
+
+        setProfileError(
+          'EXPLORER SESSION REQUIRED',
+        );
+
+        return;
+      }
+
+      setProfileError(
+        null,
+      );
+
+      const reference =
+        doc(
+          db,
+          'users',
+          currentUserId,
+        );
+
+      const unsubscribe =
+        onSnapshot(
+          reference,
+
+          (
+            snapshot,
+          ) => {
+            if (
+              snapshot.exists()
+            ) {
+              setCurrentUserProfile(
+                snapshot.data() as
+                  UserDocument,
+              );
+
+              setProfileError(
+                null,
+              );
+            } else {
+              setCurrentUserProfile(
+                null,
+              );
+
+              setProfileError(
+                'EXPLORER PROFILE NOT FOUND',
+              );
+            }
+          },
+
+          (
+            error,
+          ) => {
+            logDevelopmentWarning(
+              '[Treasi Social] Profile subscription failed:',
+              error,
+            );
+
+            setProfileError(
+              'EXPLORER PROFILE SYNC OFFLINE',
+            );
+          },
+        );
+
+      return unsubscribe;
+    }, [
+      currentUserId,
+      retryKey,
+    ]);
+
+    /* ---------------------------------------------------------------------- */
+    /* Explorer directory                                                     */
+    /* ---------------------------------------------------------------------- */
+
+    useEffect(() => {
+      if (
+        !currentUserId
+      ) {
+        setAllUsers(
+          [],
+        );
+
+        setLoadingExplorers(
+          false,
+        );
+
+        return;
+      }
+
+      setLoadingExplorers(
+        true,
+      );
+
+      setExplorerError(
+        null,
+      );
+
+      /*
+       * This remains capped because the current schema does not yet contain
+       * geohashes for server-side radius queries.
+       */
+      const usersQuery =
+        query(
+          collection(
+            db,
+            'users',
+          ),
+          limit(
+            MAX_EXPLORERS,
+          ),
+        );
+
+      const unsubscribe =
+        onSnapshot(
+          usersQuery,
+
+          (
+            snapshot,
+          ) => {
+            const users:
+              DirectoryExplorer[] =
+              snapshot.docs
+                .filter(
+                  (
+                    documentSnapshot,
+                  ) =>
+                    documentSnapshot.id !==
+                    currentUserId,
+                )
+                .map(
+                  (
+                    documentSnapshot,
+                  ) => {
+                    const data =
+                      documentSnapshot.data() as
+                        UserDocument;
+
+                    const name =
+                      normaliseName(
+                        data.username,
+                      );
+
+                    return {
+                      uid:
+                        documentSnapshot.id,
+
+                      name,
+
+                      initial:
+                        name.charAt(
+                          0,
+                        ) ||
+                        'E',
+
+                      telemetryEnabled:
+                        data.telemetryEnabled ===
+                        true,
+
+                      location:
+                        extractCoordinates(
+                          data.location,
+                        ),
+                    };
+                  },
+                );
+
+            setAllUsers(
+              users,
+            );
+
+            setExplorerError(
+              null,
+            );
+
+            setLoadingExplorers(
+              false,
+            );
+          },
+
+          (
+            error,
+          ) => {
+            logDevelopmentWarning(
+              '[Treasi Social] Explorer directory subscription failed:',
+              error,
+            );
+
+            setExplorerError(
+              'EXPLORER DIRECTORY SYNC OFFLINE',
+            );
+
+            setLoadingExplorers(
+              false,
+            );
+          },
+        );
+
+      return unsubscribe;
+    }, [
+      currentUserId,
+      retryKey,
+    ]);
+
+    /* ---------------------------------------------------------------------- */
+    /* Friendship subscriptions                                               */
+    /* ---------------------------------------------------------------------- */
+
+    useEffect(() => {
+      if (
+        !currentUserId
+      ) {
+        setOutgoingFriendships(
+          [],
+        );
+
+        setIncomingFriendships(
+          [],
+        );
+
+        return;
+      }
+
+      setFriendshipErrors({
+        outgoing: null,
+        incoming: null,
+      });
+
+      const outgoingQuery =
+        query(
+          collection(
+            db,
+            'friendships',
+          ),
+
+          where(
+            'requesterId',
+            '==',
+            currentUserId,
+          ),
+        );
+
+      const incomingQuery =
+        query(
+          collection(
+            db,
+            'friendships',
+          ),
+
+          where(
+            'receiverId',
+            '==',
+            currentUserId,
+          ),
+        );
+
+      const unsubscribeOutgoing =
+        onSnapshot(
+          outgoingQuery,
+
+          (
+            snapshot,
+          ) => {
+            const relationships =
+              snapshot.docs
+                .map(
+                  (
+                    documentSnapshot,
+                  ):
+                    FriendshipMeta | null => {
+                    const data =
+                      documentSnapshot.data() as
+                        Partial<FriendshipDocument>;
+
+                    if (
+                      typeof data.receiverId !==
+                        'string' ||
+                      !isFriendshipStatus(
+                        data.status,
+                      )
+                    ) {
+                      return null;
+                    }
+
+                    return {
+                      docId:
+                        documentSnapshot.id,
+
+                      targetUid:
+                        data.receiverId,
+
+                      status:
+                        data.status,
+
+                      isRequester:
+                        true,
+                    };
+                  },
+                )
+                .filter(
+                  (
+                    item,
+                  ): item is FriendshipMeta =>
+                    item !==
+                    null,
+                );
+
+            setOutgoingFriendships(
+              relationships,
+            );
+
+            setFriendshipErrors(
+              (
+                current,
+              ) => ({
+                ...current,
+                outgoing:
+                  null,
+              }),
+            );
+          },
+
+          (
+            error,
+          ) => {
+            logDevelopmentWarning(
+              '[Treasi Social] Outgoing friendship subscription failed:',
+              error,
+            );
+
+            setFriendshipErrors(
+              (
+                current,
+              ) => ({
+                ...current,
+                outgoing:
+                  'OUTGOING LINK SYNC OFFLINE',
+              }),
+            );
+          },
+        );
+
+      const unsubscribeIncoming =
+        onSnapshot(
+          incomingQuery,
+
+          (
+            snapshot,
+          ) => {
+            const relationships =
+              snapshot.docs
+                .map(
+                  (
+                    documentSnapshot,
+                  ):
+                    FriendshipMeta | null => {
+                    const data =
+                      documentSnapshot.data() as
+                        Partial<FriendshipDocument>;
+
+                    if (
+                      typeof data.requesterId !==
+                        'string' ||
+                      !isFriendshipStatus(
+                        data.status,
+                      )
+                    ) {
+                      return null;
+                    }
+
+                    return {
+                      docId:
+                        documentSnapshot.id,
+
+                      targetUid:
+                        data.requesterId,
+
+                      status:
+                        data.status,
+
+                      isRequester:
+                        false,
+                    };
+                  },
+                )
+                .filter(
+                  (
+                    item,
+                  ): item is FriendshipMeta =>
+                    item !==
+                    null,
+                );
+
+            setIncomingFriendships(
+              relationships,
+            );
+
+            setFriendshipErrors(
+              (
+                current,
+              ) => ({
+                ...current,
+                incoming:
+                  null,
+              }),
+            );
+          },
+
+          (
+            error,
+          ) => {
+            logDevelopmentWarning(
+              '[Treasi Social] Incoming friendship subscription failed:',
+              error,
+            );
+
+            setFriendshipErrors(
+              (
+                current,
+              ) => ({
+                ...current,
+                incoming:
+                  'INCOMING LINK SYNC OFFLINE',
+              }),
+            );
+          },
+        );
+
+      return () => {
+        unsubscribeOutgoing();
+        unsubscribeIncoming();
+      };
+    }, [
+      currentUserId,
+      retryKey,
+    ]);
+
+    /* ---------------------------------------------------------------------- */
+    /* Global Telegram feed                                                   */
+    /* ---------------------------------------------------------------------- */
+
+    useEffect(() => {
+      if (
+        !currentUserId
+      ) {
+        setGlobalDispatches(
+          [],
+        );
+
+        setLoadingDispatches(
+          false,
+        );
+
+        return;
+      }
+
+      setLoadingDispatches(
+        true,
+      );
+
+      setTelegramError(
+        null,
+      );
+
+      /*
+       * The type constraint is important because Firestore security rules
+       * permit all authenticated users to read GLOBAL_DISPATCH messages but
+       * only participants may read PRIVATE messages.
+       */
+      const messagesQuery =
+        query(
+          collection(
+            db,
+            'messages',
+          ),
+
+          where(
+            'type',
+            '==',
+            'GLOBAL_DISPATCH',
+          ),
+
+          limit(
+            MAX_GLOBAL_MESSAGES,
+          ),
+        );
+
+      const unsubscribe =
+        onSnapshot(
+          messagesQuery,
+
+          (
+            snapshot,
+          ) => {
+            const dispatches:
+              GlobalDispatch[] =
+              snapshot.docs
+                .map(
+                  (
+                    documentSnapshot,
+                  ) => {
+                    const data =
+                      documentSnapshot.data() as
+                        MessageDocument;
+
+                    const senderName =
+                      normaliseName(
+                        data.senderName,
+                      );
+
+                    const text =
+                      typeof data.text ===
+                      'string'
+                        ? data.text.trim()
+                        : '';
+
+                    const createdAt =
+                      data.createdAt &&
+                      typeof data.createdAt
+                        .toMillis ===
+                        'function'
+                        ? data.createdAt
+                        : null;
+
+                    return {
+                      messageId:
+                        documentSnapshot.id,
+
+                      senderId:
+                        typeof data.senderId ===
+                          'string'
+                          ? data.senderId
+                          : '',
+
+                      senderName,
+
+                      text,
+
+                      createdAt,
+                    };
+                  },
+                )
+                .filter(
+                  (
+                    dispatch,
+                  ) =>
+                    Boolean(
+                      dispatch.senderId,
+                    ) &&
+                    Boolean(
+                      dispatch.text,
+                    ),
+                )
+                .sort(
+                  (
+                    itemA,
+                    itemB,
+                  ) => {
+                    const timeA =
+                      itemA.createdAt
+                        ?.toMillis() ??
+                      0;
+
+                    const timeB =
+                      itemB.createdAt
+                        ?.toMillis() ??
+                      0;
+
+                    return (
+                      timeB -
+                      timeA
+                    );
+                  },
+                );
+
+            setGlobalDispatches(
+              dispatches,
+            );
+
+            setTelegramError(
+              null,
+            );
+
+            setLoadingDispatches(
+              false,
+            );
+          },
+
+          (
+            error,
+          ) => {
+            logDevelopmentWarning(
+              '[Treasi Social] Telegram subscription failed:',
+              error,
+            );
+
+            setTelegramError(
+              'TELEGRAM FEED SYNC OFFLINE',
+            );
+
+            setLoadingDispatches(
+              false,
+            );
+          },
+        );
+
+      return unsubscribe;
+    }, [
+      currentUserId,
+      retryKey,
+    ]);
+
+    /* ---------------------------------------------------------------------- */
+    /* Friendship map                                                         */
+    /* ---------------------------------------------------------------------- */
+
+    const friendshipsMap =
+      useMemo<
+        Record<
+          string,
+          FriendshipMeta
+        >
+      >(
+        () => {
+          const map:
+            Record<
+              string,
+              FriendshipMeta
+            > = {};
+
+          for (
+            const friendship of
+            outgoingFriendships
+          ) {
+            map[
+              friendship.targetUid
+            ] =
+              friendship;
+          }
+
+          for (
+            const friendship of
+            incomingFriendships
+          ) {
+            const existing =
+              map[
+                friendship.targetUid
+              ];
+
+            /*
+             * Accepted relationships take priority if malformed duplicate
+             * relationship documents ever appear.
+             */
+            if (
+              !existing ||
+              (
+                existing.status !==
+                  'accepted' &&
+                friendship.status ===
+                  'accepted'
+              )
+            ) {
+              map[
+                friendship.targetUid
+              ] =
+                friendship;
+            }
+          }
+
+          return map;
+        },
+        [
+          incomingFriendships,
+          outgoingFriendships,
+        ],
+      );
+
+    /* ---------------------------------------------------------------------- */
+    /* User directory lookup                                                  */
+    /* ---------------------------------------------------------------------- */
+
+    const usersById =
+      useMemo<
+        Record<
+          string,
+          DirectoryExplorer
+        >
+      >(
+        () => {
+          const map:
+            Record<
+              string,
+              DirectoryExplorer
+            > = {};
+
+          for (
+            const explorer of
+            allUsers
+          ) {
+            map[
+              explorer.uid
+            ] =
+              explorer;
+          }
+
+          return map;
+        },
+        [
+          allUsers,
+        ],
+      );
+
+    /* ---------------------------------------------------------------------- */
+    /* Incoming requests                                                      */
+    /* ---------------------------------------------------------------------- */
+
+    const incomingRequests =
+      useMemo(
+        () =>
+          incomingFriendships
+            .filter(
+              (
+                friendship,
+              ) =>
+                friendship.status ===
+                'pending',
+            )
+            .map(
+              (
+                friendship,
+              ) => ({
+                friendship,
+
+                explorer:
+                  usersById[
+                    friendship.targetUid
+                  ],
+              }),
+            ),
+        [
+          incomingFriendships,
+          usersById,
+        ],
+      );
+
+    /* ---------------------------------------------------------------------- */
+    /* Active links                                                           */
+    /* ---------------------------------------------------------------------- */
+
+    const acceptedLinks =
+      useMemo(
+        () => {
+          const accepted =
+            [
+              ...outgoingFriendships,
+              ...incomingFriendships,
+            ].filter(
+              (
+                friendship,
+              ) =>
+                friendship.status ===
+                'accepted',
+            );
+
+          const seen =
+            new Set<string>();
+
+          return accepted
+            .filter(
+              (
+                friendship,
+              ) => {
+                if (
+                  seen.has(
+                    friendship.targetUid,
+                  )
+                ) {
+                  return false;
+                }
+
+                seen.add(
+                  friendship.targetUid,
+                );
+
+                return true;
+              },
+            )
+            .map(
+              (
+                friendship,
+              ) => ({
+                friendship,
+
+                explorer:
+                  usersById[
+                    friendship.targetUid
+                  ],
+              }),
+            );
+        },
+        [
+          incomingFriendships,
+          outgoingFriendships,
+          usersById,
+        ],
+      );
+
+    /* ---------------------------------------------------------------------- */
+    /* Nearby explorers                                                       */
+    /* ---------------------------------------------------------------------- */
+
+    const nearbyExplorers =
+      useMemo<
+        NearbyExplorer[]
+      >(
+        () => {
+          if (
+            !currentCoordinates ||
+            !isValidCoordinate(
+              currentCoordinates.latitude,
+              currentCoordinates.longitude,
+            )
+          ) {
+            return [];
+          }
+
+          const nearby:
+            NearbyExplorer[] =
+            [];
+
+          for (
+            const user of
+            allUsers
+          ) {
+            /*
+             * Privacy rule: a stored position is only surfaced while that
+             * Explorer has telemetry sharing enabled.
+             */
+            if (
+              !user.telemetryEnabled ||
+              !user.location
+            ) {
+              continue;
+            }
+
+            const distanceKm =
+              calculateHaversineDistanceKm(
+                currentCoordinates.latitude,
+                currentCoordinates.longitude,
+                user.location.latitude,
+                user.location.longitude,
+              );
+
+            if (
+              distanceKm >
+              RADIUS_KM
+            ) {
+              continue;
+            }
+
+            nearby.push({
+              uid:
+                user.uid,
+
+              name:
+                user.name,
+
+              initial:
+                user.initial,
+
+              distanceKm,
+
+              distanceFormatted:
+                formatDistance(
+                  distanceKm,
+                ),
+
+              friendMeta:
+                friendshipsMap[
+                  user.uid
+                ],
+            });
+          }
+
+          return nearby.sort(
+            (
+              explorerA,
+              explorerB,
+            ) =>
+              explorerA.distanceKm -
+              explorerB.distanceKm,
+          );
+        },
+        [
+          allUsers,
+          currentCoordinates,
+          friendshipsMap,
+        ],
+      );
+
+    /* ---------------------------------------------------------------------- */
+    /* Current username                                                       */
+    /* ---------------------------------------------------------------------- */
+
+    const currentUsername =
+      useMemo(
+        () =>
+          normaliseName(
+            currentUserProfile
+              ?.username ??
+              currentUser
+                ?.displayName ??
+              currentUser
+                ?.email
+                ?.split('@')[0],
+            'FIELD EXPLORER',
+          ),
+        [
+          currentUser
+            ?.displayName,
+          currentUser
+            ?.email,
+          currentUserProfile
+            ?.username,
+        ],
+      );
+
+    /* ---------------------------------------------------------------------- */
+    /* Location service                                                       */
+    /* ---------------------------------------------------------------------- */
+
+    const refreshCurrentLocation =
+      useCallback(
+        async (
+          requestPermission:
+            boolean,
+        ): Promise<void> => {
+          if (
+            !isMountedRef.current
+          ) {
+            return;
+          }
+
+          setLocationStatus(
+            'CHECKING',
+          );
+
+          try {
+            if (
+              Platform.OS ===
+                'web' &&
+              typeof window !==
+                'undefined' &&
+              !window.isSecureContext
+            ) {
+              setLocationStatus(
+                'ERROR',
+              );
+
+              return;
+            }
+
+            let permission =
+              await Location
+                .getForegroundPermissionsAsync();
+
+            if (
+              !isMountedRef.current
+            ) {
+              return;
+            }
+
+            setLocationPermissionStatus(
+              permission.status,
+            );
+
+            setCanAskLocationAgain(
+              permission.canAskAgain,
+            );
+
+            if (
+              permission.status !==
+                Location
+                  .PermissionStatus
+                  .GRANTED &&
+              requestPermission &&
+              permission.canAskAgain
+            ) {
+              permission =
+                await Location
+                  .requestForegroundPermissionsAsync();
+
+              if (
+                !isMountedRef.current
+              ) {
+                return;
+              }
+
+              setLocationPermissionStatus(
+                permission.status,
+              );
+
+              setCanAskLocationAgain(
+                permission.canAskAgain,
+              );
+            }
+
+            if (
+              permission.status !==
+              Location
+                .PermissionStatus
+                .GRANTED
+            ) {
+              setCurrentCoordinates(
+                null,
+              );
+
+              setLocationStatus(
+                permission.status ===
+                  Location
+                    .PermissionStatus
+                    .UNDETERMINED
+                  ? 'PERMISSION_REQUIRED'
+                  : 'DENIED',
+              );
+
+              return;
+            }
+
+            const servicesEnabled =
+              await Location
+                .hasServicesEnabledAsync();
+
+            if (
+              !isMountedRef.current
+            ) {
+              return;
+            }
+
+            setLocationServicesEnabled(
+              servicesEnabled,
+            );
+
+            if (
+              !servicesEnabled
+            ) {
+              setCurrentCoordinates(
+                null,
+              );
+
+              setLocationStatus(
+                'SERVICES_OFF',
+              );
+
+              return;
+            }
+
+            const location =
+              await Location
+                .getCurrentPositionAsync({
+                  accuracy:
+                    Location
+                      .Accuracy
+                      .Balanced,
+                });
+
+            if (
+              !isMountedRef.current
+            ) {
+              return;
+            }
+
+            const {
+              latitude,
+              longitude,
+            } =
+              location.coords;
+
+            if (
+              !isValidCoordinate(
+                latitude,
+                longitude,
+              )
+            ) {
+              setCurrentCoordinates(
+                null,
+              );
+
+              setLocationStatus(
+                'ERROR',
+              );
+
+              return;
+            }
+
+            setCurrentCoordinates({
+              latitude,
+              longitude,
+            });
+
+            setLocationStatus(
+              'READY',
+            );
+          } catch (
+            error: unknown
+          ) {
+            logDevelopmentWarning(
+              '[Treasi Social] Location refresh failed:',
+              error,
+            );
+
+            if (
+              isMountedRef.current
+            ) {
+              setLocationStatus(
+                'ERROR',
+              );
+            }
+          }
+        },
+        [],
+      );
+
+    /* ---------------------------------------------------------------------- */
+    /* Location lifecycle                                                     */
+    /* ---------------------------------------------------------------------- */
+
+    useEffect(() => {
+      /*
+       * Existing permission is used automatically.
+       * A new OS/browser permission prompt is never opened without a press.
+       */
+      void refreshCurrentLocation(
+        false,
+      );
+
+      const subscription =
+        AppState.addEventListener(
+          'change',
+          (
+            state:
+              AppStateStatus,
+          ) => {
+            if (
+              state ===
+              'active'
+            ) {
+              void refreshCurrentLocation(
+                false,
+              );
+            }
+          },
+        );
+
+      return () => {
+        subscription.remove();
+      };
+    }, [
+      refreshCurrentLocation,
+    ]);
+
+    /* ---------------------------------------------------------------------- */
+    /* Publish or clear shared location                                       */
+    /* ---------------------------------------------------------------------- */
+
+    useEffect(() => {
+      if (
+        !currentUserId ||
+        !currentUserProfile ||
+        isPublishingLocationRef.current
+      ) {
+        return;
+      }
+
+      const profileLocation =
+        extractCoordinates(
+          currentUserProfile.location,
+        );
+
+      /*
+       * Telemetry disabled means Social removes any previously stored
+       * location instead of continuing to expose a stale position.
+       */
+      if (
+        currentUserProfile.telemetryEnabled !==
+        true
+      ) {
+        if (
+          !profileLocation
+        ) {
+          lastPublishedLocationRef.current =
+            null;
+
+          return;
+        }
+
+        isPublishingLocationRef.current =
+          true;
+
+        setLocationPublishError(
+          null,
+        );
+
+        updateDoc(
+          doc(
+            db,
+            'users',
+            currentUserId,
+          ),
+          {
+            location:
+              deleteField(),
+
+            updatedAt:
+              serverTimestamp(),
+          },
+        )
+          .then(
+            () => {
+              lastPublishedLocationRef.current =
+                null;
+            },
+          )
+          .catch(
+            (
+              error: unknown,
+            ) => {
+              logDevelopmentWarning(
+                '[Treasi Social] Unable to clear shared location:',
+                error,
+              );
+
+              if (
+                isMountedRef.current
+              ) {
+                setLocationPublishError(
+                  'LOCATION SHARING COULD NOT BE CLEARED',
+                );
+              }
+            },
+          )
+          .finally(
+            () => {
+              isPublishingLocationRef.current =
+                false;
+            },
+          );
+
+        return;
+      }
+
+      if (
+        !currentCoordinates
+      ) {
+        return;
+      }
+
+      const coordinateKey =
+        `${currentCoordinates.latitude.toFixed(
+          5,
+        )}:${currentCoordinates.longitude.toFixed(
+          5,
+        )}`;
+
+      if (
+        lastPublishedLocationRef.current ===
+        coordinateKey
+      ) {
+        return;
+      }
+
+      /*
+       * Avoid unnecessary Firestore writes when the previously shared point
+       * is already within roughly 20 metres of the current position.
+       */
+      if (
+        profileLocation
+      ) {
+        const movementKm =
+          calculateHaversineDistanceKm(
+            profileLocation.latitude,
+            profileLocation.longitude,
+            currentCoordinates.latitude,
+            currentCoordinates.longitude,
+          );
+
+        if (
+          movementKm <=
+          LOCATION_PUBLISH_DISTANCE_KM
+        ) {
+          lastPublishedLocationRef.current =
+            coordinateKey;
+
+          return;
+        }
+      }
+
+      isPublishingLocationRef.current =
+        true;
+
+      lastPublishedLocationRef.current =
+        coordinateKey;
+
+      setLocationPublishError(
+        null,
+      );
+
+      updateDoc(
+        doc(
+          db,
+          'users',
+          currentUserId,
+        ),
+        {
+          location:
+            new GeoPoint(
+              currentCoordinates.latitude,
+              currentCoordinates.longitude,
+            ),
+
+          updatedAt:
+            serverTimestamp(),
+        },
+      )
+        .catch(
+          (
+            error: unknown,
+          ) => {
+            logDevelopmentWarning(
+              '[Treasi Social] Unable to publish shared location:',
+              error,
+            );
+
+            lastPublishedLocationRef.current =
+              null;
+
+            if (
+              isMountedRef.current
+            ) {
+              setLocationPublishError(
+                'LOCATION SHARING SYNC FAILED',
+              );
+            }
+          },
+        )
+        .finally(
+          () => {
+            isPublishingLocationRef.current =
+              false;
+          },
+        );
+    }, [
+      currentCoordinates,
+      currentUserId,
+      currentUserProfile,
+    ]);
+
+    /* ---------------------------------------------------------------------- */
+    /* Location recovery                                                      */
+    /* ---------------------------------------------------------------------- */
+
+    const handleLocationAction =
+      useCallback(
+        async (): Promise<void> => {
+          if (
+            locationStatus ===
+            'CHECKING'
+          ) {
+            return;
+          }
+
+          if (
+            Platform.OS !==
+              'web' &&
+            (
+              locationServicesEnabled ===
+                false ||
+              (
+                locationPermissionStatus ===
+                  Location
+                    .PermissionStatus
+                    .DENIED &&
+                !canAskLocationAgain
+              )
+            )
+          ) {
+            try {
+              await Linking.openSettings();
+            } catch (
+              error: unknown
+            ) {
+              logDevelopmentWarning(
+                '[Treasi Social] Unable to open device settings:',
+                error,
+              );
+
+              showAccessibleAlert(
+                'Settings Unavailable',
+                'Open your device settings manually and enable foreground location access for Treasi.',
+              );
+            }
+
+            return;
+          }
+
+          if (
+            Platform.OS ===
+              'web' &&
+            locationPermissionStatus ===
+              Location
+                .PermissionStatus
+                .DENIED &&
+            !canAskLocationAgain
+          ) {
+            showAccessibleAlert(
+              'Browser Location Blocked',
+              'Allow location for this site in your browser settings, then return to Treasi and retry the scan.',
+            );
+
+            return;
+          }
+
+          await refreshCurrentLocation(
+            true,
+          );
+        },
+        [
+          canAskLocationAgain,
+          locationPermissionStatus,
+          locationServicesEnabled,
+          locationStatus,
+          refreshCurrentLocation,
+        ],
+      );
+
+    /* ---------------------------------------------------------------------- */
+    /* Friend request creation                                                */
+    /* ---------------------------------------------------------------------- */
+
+    const handleSendFriendRequest =
+      useCallback(
+        async (
+          targetUid: string,
+          targetName:
+            string,
+        ): Promise<boolean> => {
+          if (
+            !currentUserId ||
+            !targetUid ||
+            targetUid ===
+              currentUserId ||
+            actionUid
+          ) {
+            if (
+              targetUid ===
+              currentUserId
+            ) {
+              showAccessibleAlert(
+                'Cannot Link Self',
+                'You cannot create a friendship request with your own Explorer account.',
+              );
+            }
+
+            return false;
+          }
+
+          const existing =
+            friendshipsMap[
+              targetUid
+            ];
+
+          if (
+            existing?.status ===
+            'accepted'
+          ) {
+            showAccessibleAlert(
+              'Link Active',
+              `You are already linked with ${targetName}.`,
+            );
+
+            return false;
+          }
+
+          if (
+            existing?.status ===
+            'pending'
+          ) {
+            showAccessibleAlert(
+              'Request Active',
+              `A pending link request already exists with ${targetName}.`,
+            );
+
+            return false;
+          }
+
+          if (
+            existing?.status ===
+            'blocked'
+          ) {
+            showAccessibleAlert(
+              'Link Blocked',
+              'This Explorer relationship is currently blocked.',
+            );
+
+            return false;
+          }
+
+          setActionUid(
+            targetUid,
+          );
+
+          try {
+            /*
+             * A declined relationship may be cleared before issuing a fresh
+             * pending request using the deterministic participant ID.
+             */
+            if (
+              existing?.status ===
+              'declined'
+            ) {
+              await deleteDoc(
+                doc(
+                  db,
+                  'friendships',
+                  existing.docId,
+                ),
+              );
+            }
+
+            const friendshipId =
+              getDeterministicFriendshipId(
+                currentUserId,
+                targetUid,
+              );
+
+            const friendshipReference =
+              doc(
+                db,
+                'friendships',
+                friendshipId,
+              );
+
+            const activityReference =
+              doc(
+                collection(
+                  db,
+                  'activity_feed',
+                ),
+              );
+
+            const batch =
+              writeBatch(
+                db,
+              );
+
+            batch.set(
+              friendshipReference,
+              {
+                friendshipId,
+
+                requesterId:
+                  currentUserId,
+
+                receiverId:
+                  targetUid,
+
+                status:
+                  'pending',
+
+                createdAt:
+                  serverTimestamp(),
+
+                updatedAt:
+                  serverTimestamp(),
+              },
+            );
+
+            batch.set(
+              activityReference,
+              {
+                userId:
+                  currentUserId,
+
+                username:
+                  currentUsername,
+
+                type:
+                  'FRIEND_REQUEST',
+
+                message:
+                  `SENT LINK REQUEST TO ${normaliseName(
+                    targetName,
+                  )}`,
+
+                targetId:
+                  targetUid,
+
+                createdAt:
+                  serverTimestamp(),
+              },
+            );
+
+            await batch.commit();
+
+            showAccessibleAlert(
+              'Request Sent',
+              `A link request was sent to ${targetName}.`,
+            );
+
+            return true;
+          } catch (
+            error: unknown
+          ) {
+            logDevelopmentWarning(
+              '[Treasi Social] Friend request failed:',
+              error,
+            );
+
+            showAccessibleAlert(
+              'Transmission Error',
+              'Treasi could not issue the Explorer link request. Check your connection and try again.',
+            );
+
+            return false;
+          } finally {
+            if (
+              isMountedRef.current
+            ) {
+              setActionUid(
+                null,
+              );
+            }
+          }
+        },
+        [
+          actionUid,
+          currentUserId,
+          currentUsername,
+          friendshipsMap,
+        ],
+      );
+
+    /* ---------------------------------------------------------------------- */
+    /* Accept friend request                                                  */
+    /* ---------------------------------------------------------------------- */
+
+    const handleAcceptFriendRequest =
+      useCallback(
+        async (
+          friendship:
+            FriendshipMeta,
+          targetName:
+            string,
+        ): Promise<void> => {
+          if (
+            !currentUserId ||
+            actionUid ||
+            friendship.isRequester ||
+            friendship.status !==
+              'pending'
+          ) {
+            return;
+          }
+
+          setActionUid(
+            friendship.docId,
+          );
+
+          try {
+            const friendshipReference =
+              doc(
+                db,
+                'friendships',
+                friendship.docId,
+              );
+
+            const activityReference =
+              doc(
+                collection(
+                  db,
+                  'activity_feed',
+                ),
+              );
+
+            const batch =
+              writeBatch(
+                db,
+              );
+
+            batch.update(
+              friendshipReference,
+              {
+                status:
+                  'accepted',
+
+                updatedAt:
+                  serverTimestamp(),
+              },
+            );
+
+            batch.set(
+              activityReference,
+              {
+                userId:
+                  currentUserId,
+
+                username:
+                  currentUsername,
+
+                type:
+                  'FRIEND_ACCEPTED',
+
+                message:
+                  `ACCEPTED LINK WITH ${normaliseName(
+                    targetName,
+                  )}`,
+
+                targetId:
+                  friendship.targetUid,
+
+                createdAt:
+                  serverTimestamp(),
+              },
+            );
+
+            await batch.commit();
+
+            showAccessibleAlert(
+              'Link Established',
+              `You are now linked with ${targetName}.`,
+            );
+          } catch (
+            error: unknown
+          ) {
+            logDevelopmentWarning(
+              '[Treasi Social] Accept friendship failed:',
+              error,
+            );
+
+            showAccessibleAlert(
+              'Link Error',
+              'Treasi could not accept this Explorer request.',
+            );
+          } finally {
+            if (
+              isMountedRef.current
+            ) {
+              setActionUid(
+                null,
+              );
+            }
+          }
+        },
+        [
+          actionUid,
+          currentUserId,
+          currentUsername,
+        ],
+      );
+
+    /* ---------------------------------------------------------------------- */
+    /* Decline friend request                                                 */
+    /* ---------------------------------------------------------------------- */
+
+    const handleDeclineFriendRequest =
+      useCallback(
+        async (
+          friendship:
+            FriendshipMeta,
+          targetName:
+            string,
+        ): Promise<void> => {
+          if (
+            !currentUserId ||
+            actionUid ||
+            friendship.isRequester ||
+            friendship.status !==
+              'pending'
+          ) {
+            return;
+          }
+
+          setActionUid(
+            friendship.docId,
+          );
+
+          try {
+            await updateDoc(
+              doc(
+                db,
+                'friendships',
+                friendship.docId,
+              ),
+              {
+                status:
+                  'declined',
+
+                updatedAt:
+                  serverTimestamp(),
+              },
+            );
+
+            AccessibilityInfo
+              .announceForAccessibility(
+                `Link request from ${targetName} declined.`,
+              );
+          } catch (
+            error: unknown
+          ) {
+            logDevelopmentWarning(
+              '[Treasi Social] Decline friendship failed:',
+              error,
+            );
+
+            showAccessibleAlert(
+              'Link Error',
+              'Treasi could not decline this Explorer request.',
+            );
+          } finally {
+            if (
+              isMountedRef.current
+            ) {
+              setActionUid(
+                null,
+              );
+            }
+          }
+        },
+        [
+          actionUid,
+          currentUserId,
+        ],
+      );
+
+    /* ---------------------------------------------------------------------- */
+    /* Remove friendship                                                      */
+    /* ---------------------------------------------------------------------- */
+
+    const handleRemoveFriendship =
+      useCallback(
+        (
+          friendship:
+            FriendshipMeta,
+          targetName:
+            string,
+        ): void => {
+          if (
+            !currentUserId ||
+            actionUid
+          ) {
+            return;
+          }
+
+          const isPendingRequest =
+            friendship.status ===
+              'pending' &&
+            friendship.isRequester;
+
+          const title =
+            isPendingRequest
+              ? 'Cancel Request'
+              : friendship.status ===
+                  'accepted'
+                ? 'Terminate Link'
+                : 'Clear Link Record';
+
+          const message =
+            isPendingRequest
+              ? `Cancel the pending link request to ${targetName}?`
+              : friendship.status ===
+                  'accepted'
+                ? `Disconnect your Explorer link with ${targetName}?`
+                : `Clear the relationship record with ${targetName}?`;
+
+          Alert.alert(
+            title,
+            message,
+            [
+              {
+                text:
+                  'CANCEL',
+
+                style:
+                  'cancel',
+              },
+
+              {
+                text:
+                  isPendingRequest
+                    ? 'CANCEL REQUEST'
+                    : friendship.status ===
+                        'accepted'
+                      ? 'UNLINK'
+                      : 'CLEAR',
+
+                style:
+                  'destructive',
+
+                onPress:
+                  () => {
+                    if (
+                      actionUid
+                    ) {
+                      return;
+                    }
+
+                    setActionUid(
+                      friendship.docId,
+                    );
+
+                    deleteDoc(
+                      doc(
+                        db,
+                        'friendships',
+                        friendship.docId,
+                      ),
+                    )
+                      .then(
+                        () => {
+                          AccessibilityInfo
+                            .announceForAccessibility(
+                              'Explorer link record removed.',
+                            );
+                        },
+                      )
+                      .catch(
+                        (
+                          error: unknown,
+                        ) => {
+                          logDevelopmentWarning(
+                            '[Treasi Social] Remove friendship failed:',
+                            error,
+                          );
+
+                          showAccessibleAlert(
+                            'Link Error',
+                            'Treasi could not update the Explorer relationship.',
+                          );
+                        },
+                      )
+                      .finally(
+                        () => {
+                          if (
+                            isMountedRef.current
+                          ) {
+                            setActionUid(
+                              null,
+                            );
+                          }
+                        },
+                      );
+                  },
+              },
+            ],
+          );
+        },
+        [
+          actionUid,
+          currentUserId,
+        ],
+      );
+
+    /* ---------------------------------------------------------------------- */
+    /* Callsign search                                                        */
+    /* ---------------------------------------------------------------------- */
+
+    const handleSearchAndLinkAgent =
+      useCallback(
+        async (): Promise<void> => {
+          if (
+            !currentUserId ||
+            isSearching ||
+            actionUid
+          ) {
+            return;
+          }
+
+          const searchTag =
+            searchAgentTag
+              .trim()
+              .toUpperCase();
+
+          if (
+            !searchTag
+          ) {
+            setSearchError(
+              'ENTER AN EXPLORER CALLSIGN',
+            );
+
+            return;
+          }
+
+          setSearchError(
+            null,
+          );
+
+          setIsSearching(
+            true,
+          );
+
+          try {
+            /*
+             * Search Firestore directly instead of searching the capped
+             * nearby-directory result set.
+             */
+            const searchQuery =
+              query(
+                collection(
+                  db,
+                  'users',
+                ),
+
+                where(
+                  'username',
+                  '==',
+                  searchTag,
+                ),
+
+                limit(3),
+              );
+
+            const snapshot =
+              await getDocs(
+                searchQuery,
+              );
+
+            const candidates =
+              snapshot.docs.filter(
+                (
+                  documentSnapshot,
+                ) =>
+                  documentSnapshot.id !==
+                  currentUserId,
+              );
+
+            if (
+              candidates.length ===
+              0
+            ) {
+              setSearchError(
+                'EXPLORER CALLSIGN NOT FOUND',
+              );
+
+              return;
+            }
+
+            const selected =
+              candidates[0];
+
+            const data =
+              selected.data() as
+                UserDocument;
+
+            const targetName =
+              normaliseName(
+                data.username,
+              );
+
+            const sent =
+              await handleSendFriendRequest(
+                selected.id,
+                targetName,
+              );
+
+            if (
+              sent &&
+              isMountedRef.current
+            ) {
+              setFriendModalVisible(
+                false,
+              );
+
+              setSearchAgentTag(
+                '',
+              );
+            }
+          } catch (
+            error: unknown
+          ) {
+            logDevelopmentWarning(
+              '[Treasi Social] Callsign search failed:',
+              error,
+            );
+
+            if (
+              isMountedRef.current
+            ) {
+              setSearchError(
+                'CALLSIGN SEARCH FAILED',
+              );
+            }
+          } finally {
+            if (
+              isMountedRef.current
+            ) {
+              setIsSearching(
+                false,
+              );
+            }
+          }
+        },
+        [
+          actionUid,
+          currentUserId,
+          handleSendFriendRequest,
+          isSearching,
+          searchAgentTag,
+        ],
+      );
+
+    /* ---------------------------------------------------------------------- */
+    /* Telegram dispatch                                                      */
+    /* ---------------------------------------------------------------------- */
+
+    const handleDispatchTelegram =
+      useCallback(
+        async (): Promise<void> => {
+          if (
+            !currentUserId ||
+            isTransmitting
+          ) {
+            return;
+          }
+
+          const message =
+            telegramText
+              .trim()
+              .slice(
+                0,
+                MAX_TELEGRAM_LENGTH,
+              );
+
+          if (
+            !message
+          ) {
+            showAccessibleAlert(
+              'Empty Telegram',
+              'Enter a message before transmitting the signal.',
+            );
+
+            return;
+          }
+
+          setIsTransmitting(
+            true,
+          );
+
+          try {
+            const messageReference =
+              doc(
+                collection(
+                  db,
+                  'messages',
+                ),
+              );
+
+            const activityReference =
+              doc(
+                collection(
+                  db,
+                  'activity_feed',
+                ),
+              );
+
+            const preview =
+              message.length >
+              40
+                ? `${message.slice(
+                    0,
+                    40,
+                  )}…`
+                : message;
+
+            const batch =
+              writeBatch(
+                db,
+              );
+
+            batch.set(
+              messageReference,
+              {
+                messageId:
+                  messageReference.id,
+
+                senderId:
+                  currentUserId,
+
+                senderName:
+                  currentUsername,
+
+                text:
+                  message,
+
+                createdAt:
+                  serverTimestamp(),
+
+                type:
+                  'GLOBAL_DISPATCH',
+              },
+            );
+
+            batch.set(
+              activityReference,
+              {
+                userId:
+                  currentUserId,
+
+                username:
+                  currentUsername,
+
+                type:
+                  'TELEGRAM_DISPATCH',
+
+                message:
+                  `DISPATCHED TELEGRAM: "${preview}"`,
+
+                targetId:
+                  messageReference.id,
+
+                createdAt:
+                  serverTimestamp(),
+              },
+            );
+
+            await batch.commit();
+
+            if (
+              !isMountedRef.current
+            ) {
+              return;
+            }
+
+            setTelegramText(
+              '',
+            );
+
+            showAccessibleAlert(
+              'Signal Transmitted',
+              'Your Telegram was dispatched to the Explorer network.',
+            );
+          } catch (
+            error: unknown
+          ) {
+            logDevelopmentWarning(
+              '[Treasi Social] Telegram transmission failed:',
+              error,
+            );
+
+            showAccessibleAlert(
+              'Transmission Failed',
+              'The Telegram could not be dispatched. Check your connection and try again.',
+            );
+          } finally {
+            if (
+              isMountedRef.current
+            ) {
+              setIsTransmitting(
+                false,
+              );
+            }
+          }
+        },
+        [
+          currentUserId,
+          currentUsername,
+          isTransmitting,
+          telegramText,
+        ],
+      );
+
+    /* ---------------------------------------------------------------------- */
+    /* Retry                                                                  */
+    /* ---------------------------------------------------------------------- */
+
+    const handleRetry =
+      useCallback(
+        (): void => {
+          setExplorerError(
+            null,
+          );
+
+          setTelegramError(
+            null,
+          );
+
+          setProfileError(
+            null,
+          );
+
+          setFriendshipErrors({
+            outgoing:
+              null,
+            incoming:
+              null,
+          });
+
+          setLoadingExplorers(
+            true,
+          );
+
+          setLoadingDispatches(
+            true,
+          );
+
+          setRetryKey(
+            (
+              current,
+            ) =>
+              current + 1,
+          );
+
+          AccessibilityInfo
+            .announceForAccessibility(
+              'Retrying Explorer network synchronisation.',
+            );
+        },
+        [],
+      );
+
+    /* ---------------------------------------------------------------------- */
+    /* UI status                                                              */
+    /* ---------------------------------------------------------------------- */
+
+    const friendshipErrorText =
+      useMemo(
+        () =>
+          [
+            friendshipErrors
+              .incoming,
+            friendshipErrors
+              .outgoing,
+          ]
+            .filter(
+              (
+                value,
+              ): value is string =>
+                Boolean(
+                  value,
+                ),
+            )
+            .join(
+              ' · ',
+            ),
+        [
+          friendshipErrors,
+        ],
+      );
+
+    const networkErrorText =
+      useMemo(
+        () =>
+          [
+            profileError,
+            explorerError,
+            friendshipErrorText,
+            locationPublishError,
+          ]
+            .filter(
+              (
+                value,
+              ): value is string =>
+                Boolean(
+                  value,
+                ),
+            )
+            .join(
+              ' · ',
+            ),
+        [
+          explorerError,
+          friendshipErrorText,
+          locationPublishError,
+          profileError,
+        ],
+      );
+
+    const locationStatusText =
+      useMemo(
+        () => {
+          switch (
+            locationStatus
+          ) {
+            case 'CHECKING':
+              return 'CHECKING LOCAL POSITION';
+
+            case 'READY':
+              return currentCoordinates
+                ? 'LOCAL POSITION READY'
+                : 'POSITION UNAVAILABLE';
+
+            case 'PERMISSION_REQUIRED':
+              return 'LOCATION ACCESS NOT YET ENABLED';
+
+            case 'DENIED':
+              return 'LOCATION ACCESS DENIED';
+
+            case 'SERVICES_OFF':
+              return 'DEVICE LOCATION SERVICES OFF';
+
+            default:
+              return Platform.OS ===
+                'web'
+                ? 'BROWSER LOCATION UNAVAILABLE'
+                : 'DEVICE LOCATION UNAVAILABLE';
+          }
+        },
+        [
+          currentCoordinates,
+          locationStatus,
+        ],
+      );
+
+    const locationActionLabel =
+      useMemo(
+        () => {
+          if (
+            locationStatus ===
+            'CHECKING'
+          ) {
+            return 'CHECKING';
+          }
+
+          if (
+            Platform.OS !==
+              'web' &&
+            (
+              locationServicesEnabled ===
+                false ||
+              (
+                locationPermissionStatus ===
+                  Location
+                    .PermissionStatus
+                    .DENIED &&
+                !canAskLocationAgain
+              )
+            )
+          ) {
+            return 'OPEN SETTINGS';
+          }
+
+          if (
+            locationStatus ===
+              'PERMISSION_REQUIRED' ||
+            locationStatus ===
+              'DENIED'
+          ) {
+            return 'ENABLE LOCATION';
+          }
+
+          return 'REFRESH POSITION';
+        },
+        [
+          canAskLocationAgain,
+          locationPermissionStatus,
+          locationServicesEnabled,
+          locationStatus,
+        ],
+      );
+
+    const telemetrySharingEnabled =
+      currentUserProfile
+        ?.telemetryEnabled ===
+      true;
+
+    /* ---------------------------------------------------------------------- */
+    /* Render Explorer action                                                 */
+    /* ---------------------------------------------------------------------- */
+
+    const renderExplorerActions =
+      (
+        item:
+          NearbyExplorer,
+      ): React.ReactNode => {
+        const friendMeta =
+          item.friendMeta;
+
+        const isActing =
+          actionUid ===
+            item.uid ||
+          actionUid ===
+            friendMeta
+              ?.docId;
+
+        if (
+          !friendMeta
+        ) {
+          return (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`Send friend request to ${item.name}`}
+              accessibilityHint="Creates a pending Explorer link request."
+              accessibilityState={{
+                disabled:
+                  isActing,
+                busy:
+                  isActing,
+              }}
+              disabled={
+                isActing
+              }
+              hitSlop={4}
+              onPress={() => {
+                void handleSendFriendRequest(
+                  item.uid,
+                  item.name,
+                );
+              }}
+              style={({
+                pressed,
+              }) => [
+                styles.compactActionButton,
+
+                isActing &&
+                  styles.disabledButton,
+
+                pressed &&
+                  !isActing &&
+                  styles.lightButtonPressed,
+              ]}
+            >
+              {isActing ? (
+                <ActivityIndicator
+                  size="small"
+                  color={
+                    COLOURS.ink900
+                  }
+                />
+              ) : (
+                <Ionicons
+                  name="person-add-outline"
+                  size={17}
+                  color={
+                    COLOURS.ink900
+                  }
+                />
+              )}
+            </Pressable>
+          );
+        }
+
+        if (
+          friendMeta.status ===
+            'pending' &&
+          !friendMeta.isRequester
+        ) {
+          return (
+            <View
+              style={
+                styles.inlineActions
+              }
+            >
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={`Accept friend request from ${item.name}`}
+                accessibilityState={{
+                  disabled:
+                    isActing,
+                }}
+                disabled={
+                  isActing
+                }
+                onPress={() => {
+                  void handleAcceptFriendRequest(
+                    friendMeta,
+                    item.name,
+                  );
+                }}
+                style={({
+                  pressed,
+                }) => [
+                  styles.compactActionButton,
+                  styles.acceptButton,
+
+                  isActing &&
+                    styles.disabledButton,
+
+                  pressed &&
+                    !isActing &&
+                    styles.darkButtonPressed,
+                ]}
+              >
+                {isActing ? (
+                  <ActivityIndicator
+                    size="small"
+                    color={
+                      COLOURS.parchment100
+                    }
+                  />
+                ) : (
+                  <Ionicons
+                    name="checkmark-sharp"
+                    size={18}
+                    color={
+                      COLOURS.parchment100
+                    }
+                  />
+                )}
+              </Pressable>
+
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={`Decline friend request from ${item.name}`}
+                disabled={
+                  isActing
+                }
+                onPress={() => {
+                  void handleDeclineFriendRequest(
+                    friendMeta,
+                    item.name,
+                  );
+                }}
+                style={({
+                  pressed,
+                }) => [
+                  styles.compactActionButton,
+                  styles.declineButton,
+
+                  isActing &&
+                    styles.disabledButton,
+
+                  pressed &&
+                    !isActing &&
+                    styles.primaryButtonPressed,
+                ]}
+              >
+                <Ionicons
+                  name="close-sharp"
+                  size={18}
+                  color={
+                    COLOURS.parchment100
+                  }
+                />
+              </Pressable>
+            </View>
+          );
+        }
+
+        if (
+          friendMeta.status ===
+            'pending'
+        ) {
+          return (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`Cancel pending friend request to ${item.name}`}
+              accessibilityState={{
+                disabled:
+                  isActing,
+              }}
+              disabled={
+                isActing
+              }
+              onPress={() =>
+                handleRemoveFriendship(
+                  friendMeta,
+                  item.name,
+                )
+              }
+              style={({
+                pressed,
+              }) => [
+                styles.statusActionButton,
+                styles.pendingButton,
+
+                isActing &&
+                  styles.disabledButton,
+
+                pressed &&
+                  !isActing &&
+                  styles.lightButtonPressed,
+              ]}
+            >
+              <Text
+                style={
+                  styles.pendingButtonText
+                }
+              >
+                PENDING
+              </Text>
+            </Pressable>
+          );
+        }
+
+        if (
+          friendMeta.status ===
+            'accepted'
+        ) {
+          return (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`Remove friendship with ${item.name}`}
+              accessibilityHint="Opens confirmation before removing this Explorer link."
+              disabled={
+                isActing
+              }
+              onPress={() =>
+                handleRemoveFriendship(
+                  friendMeta,
+                  item.name,
+                )
+              }
+              style={({
+                pressed,
+              }) => [
+                styles.statusActionButton,
+                styles.linkedButton,
+
+                isActing &&
+                  styles.disabledButton,
+
+                pressed &&
+                  !isActing &&
+                  styles.lightButtonPressed,
+              ]}
+            >
+              {isActing ? (
+                <ActivityIndicator
+                  size="small"
+                  color={
+                    COLOURS.ink900
+                  }
+                />
+              ) : (
+                <>
+                  <Ionicons
+                    name="checkmark-circle-outline"
+                    size={15}
+                    color={
+                      COLOURS.success700
+                    }
+                  />
+
+                  <Text
+                    style={
+                      styles.linkedButtonText
+                    }
+                  >
+                    LINKED
+                  </Text>
+                </>
+              )}
+            </Pressable>
+          );
+        }
+
+        if (
+          friendMeta.status ===
+            'declined'
+        ) {
+          return (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`Retry friend request to ${item.name}`}
+              disabled={
+                isActing
+              }
+              onPress={() => {
+                void handleSendFriendRequest(
+                  item.uid,
+                  item.name,
+                );
+              }}
+              style={({
+                pressed,
+              }) => [
+                styles.statusActionButton,
+                styles.retryLinkButton,
+
+                isActing &&
+                  styles.disabledButton,
+
+                pressed &&
+                  !isActing &&
+                  styles.lightButtonPressed,
+              ]}
+            >
+              <Text
+                style={
+                  styles.retryLinkText
+                }
+              >
+                RETRY
+              </Text>
+            </Pressable>
+          );
+        }
+
+        return (
+          <View
+            accessible
+            accessibilityLabel={`Explorer link with ${item.name} is blocked.`}
+            style={
+              styles.blockedBadge
+            }
+          >
+            <Ionicons
+              name="ban-outline"
+              size={14}
+              color={
+                COLOURS.rust800
+              }
+            />
+
+            <Text
+              style={
+                styles.blockedText
+              }
+            >
+              BLOCKED
+            </Text>
+          </View>
+        );
+      };
+
+    /* ---------------------------------------------------------------------- */
+    /* Render                                                                 */
+    /* ---------------------------------------------------------------------- */
+
+    return (
+      <KeyboardAvoidingView
+        style={
+          styles.keyboardContainer
+        }
+        behavior={
+          Platform.OS ===
+          'ios'
+            ? 'padding'
+            : undefined
+        }
+      >
+        <View
+          style={[
+            styles.screen,
+            {
+              paddingLeft:
+                Math.max(
+                  insets.left,
+                  12,
+                ),
+
+              paddingRight:
+                Math.max(
+                  insets.right,
+                  12,
+                ),
+
+              paddingTop:
+                Math.max(
+                  insets.top,
+                  10,
+                ),
+
+              paddingBottom:
+                Math.max(
+                  insets.bottom,
+                  10,
+                ),
+            },
+          ]}
+        >
+          <View
+            style={[
+              styles.splitWrapper,
+
+              {
+                flexDirection:
+                  isLandscape
+                    ? 'row'
+                    : 'column',
+              },
+            ]}
+          >
+            {/* ============================================================= */}
+            {/* 60% — TELEGRAM FIELD DESK                                    */}
+            {/* ============================================================= */}
+
+            <View
+              style={
+                styles.telegramPanel
+              }
+            >
+              {/* ------------------------------------------------------------ */}
+              {/* Header                                                       */}
+              {/* ------------------------------------------------------------ */}
+
+              <View
+                style={
+                  styles.lightPanelHeader
+                }
+              >
+                <View
+                  style={
+                    styles.headerIdentity
+                  }
+                >
+                  <MaterialCommunityIcons
+                    accessible={
+                      false
+                    }
+                    importantForAccessibility="no"
+                    name="radio-tower"
+                    size={19}
+                    color={
+                      COLOURS.rust700
+                    }
+                  />
+
+                  <View
+                    style={
+                      styles.headerTextContainer
+                    }
+                  >
+                    <Text
+                      accessibilityRole="header"
+                      maxFontSizeMultiplier={
+                        1.6
+                      }
+                      style={
+                        styles.lightPanelTitle
+                      }
+                    >
+                      TELEGRAM FIELD DESK
+                    </Text>
+
+                    <Text
+                      maxFontSizeMultiplier={
+                        1.5
+                      }
+                      style={
+                        styles.lightPanelSubtitle
+                      }
+                    >
+                      ASYNCHRONOUS EXPLORER DISPATCH NETWORK
+                    </Text>
+                  </View>
+                </View>
+
+                <View
+                  accessible
+                  accessibilityLabel={`Signed in as ${currentUsername}`}
+                  style={
+                    styles.callsignBadge
+                  }
+                >
+                  <Text
+                    numberOfLines={
+                      1
+                    }
+                    style={
+                      styles.callsignBadgeText
+                    }
+                  >
+                    {
+                      currentUsername
+                    }
+                  </Text>
+                </View>
+              </View>
+
+              {/* ------------------------------------------------------------ */}
+              {/* Composer                                                     */}
+              {/* ------------------------------------------------------------ */}
+
+              <View
+                style={
+                  styles.composerCard
+                }
+              >
+                <View
+                  style={
+                    styles.composerHeader
+                  }
+                >
+                  <View
+                    style={
+                      styles.sectionTitleRowLight
+                    }
+                  >
+                    <Ionicons
+                      accessible={
+                        false
+                      }
+                      importantForAccessibility="no"
+                      name="paper-plane-outline"
+                      size={16}
+                      color={
+                        COLOURS.rust700
+                      }
+                    />
+
+                    <Text
+                      accessibilityRole="header"
+                      style={
+                        styles.lightSectionTitle
+                      }
+                    >
+                      BROADCAST TELEGRAM
+                    </Text>
+                  </View>
+
+                  <Text
+                    style={
+                      styles.characterCounter
+                    }
+                  >
+                    {
+                      telegramText.length
+                    }
+                    /
+                    {
+                      MAX_TELEGRAM_LENGTH
+                    }
+                  </Text>
+                </View>
+
+                <Text
+                  maxFontSizeMultiplier={
+                    1.7
+                  }
+                  style={
+                    styles.composerDescription
+                  }
+                >
+                  Public dispatches are visible to authenticated Treasi Explorers. Do not include private or sensitive information.
+                </Text>
+
+                <TextInput
+                  accessibilityLabel="Telegram broadcast message"
+                  accessibilityHint="Enter a public message of up to 500 characters."
+                  editable={
+                    !isTransmitting
+                  }
+                  multiline
+                  maxLength={
+                    MAX_TELEGRAM_LENGTH
+                  }
+                  placeholder="TYPE PUBLIC FIELD DISPATCH..."
+                  placeholderTextColor={
+                    COLOURS.bronze700
+                  }
+                  textAlignVertical="top"
+                  value={
+                    telegramText
+                  }
+                  onChangeText={
+                    setTelegramText
+                  }
+                  selectionColor={
+                    COLOURS.rust700
+                  }
+                  style={
+                    styles.telegramInput
+                  }
+                />
+
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={
+                    isTransmitting
+                      ? 'Transmitting Telegram'
+                      : 'Transmit Telegram'
+                  }
+                  accessibilityHint="Publishes this message to the authenticated Explorer network."
+                  accessibilityState={{
+                    busy:
+                      isTransmitting,
+
+                    disabled:
+                      isTransmitting,
+                  }}
+                  disabled={
+                    isTransmitting
+                  }
+                  onPress={() => {
+                    void handleDispatchTelegram();
+                  }}
+                  style={({
+                    pressed,
+                  }) => [
+                    styles.transmitButton,
+
+                    isTransmitting &&
+                      styles.disabledButton,
+
+                    pressed &&
+                      !isTransmitting &&
+                      styles.primaryButtonPressed,
+                  ]}
+                >
+                  {isTransmitting ? (
+                    <ActivityIndicator
+                      size="small"
+                      color={
+                        COLOURS.parchment100
+                      }
+                    />
+                  ) : (
+                    <Ionicons
+                      accessible={
+                        false
+                      }
+                      importantForAccessibility="no"
+                      name="paper-plane"
+                      size={17}
+                      color={
+                        COLOURS.parchment100
+                      }
+                    />
+                  )}
+
+                  <Text
+                    style={
+                      styles.transmitButtonText
+                    }
+                  >
+                    {isTransmitting
+                      ? 'TRANSMITTING...'
+                      : 'TRANSMIT SIGNAL'}
+                  </Text>
+                </Pressable>
+              </View>
+
+              {/* ------------------------------------------------------------ */}
+              {/* Dispatch feed                                                */}
+              {/* ------------------------------------------------------------ */}
+
+              <View
+                style={
+                  styles.dispatchFeedSection
+                }
+              >
+                <View
+                  style={
+                    styles.feedHeader
+                  }
+                >
+                  <View
+                    style={
+                      styles.sectionTitleRowLight
+                    }
+                  >
+                    <MaterialCommunityIcons
+                      accessible={
+                        false
+                      }
+                      importantForAccessibility="no"
+                      name="radio-handheld"
+                      size={16}
+                      color={
+                        COLOURS.rust700
+                      }
+                    />
+
+                    <Text
+                      accessibilityRole="header"
+                      style={
+                        styles.lightSectionTitle
+                      }
+                    >
+                      RECENT TELEGRAMS
+                    </Text>
+                  </View>
+
+                  <Text
+                    style={
+                      styles.dispatchCount
+                    }
+                  >
+                    {
+                      globalDispatches.length
+                    }{' '}
+                    SIGNALS
+                  </Text>
+                </View>
+
+                {telegramError ? (
+                  <View
+                    accessible
+                    accessibilityRole="alert"
+                    style={
+                      styles.lightErrorCard
+                    }
+                  >
+                    <Ionicons
+                      name="cloud-offline-outline"
+                      size={18}
+                      color={
+                        COLOURS.rust800
+                      }
+                    />
+
+                    <Text
+                      style={
+                        styles.lightErrorText
+                      }
+                    >
+                      {
+                        telegramError
+                      }
+                    </Text>
+
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel="Retry Telegram synchronisation"
+                      onPress={
+                        handleRetry
+                      }
+                      style={({
+                        pressed,
+                      }) => [
+                        styles.lightRetryButton,
+
+                        pressed &&
+                          styles.lightButtonPressed,
+                      ]}
+                    >
+                      <Text
+                        style={
+                          styles.lightRetryText
+                        }
+                      >
+                        RETRY
+                      </Text>
+                    </Pressable>
+                  </View>
+                ) : null}
+
+                {loadingDispatches &&
+                globalDispatches.length ===
+                  0 ? (
+                  <View
+                    accessible
+                    accessibilityRole="progressbar"
+                    accessibilityLabel="Loading recent Telegrams"
+                    style={
+                      styles.feedStateBox
+                    }
+                  >
+                    <ActivityIndicator
+                      size="small"
+                      color={
+                        COLOURS.rust700
+                      }
+                    />
+
+                    <Text
+                      style={
+                        styles.feedStateText
+                      }
+                    >
+                      SYNCHRONISING TELEGRAMS…
+                    </Text>
+                  </View>
+                ) : globalDispatches.length ===
+                  0 ? (
+                  <View
+                    accessible
+                    accessibilityLabel="No Telegram broadcasts have been received."
+                    style={
+                      styles.feedStateBox
+                    }
+                  >
+                    <Ionicons
+                      name="radio-outline"
+                      size={25}
+                      color={
+                        COLOURS.bronze700
+                      }
+                    />
+
+                    <Text
+                      style={
+                        styles.feedStateText
+                      }
+                    >
+                      NO TELEGRAMS RECEIVED
+                    </Text>
+                  </View>
+                ) : (
+                  <ScrollView
+                    accessibilityLabel="Recent public Telegram broadcasts"
+                    style={
+                      styles.dispatchScroll
+                    }
+                    contentContainerStyle={
+                      styles.dispatchScrollContent
+                    }
+                    showsVerticalScrollIndicator={
+                      false
+                    }
+                    keyboardShouldPersistTaps="handled"
+                  >
+                    {globalDispatches.map(
+                      (
+                        dispatch,
+                      ) => {
+                        const isOwnDispatch =
+                          dispatch.senderId ===
+                          currentUserId;
+
+                        return (
+                          <View
+                            key={
+                              dispatch.messageId
+                            }
+                            accessible
+                            accessibilityLabel={`${
+                              isOwnDispatch
+                                ? 'You'
+                                : dispatch.senderName
+                            }. ${dispatch.text}. ${formatRelativeTime(
+                              dispatch.createdAt,
+                            )}.`}
+                            style={[
+                              styles.dispatchCard,
+
+                              isOwnDispatch &&
+                                styles.ownDispatchCard,
+                            ]}
+                          >
+                            <View
+                              accessible={
+                                false
+                              }
+                              importantForAccessibility="no-hide-descendants"
+                              style={
+                                styles.dispatchCardHeader
+                              }
+                            >
+                              <View
+                                style={
+                                  styles.dispatchSenderRow
+                                }
+                              >
+                                <Ionicons
+                                  name="radio-outline"
+                                  size={14}
+                                  color={
+                                    isOwnDispatch
+                                      ? COLOURS.rust700
+                                      : COLOURS.bronze700
+                                  }
+                                />
+
+                                <Text
+                                  numberOfLines={
+                                    1
+                                  }
+                                  style={[
+                                    styles.dispatchSender,
+
+                                    isOwnDispatch &&
+                                      styles.ownDispatchSender,
+                                  ]}
+                                >
+                                  {isOwnDispatch
+                                    ? `YOU · ${dispatch.senderName}`
+                                    : dispatch.senderName}
+                                </Text>
+                              </View>
+
+                              <Text
+                                style={
+                                  styles.dispatchTime
+                                }
+                              >
+                                {formatRelativeTime(
+                                  dispatch.createdAt,
+                                )}
+                              </Text>
+                            </View>
+
+                            <Text
+                              accessible={
+                                false
+                              }
+                              importantForAccessibility="no"
+                              maxFontSizeMultiplier={
+                                1.8
+                              }
+                              style={
+                                styles.dispatchText
+                              }
+                            >
+                              {
+                                dispatch.text
+                              }
+                            </Text>
+                          </View>
+                        );
+                      },
+                    )}
+                  </ScrollView>
+                )}
+              </View>
+
+              <View
+                style={
+                  styles.lightPanelFooter
+                }
+              >
+                <Text
+                  maxFontSizeMultiplier={
+                    1.4
+                  }
+                  style={
+                    styles.lightPanelFooterText
+                  }
+                >
+                  TELEGRAMS ARE ASYNCHRONOUS PUBLIC FIELD SIGNALS
+                </Text>
+              </View>
+            </View>
+
+            {/* ============================================================= */}
+            {/* 40% — EXPLORER NETWORK                                       */}
+            {/* ============================================================= */}
+
+            <View
+              style={
+                styles.networkPanel
+              }
+            >
+              <ScrollView
+                style={
+                  styles.networkScroll
+                }
+                contentContainerStyle={
+                  styles.networkScrollContent
+                }
+                keyboardShouldPersistTaps="handled"
+                showsVerticalScrollIndicator={
+                  false
+                }
+              >
+                {/* ---------------------------------------------------------- */}
+                {/* Header                                                     */}
+                {/* ---------------------------------------------------------- */}
+
+                <View
+                  style={
+                    styles.darkPanelHeader
+                  }
+                >
+                  <View
+                    style={
+                      styles.headerIdentity
+                    }
+                  >
+                    <Ionicons
+                      accessible={
+                        false
+                      }
+                      importantForAccessibility="no"
+                      name="people-outline"
+                      size={18}
+                      color={
+                        COLOURS.bronze400
+                      }
+                    />
+
+                    <View
+                      style={
+                        styles.headerTextContainer
+                      }
+                    >
+                      <Text
+                        accessibilityRole="header"
+                        maxFontSizeMultiplier={
+                          1.6
+                        }
+                        style={
+                          styles.darkPanelTitle
+                        }
+                      >
+                        EXPLORER NETWORK
+                      </Text>
+
+                      <Text
+                        style={
+                          styles.darkPanelSubtitle
+                        }
+                      >
+                        LINKS · REQUESTS · LOCAL RANGE
+                      </Text>
+                    </View>
+                  </View>
+
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Link a new Explorer"
+                    accessibilityHint="Opens callsign search."
+                    onPress={() => {
+                      setSearchAgentTag(
+                        '',
+                      );
+
+                      setSearchError(
+                        null,
+                      );
+
+                      setFriendModalVisible(
+                        true,
+                      );
+                    }}
+                    style={({
+                      pressed,
+                    }) => [
+                      styles.addExplorerButton,
+
+                      pressed &&
+                        styles.darkButtonPressed,
+                    ]}
+                  >
+                    <Ionicons
+                      name="person-add-outline"
+                      size={19}
+                      color={
+                        COLOURS.bronze400
+                      }
+                    />
+                  </Pressable>
+                </View>
+
+                {/* ---------------------------------------------------------- */}
+                {/* Sync warning                                               */}
+                {/* ---------------------------------------------------------- */}
+
+                {networkErrorText ? (
+                  <View
+                    accessible
+                    accessibilityRole="alert"
+                    accessibilityLiveRegion="polite"
+                    style={
+                      styles.darkErrorCard
+                    }
+                  >
+                    <Ionicons
+                      accessible={
+                        false
+                      }
+                      importantForAccessibility="no"
+                      name="warning-outline"
+                      size={17}
+                      color={
+                        COLOURS.danger300
+                      }
+                    />
+
+                    <Text
+                      style={
+                        styles.darkErrorText
+                      }
+                    >
+                      {
+                        networkErrorText
+                      }
+                    </Text>
+
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel="Retry Explorer network synchronisation"
+                      onPress={
+                        handleRetry
+                      }
+                      style={({
+                        pressed,
+                      }) => [
+                        styles.darkRetryButton,
+
+                        pressed &&
+                          styles.darkButtonPressed,
+                      ]}
+                    >
+                      <Text
+                        style={
+                          styles.darkRetryText
+                        }
+                      >
+                        RETRY
+                      </Text>
+                    </Pressable>
+                  </View>
+                ) : null}
+
+                {/* ---------------------------------------------------------- */}
+                {/* Location and privacy                                       */}
+                {/* ---------------------------------------------------------- */}
+
+                <View
+                  style={
+                    styles.sectionHeaderRow
+                  }
+                >
+                  <Ionicons
+                    accessible={
+                      false
+                    }
+                    importantForAccessibility="no"
+                    name="location-outline"
+                    size={16}
+                    color={
+                      COLOURS.bronze400
+                    }
+                  />
+
+                  <Text
+                    accessibilityRole="header"
+                    style={
+                      styles.darkSectionTitle
+                    }
+                  >
+                    LOCAL SCAN
+                  </Text>
+                </View>
+
+                <View
+                  accessible
+                  accessibilityLabel={`${locationStatusText}. Location sharing is ${
+                    telemetrySharingEnabled
+                      ? 'enabled'
+                      : 'disabled'
+                  }.`}
+                  style={
+                    styles.locationCard
+                  }
+                >
+                  <View
+                    accessible={
+                      false
+                    }
+                    importantForAccessibility="no-hide-descendants"
+                    style={
+                      styles.locationStatusRow
+                    }
+                  >
+                    <View
+                      style={[
+                        styles.locationDot,
+
+                        locationStatus ===
+                          'READY'
+                          ? styles.locationDotReady
+                          : locationStatus ===
+                              'CHECKING'
+                            ? styles.locationDotChecking
+                            : styles.locationDotWarning,
+                      ]}
+                    />
+
+                    <View
+                      style={
+                        styles.locationStatusTextContainer
+                      }
+                    >
+                      <Text
+                        style={
+                          styles.locationStatusTitle
+                        }
+                      >
+                        {
+                          locationStatusText
+                        }
+                      </Text>
+
+                      <Text
+                        style={
+                          styles.locationSharingText
+                        }
+                      >
+                        {telemetrySharingEnabled
+                          ? 'TELEMETRY SHARING: ON'
+                          : 'TELEMETRY SHARING: OFF'}
+                      </Text>
+                    </View>
+                  </View>
+
+                  <Text
+                    maxFontSizeMultiplier={
+                      1.7
+                    }
+                    style={
+                      styles.locationPrivacyText
+                    }
+                  >
+                    Your local position is used to calculate range. It is only written to your Explorer profile when Telemetry Sharing is enabled.
+                  </Text>
+
+                  <View
+                    style={
+                      styles.locationActions
+                    }
+                  >
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel={
+                        locationActionLabel
+                      }
+                      accessibilityHint="Checks or enables the location access used for nearby Explorer range."
+                      accessibilityState={{
+                        busy:
+                          locationStatus ===
+                          'CHECKING',
+
+                        disabled:
+                          locationStatus ===
+                          'CHECKING',
+                      }}
+                      disabled={
+                        locationStatus ===
+                        'CHECKING'
+                      }
+                      onPress={() => {
+                        void handleLocationAction();
+                      }}
+                      style={({
+                        pressed,
+                      }) => [
+                        styles.locationActionButton,
+
+                        locationStatus ===
+                          'CHECKING' &&
+                          styles.disabledButton,
+
+                        pressed &&
+                          locationStatus !==
+                            'CHECKING' &&
+                          styles.darkButtonPressed,
+                      ]}
+                    >
+                      {locationStatus ===
+                      'CHECKING' ? (
+                        <ActivityIndicator
+                          size="small"
+                          color={
+                            COLOURS.parchment100
+                          }
+                        />
+                      ) : (
+                        <Ionicons
+                          name="locate-outline"
+                          size={16}
+                          color={
+                            COLOURS.parchment100
+                          }
+                        />
+                      )}
+
+                      <Text
+                        style={
+                          styles.locationActionText
+                        }
+                      >
+                        {
+                          locationActionLabel
+                        }
+                      </Text>
+                    </Pressable>
+
+                    {!telemetrySharingEnabled ? (
+                      <Pressable
+                        accessibilityRole="button"
+                        accessibilityLabel="Open Profile Settings"
+                        accessibilityHint="Opens Profile Settings where Telemetry Sharing can be changed."
+                        accessibilityState={{
+                          disabled:
+                            !onNavigate,
+                        }}
+                        disabled={
+                          !onNavigate
+                        }
+                        onPress={() =>
+                          onNavigate?.(
+                            'PROFILE',
+                          )
+                        }
+                        style={({
+                          pressed,
+                        }) => [
+                          styles.locationSettingsButton,
+
+                          !onNavigate &&
+                            styles.disabledButton,
+
+                          pressed &&
+                            onNavigate &&
+                            styles.darkButtonPressed,
+                        ]}
+                      >
+                        <Ionicons
+                          name="settings-outline"
+                          size={16}
+                          color={
+                            COLOURS.bronze400
+                          }
+                        />
+
+                        <Text
+                          style={
+                            styles.locationSettingsText
+                          }
+                        >
+                          SHARING
+                        </Text>
+                      </Pressable>
+                    ) : null}
+                  </View>
+                </View>
+
+                {/* ---------------------------------------------------------- */}
+                {/* Incoming requests                                          */}
+                {/* ---------------------------------------------------------- */}
+
+                <View
+                  style={[
+                    styles.sectionHeaderRow,
+                    styles.sectionSpacing,
+                  ]}
+                >
+                  <Ionicons
+                    accessible={
+                      false
+                    }
+                    importantForAccessibility="no"
+                    name="mail-unread-outline"
+                    size={16}
+                    color={
+                      COLOURS.bronze400
+                    }
+                  />
+
+                  <Text
+                    accessibilityRole="header"
+                    style={
+                      styles.darkSectionTitle
+                    }
+                  >
+                    LINK REQUESTS
+                  </Text>
+
+                  {incomingRequests.length >
+                  0 ? (
+                    <View
+                      accessibilityLabel={`${incomingRequests.length} pending link requests`}
+                      style={
+                        styles.countBadge
+                      }
+                    >
+                      <Text
+                        style={
+                          styles.countBadgeText
+                        }
+                      >
+                        {
+                          incomingRequests.length
+                        }
+                      </Text>
+                    </View>
+                  ) : null}
+                </View>
+
+                {incomingRequests.length ===
+                0 ? (
+                  <View
+                    accessible
+                    accessibilityLabel="No pending Explorer link requests."
+                    style={
+                      styles.emptyDarkCard
+                    }
+                  >
+                    <Text
+                      style={
+                        styles.emptyDarkText
+                      }
+                    >
+                      NO PENDING REQUESTS
+                    </Text>
+                  </View>
+                ) : (
+                  <View
+                    style={
+                      styles.networkList
+                    }
+                  >
+                    {incomingRequests.map(
+                      (
+                        item,
+                      ) => {
+                        const name =
+                          item.explorer
+                            ?.name ??
+                          'EXPLORER';
+
+                        const initial =
+                          item.explorer
+                            ?.initial ??
+                          'E';
+
+                        const isActing =
+                          actionUid ===
+                          item.friendship
+                            .docId;
+
+                        return (
+                          <View
+                            key={
+                              item.friendship
+                                .docId
+                            }
+                            accessible
+                            accessibilityLabel={`${name}. Pending friend request.`}
+                            style={
+                              styles.requestCard
+                            }
+                          >
+                            <View
+                              accessible={
+                                false
+                              }
+                              importantForAccessibility="no-hide-descendants"
+                              style={
+                                styles.explorerIdentity
+                              }
+                            >
+                              <View
+                                style={
+                                  styles.avatarDark
+                                }
+                              >
+                                <Text
+                                  style={
+                                    styles.avatarDarkText
+                                  }
+                                >
+                                  {
+                                    initial
+                                  }
+                                </Text>
+                              </View>
+
+                              <View
+                                style={
+                                  styles.explorerTextContainer
+                                }
+                              >
+                                <Text
+                                  numberOfLines={
+                                    1
+                                  }
+                                  style={
+                                    styles.requestName
+                                  }
+                                >
+                                  {
+                                    name
+                                  }
+                                </Text>
+
+                                <Text
+                                  style={
+                                    styles.requestMeta
+                                  }
+                                >
+                                  REQUESTING LINK
+                                </Text>
+                              </View>
+                            </View>
+
+                            <View
+                              style={
+                                styles.inlineActions
+                              }
+                            >
+                              <Pressable
+                                accessibilityRole="button"
+                                accessibilityLabel={`Accept request from ${name}`}
+                                disabled={
+                                  isActing
+                                }
+                                onPress={() => {
+                                  void handleAcceptFriendRequest(
+                                    item.friendship,
+                                    name,
+                                  );
+                                }}
+                                style={({
+                                  pressed,
+                                }) => [
+                                  styles.requestActionButton,
+                                  styles.acceptButton,
+
+                                  isActing &&
+                                    styles.disabledButton,
+
+                                  pressed &&
+                                    !isActing &&
+                                    styles.darkButtonPressed,
+                                ]}
+                              >
+                                {isActing ? (
+                                  <ActivityIndicator
+                                    size="small"
+                                    color={
+                                      COLOURS.parchment100
+                                    }
+                                  />
+                                ) : (
+                                  <Ionicons
+                                    name="checkmark-sharp"
+                                    size={18}
+                                    color={
+                                      COLOURS.parchment100
+                                    }
+                                  />
+                                )}
+                              </Pressable>
+
+                              <Pressable
+                                accessibilityRole="button"
+                                accessibilityLabel={`Decline request from ${name}`}
+                                disabled={
+                                  isActing
+                                }
+                                onPress={() => {
+                                  void handleDeclineFriendRequest(
+                                    item.friendship,
+                                    name,
+                                  );
+                                }}
+                                style={({
+                                  pressed,
+                                }) => [
+                                  styles.requestActionButton,
+                                  styles.declineButton,
+
+                                  isActing &&
+                                    styles.disabledButton,
+
+                                  pressed &&
+                                    !isActing &&
+                                    styles.primaryButtonPressed,
+                                ]}
+                              >
+                                <Ionicons
+                                  name="close-sharp"
+                                  size={18}
+                                  color={
+                                    COLOURS.parchment100
+                                  }
+                                />
+                              </Pressable>
+                            </View>
+                          </View>
+                        );
+                      },
+                    )}
+                  </View>
+                )}
+
+                {/* ---------------------------------------------------------- */}
+                {/* Active friends                                             */}
+                {/* ---------------------------------------------------------- */}
+
+                <View
+                  style={[
+                    styles.sectionHeaderRow,
+                    styles.sectionSpacing,
+                  ]}
+                >
+                  <Ionicons
+                    accessible={
+                      false
+                    }
+                    importantForAccessibility="no"
+                    name="people-circle-outline"
+                    size={16}
+                    color={
+                      COLOURS.bronze400
+                    }
+                  />
+
+                  <Text
+                    accessibilityRole="header"
+                    style={
+                      styles.darkSectionTitle
+                    }
+                  >
+                    ACTIVE LINKS
+                  </Text>
+
+                  <View
+                    style={
+                      styles.countBadge
+                    }
+                  >
+                    <Text
+                      style={
+                        styles.countBadgeText
+                      }
+                    >
+                      {
+                        acceptedLinks.length
+                      }
+                    </Text>
+                  </View>
+                </View>
+
+                {acceptedLinks.length ===
+                0 ? (
+                  <View
+                    accessible
+                    accessibilityLabel="No active Explorer links."
+                    style={
+                      styles.emptyDarkCard
+                    }
+                  >
+                    <Text
+                      style={
+                        styles.emptyDarkText
+                      }
+                    >
+                      NO ACTIVE LINKS
+                    </Text>
+                  </View>
+                ) : (
+                  <View
+                    style={
+                      styles.networkList
+                    }
+                  >
+                    {acceptedLinks.map(
+                      (
+                        item,
+                      ) => {
+                        const name =
+                          item.explorer
+                            ?.name ??
+                          'EXPLORER';
+
+                        const initial =
+                          item.explorer
+                            ?.initial ??
+                          'E';
+
+                        const isActing =
+                          actionUid ===
+                          item.friendship
+                            .docId;
+
+                        return (
+                          <View
+                            key={
+                              item.friendship
+                                .docId
+                            }
+                            accessible
+                            accessibilityLabel={`${name}. Active Explorer link.`}
+                            style={
+                              styles.activeLinkCard
+                            }
+                          >
+                            <View
+                              accessible={
+                                false
+                              }
+                              importantForAccessibility="no-hide-descendants"
+                              style={
+                                styles.explorerIdentity
+                              }
+                            >
+                              <View
+                                style={
+                                  styles.avatarLinked
+                                }
+                              >
+                                <Text
+                                  style={
+                                    styles.avatarLinkedText
+                                  }
+                                >
+                                  {
+                                    initial
+                                  }
+                                </Text>
+                              </View>
+
+                              <View
+                                style={
+                                  styles.explorerTextContainer
+                                }
+                              >
+                                <Text
+                                  numberOfLines={
+                                    1
+                                  }
+                                  style={
+                                    styles.activeLinkName
+                                  }
+                                >
+                                  {
+                                    name
+                                  }
+                                </Text>
+
+                                <Text
+                                  style={
+                                    styles.activeLinkMeta
+                                  }
+                                >
+                                  LINK ESTABLISHED
+                                </Text>
+                              </View>
+                            </View>
+
+                            <Pressable
+                              accessibilityRole="button"
+                              accessibilityLabel={`Remove friendship with ${name}`}
+                              accessibilityHint="Opens confirmation before removing the Explorer link."
+                              disabled={
+                                isActing
+                              }
+                              onPress={() =>
+                                handleRemoveFriendship(
+                                  item.friendship,
+                                  name,
+                                )
+                              }
+                              style={({
+                                pressed,
+                              }) => [
+                                styles.unlinkButton,
+
+                                isActing &&
+                                  styles.disabledButton,
+
+                                pressed &&
+                                  !isActing &&
+                                  styles.lightButtonPressed,
+                              ]}
+                            >
+                              {isActing ? (
+                                <ActivityIndicator
+                                  size="small"
+                                  color={
+                                    COLOURS.ink900
+                                  }
+                                />
+                              ) : (
+                                <Ionicons
+                                  name="link-outline"
+                                  size={17}
+                                  color={
+                                    COLOURS.ink900
+                                  }
+                                />
+                              )}
+                            </Pressable>
+                          </View>
+                        );
+                      },
+                    )}
+                  </View>
+                )}
+
+                {/* ---------------------------------------------------------- */}
+                {/* Nearby Explorers                                           */}
+                {/* ---------------------------------------------------------- */}
+
+                <View
+                  style={[
+                    styles.sectionHeaderRow,
+                    styles.sectionSpacing,
+                  ]}
+                >
+                  <MaterialCommunityIcons
+                    accessible={
+                      false
+                    }
+                    importantForAccessibility="no"
+                    name="radar"
+                    size={17}
+                    color={
+                      COLOURS.bronze400
+                    }
+                  />
+
+                  <Text
+                    accessibilityRole="header"
+                    style={
+                      styles.darkSectionTitle
+                    }
+                  >
+                    NEARBY EXPLORERS
+                  </Text>
+                </View>
+
+                <Text
+                  maxFontSizeMultiplier={
+                    1.6
+                  }
+                  style={
+                    styles.nearbyDescription
+                  }
+                >
+                  SHARED POSITIONS WITHIN{' '}
+                  {
+                    RADIUS_KM
+                  }
+                  KM · DISTANCE IS BASED ON EACH EXPLORER'S LAST SHARED POSITION
+                </Text>
+
+                {loadingExplorers ? (
+                  <View
+                    accessible
+                    accessibilityRole="progressbar"
+                    accessibilityLabel="Scanning Explorer directory"
+                    style={
+                      styles.darkLoadingBox
+                    }
+                  >
+                    <ActivityIndicator
+                      size="small"
+                      color={
+                        COLOURS.bronze400
+                      }
+                    />
+
+                    <Text
+                      style={
+                        styles.darkLoadingText
+                      }
+                    >
+                      SCANNING EXPLORER NETWORK…
+                    </Text>
+                  </View>
+                ) : !currentCoordinates ? (
+                  <View
+                    accessible
+                    accessibilityLabel="Your current location is required before nearby Explorer range can be calculated."
+                    style={
+                      styles.emptyDarkCard
+                    }
+                  >
+                    <Text
+                      style={
+                        styles.emptyDarkText
+                      }
+                    >
+                      LOCAL POSITION REQUIRED
+                    </Text>
+                  </View>
+                ) : nearbyExplorers.length ===
+                  0 ? (
+                  <View
+                    accessible
+                    accessibilityLabel={`No Explorers with shared positions were found within ${RADIUS_KM} kilometres.`}
+                    style={
+                      styles.emptyDarkCard
+                    }
+                  >
+                    <Text
+                      style={
+                        styles.emptyDarkText
+                      }
+                    >
+                      NO SHARED POSITIONS IN RANGE
+                    </Text>
+                  </View>
+                ) : (
+                  <View
+                    style={
+                      styles.networkList
+                    }
+                  >
+                    {nearbyExplorers.map(
+                      (
+                        item,
+                      ) => (
+                        <View
+                          key={
+                            item.uid
+                          }
+                          accessible
+                          accessibilityLabel={`${item.name}. Approximately ${item.distanceFormatted} away.${
+                            item.friendMeta
+                              ? ` Link status ${item.friendMeta.status}.`
+                              : ''
+                          }`}
+                          style={
+                            styles.nearbyCard
+                          }
+                        >
+                          <View
+                            accessible={
+                              false
+                            }
+                            importantForAccessibility="no-hide-descendants"
+                            style={
+                              styles.explorerIdentity
+                            }
+                          >
+                            <View
+                              style={
+                                styles.avatarLight
+                              }
+                            >
+                              <Text
+                                style={
+                                  styles.avatarLightText
+                                }
+                              >
+                                {
+                                  item.initial
+                                }
+                              </Text>
+                            </View>
+
+                            <View
+                              style={
+                                styles.explorerTextContainer
+                              }
+                            >
+                              <Text
+                                numberOfLines={
+                                  1
+                                }
+                                style={
+                                  styles.nearbyName
+                                }
+                              >
+                                {
+                                  item.name
+                                }
+                              </Text>
+
+                              <Text
+                                style={
+                                  styles.nearbyMeta
+                                }
+                              >
+                                RANGE:{' '}
+                                {
+                                  item.distanceFormatted
+                                }
+                              </Text>
+                            </View>
+                          </View>
+
+                          <View
+                            accessible={
+                              false
+                            }
+                            importantForAccessibility="no-hide-descendants"
+                          >
+                            {renderExplorerActions(
+                              item,
+                            )}
+                          </View>
+                        </View>
+                      ),
+                    )}
+                  </View>
+                )}
+
+                <View
+                  style={
+                    styles.directoryNotice
+                  }
+                >
+                  <Text
+                    maxFontSizeMultiplier={
+                      1.5
+                    }
+                    style={
+                      styles.directoryNoticeText
+                    }
+                  >
+                    CURRENT DIRECTORY SCAN LIMIT:{' '}
+                    {
+                      MAX_EXPLORERS
+                    }{' '}
+                    PROFILES
+                  </Text>
+                </View>
+              </ScrollView>
+
+              {/* ------------------------------------------------------------ */}
+              {/* Navigation                                                   */}
+              {/* ------------------------------------------------------------ */}
+
+              <FieldNavBar
+                currentTab={
+                  currentTab
+                }
+                onNavigate={
+                  onNavigate
+                }
+              />
+            </View>
+          </View>
+
+          {/* ================================================================ */}
+          {/* Callsign search modal                                           */}
+          {/* ================================================================ */}
+
+          <Modal
+            visible={
+              friendModalVisible
+            }
+            transparent
+            statusBarTranslucent
+            presentationStyle="overFullScreen"
+            animationType={
+              reduceMotionEnabled
+                ? 'none'
+                : 'fade'
+            }
+            onRequestClose={() => {
+              if (
+                !isSearching &&
+                !actionUid
+              ) {
+                setFriendModalVisible(
+                  false,
+                );
+              }
+            }}
+          >
+            <KeyboardAvoidingView
+              style={
+                styles.modalOverlay
+              }
+              behavior={
+                Platform.OS ===
+                'ios'
+                  ? 'padding'
+                  : undefined
+              }
+            >
+              <Pressable
+                accessible={
+                  false
+                }
+                importantForAccessibility="no"
+                style={
+                  styles.modalDismissBackdrop
+                }
+                onPress={() => {
+                  if (
+                    !isSearching &&
+                    !actionUid
+                  ) {
+                    setFriendModalVisible(
+                      false,
+                    );
+                  }
+                }}
+              />
+
+              <View
+                accessible
+                accessibilityViewIsModal
+                accessibilityLabel="Link a new Explorer"
+                onAccessibilityEscape={() => {
+                  if (
+                    !isSearching &&
+                    !actionUid
+                  ) {
+                    setFriendModalVisible(
+                      false,
+                    );
+                  }
+                }}
+                style={
+                  styles.modalCard
+                }
+              >
+                <View
+                  style={
+                    styles.modalHeader
+                  }
+                >
+                  <View
+                    style={
+                      styles.modalHeaderText
+                    }
+                  >
+                    <Text
+                      accessibilityRole="header"
+                      maxFontSizeMultiplier={
+                        1.6
+                      }
+                      style={
+                        styles.modalTitle
+                      }
+                    >
+                      LINK NEW EXPLORER
+                    </Text>
+
+                    <Text
+                      maxFontSizeMultiplier={
+                        1.7
+                      }
+                      style={
+                        styles.modalSubtitle
+                      }
+                    >
+                      Enter the exact callsign used by the Explorer you want to link with.
+                    </Text>
+                  </View>
+
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Close Explorer search"
+                    accessibilityState={{
+                      disabled:
+                        isSearching ||
+                        Boolean(
+                          actionUid,
+                        ),
+                    }}
+                    disabled={
+                      isSearching ||
+                      Boolean(
+                        actionUid,
+                      )
+                    }
+                    hitSlop={4}
+                    onPress={() =>
+                      setFriendModalVisible(
+                        false,
+                      )
+                    }
+                    style={({
+                      pressed,
+                    }) => [
+                      styles.modalCloseButton,
+
+                      pressed &&
+                        styles.lightButtonPressed,
+                    ]}
+                  >
+                    <Ionicons
+                      name="close-sharp"
+                      size={22}
+                      color={
+                        COLOURS.ink900
+                      }
+                    />
+                  </Pressable>
+                </View>
+
+                {searchError ? (
+                  <View
+                    accessible
+                    accessibilityRole="alert"
+                    accessibilityLiveRegion="assertive"
+                    style={
+                      styles.searchErrorCard
+                    }
+                  >
+                    <Text
+                      style={
+                        styles.searchErrorText
+                      }
+                    >
+                      {
+                        searchError
+                      }
+                    </Text>
+                  </View>
+                ) : null}
+
+                <Text
+                  nativeID="social-callsign-label"
+                  style={
+                    styles.searchInputLabel
+                  }
+                >
+                  EXPLORER CALLSIGN
+                </Text>
+
+                <TextInput
+                  accessibilityLabelledBy="social-callsign-label"
+                  accessibilityHint="Enter the exact Explorer callsign."
+                  autoCapitalize="characters"
+                  autoCorrect={
+                    false
+                  }
+                  maxLength={
+                    MAX_CALLSIGN_LENGTH
+                  }
+                  editable={
+                    !isSearching &&
+                    !actionUid
+                  }
+                  placeholder="RANGER_JACK"
+                  placeholderTextColor={
+                    COLOURS.bronze700
+                  }
+                  returnKeyType="search"
+                  selectionColor={
+                    COLOURS.rust700
+                  }
+                  value={
+                    searchAgentTag
+                  }
+                  onChangeText={(
+                    text,
+                  ) => {
+                    setSearchAgentTag(
+                      text.toUpperCase(),
+                    );
+
+                    setSearchError(
+                      null,
+                    );
+                  }}
+                  onSubmitEditing={() => {
+                    void handleSearchAndLinkAgent();
+                  }}
+                  style={
+                    styles.searchInput
+                  }
+                />
+
+                <Text
+                  maxFontSizeMultiplier={
+                    1.5
+                  }
+                  style={
+                    styles.searchHelpText
+                  }
+                >
+                  Callsign search queries Firestore directly and does not depend on the nearby Explorer list.
+                </Text>
+
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={
+                    isSearching
+                      ? 'Searching for Explorer'
+                      : 'Send Explorer link request'
+                  }
+                  accessibilityState={{
+                    busy:
+                      isSearching,
+
+                    disabled:
+                      isSearching ||
+                      Boolean(
+                        actionUid,
+                      ),
+                  }}
+                  disabled={
+                    isSearching ||
+                    Boolean(
+                      actionUid,
+                    )
+                  }
+                  onPress={() => {
+                    void handleSearchAndLinkAgent();
+                  }}
+                  style={({
+                    pressed,
+                  }) => [
+                    styles.modalSubmitButton,
+
+                    (
+                      isSearching ||
+                      actionUid
+                    ) &&
+                      styles.disabledButton,
+
+                    pressed &&
+                      !isSearching &&
+                      !actionUid &&
+                      styles.primaryButtonPressed,
+                  ]}
+                >
+                  {isSearching ? (
+                    <ActivityIndicator
+                      size="small"
+                      color={
+                        COLOURS.parchment100
+                      }
+                    />
+                  ) : (
+                    <Ionicons
+                      name="person-add-outline"
+                      size={18}
+                      color={
+                        COLOURS.parchment100
+                      }
+                    />
+                  )}
+
+                  <Text
+                    style={
+                      styles.modalSubmitText
+                    }
+                  >
+                    {isSearching
+                      ? 'SEARCHING...'
+                      : 'SEND LINK REQUEST'}
+                  </Text>
+                </Pressable>
+              </View>
+            </KeyboardAvoidingView>
+          </Modal>
+        </View>
+      </KeyboardAvoidingView>
+    );
+  };
+
+export default SocialScreen;
+
+/* -------------------------------------------------------------------------- */
+/* Styles                                                                     */
+/* -------------------------------------------------------------------------- */
+
+const styles =
+  StyleSheet.create({
+    keyboardContainer: {
+      flex: 1,
+      backgroundColor:
+        COLOURS.forest800,
+    },
+
+    screen: {
+      flex: 1,
+      backgroundColor:
+        COLOURS.forest800,
+    },
+
+    splitWrapper: {
+      flex: 1,
+      minHeight: 0,
+      gap: 12,
+    },
+
+    headerIdentity: {
+      flex: 1,
+      minWidth: 0,
+      flexDirection:
+        'row',
+      alignItems:
+        'center',
+      gap: 8,
+    },
+
+    headerTextContainer: {
+      flex: 1,
+      minWidth: 0,
+    },
+
+    /* ---------------------------------------------------------------------- */
+    /* 60% Telegram panel                                                    */
+    /* ---------------------------------------------------------------------- */
+
+    telegramPanel: {
+      flex: 0.6,
+      minWidth: 0,
+      minHeight: 0,
+      padding: 14,
+      backgroundColor:
+        COLOURS.parchment200,
+      borderWidth: 2,
+      borderColor:
+        COLOURS.bronze600,
+      borderRadius: 7,
+    },
+
+    lightPanelHeader: {
+      minHeight: 50,
+      flexDirection:
+        'row',
+      alignItems:
+        'center',
+      justifyContent:
+        'space-between',
+      gap: 10,
+      paddingBottom: 9,
+      borderBottomWidth: 1,
+      borderBottomColor:
+        COLOURS.bronze600,
+    },
+
+    lightPanelTitle: {
+      color:
+        COLOURS.ink900,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 16,
+      lineHeight: 22,
+      fontWeight:
+        '800',
+      letterSpacing: 1.2,
+    },
+
+    lightPanelSubtitle: {
+      color:
+        COLOURS.bronze700,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 8.5,
+      lineHeight: 13,
+      fontWeight:
+        '700',
+      letterSpacing: 0.65,
+      marginTop: 2,
+    },
+
+    callsignBadge: {
+      maxWidth: 150,
+      minHeight: 38,
+      justifyContent:
+        'center',
+      alignItems:
+        'center',
+      paddingHorizontal: 9,
+      paddingVertical: 5,
+      backgroundColor:
+        COLOURS.forest800,
+      borderRadius: 4,
+    },
+
+    callsignBadgeText: {
+      color:
+        COLOURS.parchment100,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 9,
+      lineHeight: 13,
+      fontWeight:
+        '800',
+      letterSpacing: 0.4,
+    },
+
+    /* ---------------------------------------------------------------------- */
+    /* Composer                                                              */
+    /* ---------------------------------------------------------------------- */
+
+    composerCard: {
+      marginTop: 10,
+      padding: 11,
+      backgroundColor:
+        COLOURS.parchment100,
+      borderWidth: 1,
+      borderColor:
+        COLOURS.bronze600,
+      borderRadius: 5,
+    },
+
+    composerHeader: {
+      flexDirection:
+        'row',
+      justifyContent:
+        'space-between',
+      alignItems:
+        'center',
+      gap: 10,
+      marginBottom: 5,
+    },
+
+    sectionTitleRowLight: {
+      flex: 1,
+      minWidth: 0,
+      flexDirection:
+        'row',
+      alignItems:
+        'center',
+      gap: 6,
+    },
+
+    lightSectionTitle: {
+      color:
+        COLOURS.ink900,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 10.5,
+      lineHeight: 16,
+      fontWeight:
+        '800',
+      letterSpacing: 0.7,
+    },
+
+    characterCounter: {
+      color:
+        COLOURS.bronze700,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 8.5,
+      lineHeight: 13,
+      fontWeight:
+        '700',
+    },
+
+    composerDescription: {
+      color:
+        COLOURS.ink700,
+      fontSize: 10,
+      lineHeight: 15,
+      marginBottom: 7,
+    },
+
+    telegramInput: {
+      minHeight: 82,
+      maxHeight: 120,
+      paddingHorizontal: 10,
+      paddingVertical: 9,
+      color:
+        COLOURS.ink900,
+      backgroundColor:
+        '#FFFDF5',
+      borderWidth: 1.5,
+      borderColor:
+        COLOURS.bronze600,
+      borderRadius: 5,
+      fontFamily:
+        MONO_FONT,
+      fontSize: 12,
+      lineHeight: 18,
+    },
+
+    transmitButton: {
+      minHeight: 50,
+      marginTop: 8,
+      flexDirection:
+        'row',
+      alignItems:
+        'center',
+      justifyContent:
+        'center',
+      gap: 7,
+      paddingHorizontal: 12,
+      paddingVertical: 9,
+      backgroundColor:
+        COLOURS.rust700,
+      borderWidth: 1,
+      borderColor:
+        COLOURS.rust800,
+      borderRadius: 5,
+    },
+
+    transmitButtonText: {
+      color:
+        COLOURS.parchment100,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 10.5,
+      lineHeight: 15,
+      fontWeight:
+        '800',
+      letterSpacing: 0.75,
+      textAlign:
+        'center',
+    },
+
+    /* ---------------------------------------------------------------------- */
+    /* Telegram feed                                                         */
+    /* ---------------------------------------------------------------------- */
+
+    dispatchFeedSection: {
+      flex: 1,
+      minHeight: 0,
+      marginTop: 12,
+    },
+
+    feedHeader: {
+      minHeight: 28,
+      flexDirection:
+        'row',
+      alignItems:
+        'center',
+      justifyContent:
+        'space-between',
+      gap: 10,
+      marginBottom: 6,
+    },
+
+    dispatchCount: {
+      color:
+        COLOURS.bronze700,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 8.5,
+      lineHeight: 13,
+      fontWeight:
+        '700',
+      letterSpacing: 0.4,
+    },
+
+    dispatchScroll: {
+      flex: 1,
+      minHeight: 0,
+    },
+
+    dispatchScrollContent: {
+      gap: 7,
+      paddingBottom: 4,
+    },
+
+    dispatchCard: {
+      paddingHorizontal: 10,
+      paddingVertical: 8,
+      backgroundColor:
+        COLOURS.parchment100,
+      borderWidth: 1,
+      borderColor:
+        '#CBBBA0',
+      borderRadius: 5,
+    },
+
+    ownDispatchCard: {
+      backgroundColor:
+        '#E4D1A8',
+      borderColor:
+        COLOURS.rust700,
+    },
+
+    dispatchCardHeader: {
+      flexDirection:
+        'row',
+      alignItems:
+        'center',
+      justifyContent:
+        'space-between',
+      gap: 8,
+      marginBottom: 4,
+    },
+
+    dispatchSenderRow: {
+      flex: 1,
+      minWidth: 0,
+      flexDirection:
+        'row',
+      alignItems:
+        'center',
+      gap: 5,
+    },
+
+    dispatchSender: {
+      flexShrink: 1,
+      color:
+        COLOURS.ink900,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 10,
+      lineHeight: 15,
+      fontWeight:
+        '800',
+    },
+
+    ownDispatchSender: {
+      color:
+        COLOURS.rust800,
+    },
+
+    dispatchTime: {
+      flexShrink: 0,
+      color:
+        COLOURS.bronze700,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 8.5,
+      lineHeight: 13,
+      fontWeight:
+        '700',
+    },
+
+    dispatchText: {
+      color:
+        COLOURS.ink900,
+      fontSize: 11,
+      lineHeight: 17,
+    },
+
+    feedStateBox: {
+      flex: 1,
+      minHeight: 100,
+      justifyContent:
+        'center',
+      alignItems:
+        'center',
+      gap: 8,
+      padding: 16,
+      borderWidth: 1,
+      borderStyle:
+        'dashed',
+      borderColor:
+        COLOURS.bronze600,
+      borderRadius: 5,
+    },
+
+    feedStateText: {
+      color:
+        COLOURS.bronze700,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 9,
+      lineHeight: 14,
+      fontWeight:
+        '700',
+      letterSpacing: 0.5,
+      textAlign:
+        'center',
+    },
+
+    lightErrorCard: {
+      minHeight: 50,
+      marginBottom: 7,
+      paddingHorizontal: 9,
+      paddingVertical: 6,
+      flexDirection:
+        'row',
+      alignItems:
+        'center',
+      gap: 7,
+      backgroundColor:
+        '#F1D3C9',
+      borderWidth: 1,
+      borderColor:
+        COLOURS.rust700,
+      borderRadius: 5,
+    },
+
+    lightErrorText: {
+      flex: 1,
+      minWidth: 0,
+      color:
+        COLOURS.rust800,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 9,
+      lineHeight: 14,
+      fontWeight:
+        '700',
+    },
+
+    lightRetryButton: {
+      minWidth: 66,
+      minHeight: 48,
+      justifyContent:
+        'center',
+      alignItems:
+        'center',
+      paddingHorizontal: 8,
+      borderWidth: 1,
+      borderColor:
+        COLOURS.rust700,
+      borderRadius: 4,
+    },
+
+    lightRetryText: {
+      color:
+        COLOURS.rust800,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 8.5,
+      lineHeight: 13,
+      fontWeight:
+        '800',
+    },
+
+    lightPanelFooter: {
+      minHeight: 27,
+      justifyContent:
+        'center',
+      paddingTop: 7,
+      marginTop: 7,
+      borderTopWidth: 1,
+      borderTopColor:
+        COLOURS.bronze600,
+    },
+
+    lightPanelFooterText: {
+      color:
+        COLOURS.bronze700,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 8,
+      lineHeight: 12,
+      fontWeight:
+        '700',
+      letterSpacing: 0.45,
+      textAlign:
+        'center',
+    },
+
+    /* ---------------------------------------------------------------------- */
+    /* 40% Network panel                                                     */
+    /* ---------------------------------------------------------------------- */
+
+    networkPanel: {
+      flex: 0.4,
+      minWidth: 0,
+      minHeight: 0,
+      padding: 12,
+      backgroundColor:
+        COLOURS.forest800,
+      borderWidth: 2,
+      borderColor:
+        COLOURS.bronze500,
+      borderRadius: 7,
+    },
+
+    networkScroll: {
+      flex: 1,
+      minHeight: 0,
+      marginBottom: 8,
+    },
+
+    networkScrollContent: {
+      paddingBottom: 5,
+    },
+
+    darkPanelHeader: {
+      minHeight: 50,
+      flexDirection:
+        'row',
+      justifyContent:
+        'space-between',
+      alignItems:
+        'center',
+      gap: 8,
+      paddingBottom: 8,
+      borderBottomWidth: 1,
+      borderBottomColor:
+        COLOURS.bronze500,
+    },
+
+    darkPanelTitle: {
+      color:
+        COLOURS.parchment100,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 13,
+      lineHeight: 19,
+      fontWeight:
+        '800',
+      letterSpacing: 0.9,
+    },
+
+    darkPanelSubtitle: {
+      color:
+        COLOURS.bronze400,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 8,
+      lineHeight: 12,
+      fontWeight:
+        '700',
+      letterSpacing: 0.5,
+      marginTop: 2,
+    },
+
+    addExplorerButton: {
+      width: 48,
+      height: 48,
+      flexShrink: 0,
+      justifyContent:
+        'center',
+      alignItems:
+        'center',
+      backgroundColor:
+        COLOURS.forest950,
+      borderWidth: 1,
+      borderColor:
+        COLOURS.bronze400,
+      borderRadius: 24,
+    },
+
+    /* ---------------------------------------------------------------------- */
+    /* Dark errors                                                           */
+    /* ---------------------------------------------------------------------- */
+
+    darkErrorCard: {
+      marginTop: 9,
+      padding: 8,
+      backgroundColor:
+        COLOURS.rust700,
+      borderWidth: 1,
+      borderColor:
+        COLOURS.danger300,
+      borderRadius: 5,
+    },
+
+    darkErrorText: {
+      color:
+        COLOURS.parchment100,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 8.5,
+      lineHeight: 13,
+      fontWeight:
+        '700',
+      marginVertical: 5,
+    },
+
+    darkRetryButton: {
+      minHeight: 48,
+      justifyContent:
+        'center',
+      alignItems:
+        'center',
+      borderWidth: 1,
+      borderColor:
+        COLOURS.parchment100,
+      borderRadius: 4,
+    },
+
+    darkRetryText: {
+      color:
+        COLOURS.parchment100,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 9,
+      lineHeight: 13,
+      fontWeight:
+        '800',
+    },
+
+    /* ---------------------------------------------------------------------- */
+    /* Network sections                                                      */
+    /* ---------------------------------------------------------------------- */
+
+    sectionHeaderRow: {
+      minHeight: 27,
+      flexDirection:
+        'row',
+      alignItems:
+        'center',
+      gap: 6,
+      marginTop: 10,
+      marginBottom: 6,
+    },
+
+    sectionSpacing: {
+      marginTop: 14,
+    },
+
+    darkSectionTitle: {
+      flexShrink: 1,
+      color:
+        COLOURS.bronze400,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 10,
+      lineHeight: 15,
+      fontWeight:
+        '800',
+      letterSpacing: 0.7,
+    },
+
+    countBadge: {
+      minWidth: 24,
+      minHeight: 24,
+      justifyContent:
+        'center',
+      alignItems:
+        'center',
+      paddingHorizontal: 6,
+      marginLeft: 'auto',
+      backgroundColor:
+        COLOURS.rust700,
+      borderRadius: 12,
+    },
+
+    countBadgeText: {
+      color:
+        COLOURS.parchment100,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 8.5,
+      lineHeight: 12,
+      fontWeight:
+        '800',
+    },
+
+    networkList: {
+      gap: 6,
+    },
+
+    emptyDarkCard: {
+      minHeight: 48,
+      justifyContent:
+        'center',
+      alignItems:
+        'center',
+      paddingHorizontal: 10,
+      paddingVertical: 7,
+      borderWidth: 1,
+      borderStyle:
+        'dashed',
+      borderColor:
+        COLOURS.bronze500,
+      borderRadius: 5,
+    },
+
+    emptyDarkText: {
+      color:
+        COLOURS.bronze400,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 8.5,
+      lineHeight: 13,
+      fontWeight:
+        '700',
+      letterSpacing: 0.45,
+      textAlign:
+        'center',
+    },
+
+    /* ---------------------------------------------------------------------- */
+    /* Location card                                                         */
+    /* ---------------------------------------------------------------------- */
+
+    locationCard: {
+      padding: 9,
+      backgroundColor:
+        COLOURS.forest950,
+      borderWidth: 1,
+      borderColor:
+        COLOURS.forest700,
+      borderRadius: 5,
+    },
+
+    locationStatusRow: {
+      flexDirection:
+        'row',
+      alignItems:
+        'center',
+      gap: 8,
+    },
+
+    locationDot: {
+      width: 10,
+      height: 10,
+      borderRadius: 5,
+      flexShrink: 0,
+    },
+
+    locationDotReady: {
+      backgroundColor:
+        COLOURS.success300,
+    },
+
+    locationDotChecking: {
+      backgroundColor:
+        COLOURS.bronze400,
+    },
+
+    locationDotWarning: {
+      backgroundColor:
+        COLOURS.warning300,
+    },
+
+    locationStatusTextContainer: {
+      flex: 1,
+      minWidth: 0,
+    },
+
+    locationStatusTitle: {
+      color:
+        COLOURS.parchment100,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 9.5,
+      lineHeight: 14,
+      fontWeight:
+        '800',
+    },
+
+    locationSharingText: {
+      color:
+        COLOURS.bronze400,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 8,
+      lineHeight: 12,
+      fontWeight:
+        '700',
+      marginTop: 1,
+    },
+
+    locationPrivacyText: {
+      color:
+        COLOURS.parchment200,
+      fontSize: 9,
+      lineHeight: 14,
+      marginTop: 7,
+    },
+
+    locationActions: {
+      flexDirection:
+        'row',
+      gap: 6,
+      marginTop: 8,
+    },
+
+    locationActionButton: {
+      flex: 1,
+      minHeight: 48,
+      flexDirection:
+        'row',
+      justifyContent:
+        'center',
+      alignItems:
+        'center',
+      gap: 6,
+      paddingHorizontal: 8,
+      paddingVertical: 7,
+      backgroundColor:
+        COLOURS.rust700,
+      borderWidth: 1,
+      borderColor:
+        COLOURS.rust800,
+      borderRadius: 4,
+    },
+
+    locationActionText: {
+      flexShrink: 1,
+      color:
+        COLOURS.parchment100,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 8.5,
+      lineHeight: 13,
+      fontWeight:
+        '800',
+      textAlign:
+        'center',
+    },
+
+    locationSettingsButton: {
+      minWidth: 88,
+      minHeight: 48,
+      flexDirection:
+        'row',
+      justifyContent:
+        'center',
+      alignItems:
+        'center',
+      gap: 5,
+      paddingHorizontal: 8,
+      borderWidth: 1,
+      borderColor:
+        COLOURS.bronze400,
+      borderRadius: 4,
+    },
+
+    locationSettingsText: {
+      color:
+        COLOURS.bronze400,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 8.5,
+      lineHeight: 13,
+      fontWeight:
+        '800',
+    },
+
+    /* ---------------------------------------------------------------------- */
+    /* Requests                                                              */
+    /* ---------------------------------------------------------------------- */
+
+    requestCard: {
+      minHeight: 58,
+      flexDirection:
+        'row',
+      alignItems:
+        'center',
+      justifyContent:
+        'space-between',
+      gap: 7,
+      padding: 7,
+      backgroundColor:
+        COLOURS.parchment200,
+      borderWidth: 1,
+      borderColor:
+        COLOURS.bronze600,
+      borderRadius: 5,
+    },
+
+    explorerIdentity: {
+      flex: 1,
+      minWidth: 0,
+      flexDirection:
+        'row',
+      alignItems:
+        'center',
+      gap: 7,
+    },
+
+    explorerTextContainer: {
+      flex: 1,
+      minWidth: 0,
+    },
+
+    avatarDark: {
+      width: 34,
+      height: 34,
+      borderRadius: 17,
+      alignItems:
+        'center',
+      justifyContent:
+        'center',
+      backgroundColor:
+        COLOURS.forest800,
+      borderWidth: 1,
+      borderColor:
+        COLOURS.bronze600,
+    },
+
+    avatarDarkText: {
+      color:
+        COLOURS.parchment100,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 11,
+      fontWeight:
+        '800',
+    },
+
+    requestName: {
+      color:
+        COLOURS.ink900,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 10,
+      lineHeight: 15,
+      fontWeight:
+        '800',
+    },
+
+    requestMeta: {
+      color:
+        COLOURS.rust700,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 7.5,
+      lineHeight: 11,
+      fontWeight:
+        '700',
+      marginTop: 1,
+    },
+
+    requestActionButton: {
+      width: 48,
+      height: 48,
+      alignItems:
+        'center',
+      justifyContent:
+        'center',
+      borderRadius: 4,
+    },
+
+    acceptButton: {
+      backgroundColor:
+        COLOURS.success700,
+    },
+
+    declineButton: {
+      backgroundColor:
+        COLOURS.rust700,
+    },
+
+    inlineActions: {
+      flexDirection:
+        'row',
+      alignItems:
+        'center',
+      gap: 5,
+    },
+
+    /* ---------------------------------------------------------------------- */
+    /* Active links                                                          */
+    /* ---------------------------------------------------------------------- */
+
+    activeLinkCard: {
+      minHeight: 56,
+      flexDirection:
+        'row',
+      alignItems:
+        'center',
+      justifyContent:
+        'space-between',
+      gap: 7,
+      padding: 7,
+      backgroundColor:
+        COLOURS.forest950,
+      borderWidth: 1,
+      borderColor:
+        COLOURS.success700,
+      borderRadius: 5,
+    },
+
+    avatarLinked: {
+      width: 34,
+      height: 34,
+      borderRadius: 17,
+      alignItems:
+        'center',
+      justifyContent:
+        'center',
+      backgroundColor:
+        COLOURS.success700,
+      borderWidth: 1,
+      borderColor:
+        COLOURS.success300,
+    },
+
+    avatarLinkedText: {
+      color:
+        COLOURS.parchment100,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 11,
+      fontWeight:
+        '800',
+    },
+
+    activeLinkName: {
+      color:
+        COLOURS.parchment100,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 10,
+      lineHeight: 15,
+      fontWeight:
+        '800',
+    },
+
+    activeLinkMeta: {
+      color:
+        COLOURS.success300,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 7.5,
+      lineHeight: 11,
+      fontWeight:
+        '700',
+      marginTop: 1,
+    },
+
+    unlinkButton: {
+      width: 48,
+      height: 48,
+      justifyContent:
+        'center',
+      alignItems:
+        'center',
+      backgroundColor:
+        COLOURS.parchment200,
+      borderRadius: 4,
+    },
+
+    /* ---------------------------------------------------------------------- */
+    /* Nearby                                                                */
+    /* ---------------------------------------------------------------------- */
+
+    nearbyDescription: {
+      color:
+        COLOURS.bronze400,
+      fontFamily:
+        MONO_FONT,
+      fontSize: 7.5,
+      lineHeight: 12,
+      letterSpacing: 0.3,
+      marginBottom: 6,
+    },
+
+    darkLoadingBox: {
+      minHeight: 70,
+      justifyContent:
+        'center',
+      alignItems:
+        'center',
+      gap: 7,
+      padding: 10,
+    },
+
+    darkLoadingText: {
+      color:
+        COLOURS.bronze400,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 8.5,
+      lineHeight: 13,
+      fontWeight:
+        '700',
+      letterSpacing: 0.4,
+      textAlign:
+        'center',
+    },
+
+    nearbyCard: {
+      minHeight: 58,
+      flexDirection:
+        'row',
+      alignItems:
+        'center',
+      justifyContent:
+        'space-between',
+      gap: 7,
+      padding: 7,
+      backgroundColor:
+        COLOURS.parchment200,
+      borderWidth: 1,
+      borderColor:
+        COLOURS.bronze600,
+      borderRadius: 5,
+    },
+
+    avatarLight: {
+      width: 34,
+      height: 34,
+      borderRadius: 17,
+      alignItems:
+        'center',
+      justifyContent:
+        'center',
+      backgroundColor:
+        COLOURS.forest800,
+    },
+
+    avatarLightText: {
+      color:
+        COLOURS.parchment100,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 11,
+      fontWeight:
+        '800',
+    },
+
+    nearbyName: {
+      color:
+        COLOURS.ink900,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 10,
+      lineHeight: 15,
+      fontWeight:
+        '800',
+    },
+
+    nearbyMeta: {
+      color:
+        COLOURS.bronze700,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 7.5,
+      lineHeight: 11,
+      fontWeight:
+        '700',
+      marginTop: 1,
+    },
+
+    compactActionButton: {
+      width: 48,
+      height: 48,
+      justifyContent:
+        'center',
+      alignItems:
+        'center',
+      backgroundColor:
+        '#D7C8A9',
+      borderWidth: 1,
+      borderColor:
+        COLOURS.bronze600,
+      borderRadius: 4,
+    },
+
+    statusActionButton: {
+      minWidth: 64,
+      minHeight: 48,
+      flexDirection:
+        'row',
+      alignItems:
+        'center',
+      justifyContent:
+        'center',
+      gap: 4,
+      paddingHorizontal: 7,
+      borderWidth: 1,
+      borderRadius: 4,
+    },
+
+    pendingButton: {
+      backgroundColor:
+        '#E4D1A8',
+      borderColor:
+        COLOURS.bronze600,
+    },
+
+    pendingButtonText: {
+      color:
+        COLOURS.ink900,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 7.5,
+      lineHeight: 11,
+      fontWeight:
+        '800',
+    },
+
+    linkedButton: {
+      backgroundColor:
+        '#DDE9D8',
+      borderColor:
+        COLOURS.success700,
+    },
+
+    linkedButtonText: {
+      color:
+        COLOURS.success700,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 7.5,
+      lineHeight: 11,
+      fontWeight:
+        '800',
+    },
+
+    retryLinkButton: {
+      backgroundColor:
+        COLOURS.parchment100,
+      borderColor:
+        COLOURS.rust700,
+    },
+
+    retryLinkText: {
+      color:
+        COLOURS.rust800,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 8,
+      lineHeight: 12,
+      fontWeight:
+        '800',
+    },
+
+    blockedBadge: {
+      minWidth: 68,
+      minHeight: 48,
+      flexDirection:
+        'row',
+      alignItems:
+        'center',
+      justifyContent:
+        'center',
+      gap: 4,
+      paddingHorizontal: 6,
+      backgroundColor:
+        '#E7C9C0',
+      borderWidth: 1,
+      borderColor:
+        COLOURS.rust700,
+      borderRadius: 4,
+    },
+
+    blockedText: {
+      color:
+        COLOURS.rust800,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 7.5,
+      lineHeight: 11,
+      fontWeight:
+        '800',
+    },
+
+    directoryNotice: {
+      marginTop: 10,
+      paddingTop: 7,
+      borderTopWidth: 1,
+      borderTopColor:
+        'rgba(195, 160, 106, 0.38)',
+    },
+
+    directoryNoticeText: {
+      color:
+        COLOURS.bronze400,
+      fontFamily:
+        MONO_FONT,
+      fontSize: 7.5,
+      lineHeight: 12,
+      letterSpacing: 0.35,
+      textAlign:
+        'center',
+    },
+
+    /* ---------------------------------------------------------------------- */
+    /* Modal                                                                 */
+    /* ---------------------------------------------------------------------- */
+
+    modalOverlay: {
+      flex: 1,
+      justifyContent:
+        'center',
+      alignItems:
+        'center',
+      padding: 20,
+      backgroundColor:
+        COLOURS.overlay,
+    },
+
+    modalDismissBackdrop: {
+      position:
+        'absolute',
+      top: 0,
+      right: 0,
+      bottom: 0,
+      left: 0,
+    },
+
+    modalCard: {
+      width: '90%',
+      maxWidth: 560,
+      padding: 16,
+      backgroundColor:
+        COLOURS.parchment200,
+      borderWidth: 2,
+      borderColor:
+        COLOURS.bronze600,
+      borderRadius: 8,
+    },
+
+    modalHeader: {
+      minHeight: 50,
+      flexDirection:
+        'row',
+      alignItems:
+        'flex-start',
+      justifyContent:
+        'space-between',
+      gap: 10,
+      marginBottom: 10,
+    },
+
+    modalHeaderText: {
+      flex: 1,
+      minWidth: 0,
+    },
+
+    modalTitle: {
+      color:
+        COLOURS.ink900,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 14,
+      lineHeight: 20,
+      fontWeight:
+        '800',
+      letterSpacing: 0.9,
+    },
+
+    modalSubtitle: {
+      color:
+        COLOURS.ink700,
+      fontSize: 10.5,
+      lineHeight: 16,
+      marginTop: 3,
+    },
+
+    modalCloseButton: {
+      width: 48,
+      height: 48,
+      justifyContent:
+        'center',
+      alignItems:
+        'center',
+      borderRadius: 24,
+    },
+
+    searchErrorCard: {
+      padding: 8,
+      marginBottom: 9,
+      backgroundColor:
+        '#F1D3C9',
+      borderWidth: 1,
+      borderColor:
+        COLOURS.rust700,
+      borderRadius: 4,
+    },
+
+    searchErrorText: {
+      color:
+        COLOURS.rust800,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 9.5,
+      lineHeight: 14,
+      fontWeight:
+        '800',
+      letterSpacing: 0.4,
+    },
+
+    searchInputLabel: {
+      color:
+        COLOURS.ink900,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 10,
+      lineHeight: 15,
+      fontWeight:
+        '800',
+      letterSpacing: 0.6,
+      marginBottom: 5,
+    },
+
+    searchInput: {
+      minHeight: 50,
+      paddingHorizontal: 11,
+      paddingVertical: 9,
+      backgroundColor:
+        COLOURS.parchment100,
+      borderWidth: 1.5,
+      borderColor:
+        COLOURS.bronze600,
+      borderRadius: 5,
+      color:
+        COLOURS.ink900,
+      fontFamily:
+        MONO_FONT,
+      fontSize: 13,
+      lineHeight: 19,
+    },
+
+    searchHelpText: {
+      color:
+        COLOURS.ink700,
+      fontSize: 9.5,
+      lineHeight: 14,
+      marginTop: 5,
+      marginBottom: 11,
+    },
+
+    modalSubmitButton: {
+      minHeight: 50,
+      flexDirection:
+        'row',
+      justifyContent:
+        'center',
+      alignItems:
+        'center',
+      gap: 7,
+      paddingHorizontal: 12,
+      paddingVertical: 9,
+      backgroundColor:
+        COLOURS.rust700,
+      borderWidth: 1,
+      borderColor:
+        COLOURS.rust800,
+      borderRadius: 5,
+    },
+
+    modalSubmitText: {
+      color:
+        COLOURS.parchment100,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 10,
+      lineHeight: 15,
+      fontWeight:
+        '800',
+      letterSpacing: 0.7,
+    },
+
+    /* ---------------------------------------------------------------------- */
+    /* Interaction states                                                    */
+    /* ---------------------------------------------------------------------- */
+
+    disabledButton: {
+      opacity: 0.48,
+    },
+
+    darkButtonPressed: {
+      opacity: 0.78,
+      transform: [
+        {
+          scale: 0.985,
+        },
+      ],
+    },
+
+    primaryButtonPressed: {
+      backgroundColor:
+        COLOURS.rust600,
+      transform: [
+        {
+          scale: 0.985,
+        },
+      ],
+    },
+
+    lightButtonPressed: {
+      opacity: 0.72,
+    },
+  });

@@ -1,96 +1,51 @@
-import React, { useEffect, useState } from 'react';
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+} from 'react';
+
 import {
+  AccessibilityInfo,
   ActivityIndicator,
   Platform,
+  Pressable,
   ScrollView,
   StyleSheet,
   Text,
-  TouchableOpacity,
   useWindowDimensions,
   View,
 } from 'react-native';
+
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import Svg, { Path } from 'react-native-svg';
+
+import {
+  Ionicons,
+  MaterialCommunityIcons,
+} from '@expo/vector-icons';
+
 import {
   collection,
+  doc,
   limit,
   onSnapshot,
   orderBy,
   query,
 } from 'firebase/firestore';
-import { auth, db } from '../config/firebase';
-import { UserDocument } from '../types/firestore';
-import { FieldNavBar, NavigationTab } from '../components/FieldNavBar';
 
-/* -------------------------------------------------------------------------- */
-/* Icons                                                                      */
-/* -------------------------------------------------------------------------- */
+import {
+  auth,
+  db,
+} from '../config/firebase';
 
-const StarIcon = ({
-  color = '#A64B2A',
-  size = 12,
-}: {
-  color?: string;
-  size?: number;
-}) => (
-  <Svg
-    width={size}
-    height={size}
-    viewBox="0 0 24 24"
-    fill={color}
-    accessibilityLabel="Star"
-  >
-    <Path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" />
-  </Svg>
-);
+import {
+  FieldNavBar,
+  type NavigationTab,
+} from '../components/FieldNavBar';
 
-const UserPlusIcon = ({
-  color = '#F3ECD8',
-  size = 16,
-}: {
-  color?: string;
-  size?: number;
-}) => (
-  <Svg
-    width={size}
-    height={size}
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke={color}
-    strokeWidth="2"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-    accessibilityLabel="Add friend"
-  >
-    <Path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
-    <Path d="M8.5 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z" />
-    <Path d="M20 8v6" />
-    <Path d="M23 11h-6" />
-  </Svg>
-);
-
-const SendIcon = ({
-  color = '#F3ECD8',
-  size = 16,
-}: {
-  color?: string;
-  size?: number;
-}) => (
-  <Svg
-    width={size}
-    height={size}
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke={color}
-    strokeWidth="2"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-    accessibilityLabel="Dispatch Telegram"
-  >
-    <Path d="M22 2L11 13" />
-    <Path d="M22 2l-7 20-4-9-9-4 20-7z" />
-  </Svg>
-);
+import type {
+  UserDocument,
+} from '../types/firestore';
 
 /* -------------------------------------------------------------------------- */
 /* Types                                                                      */
@@ -98,622 +53,2726 @@ const SendIcon = ({
 
 interface ExplorerEntry {
   uid: string;
-  rank: string;
-  name: string;
-  points: string;
-  isUser: boolean;
+  rank: number;
+  username: string;
+  points: number;
+  isCurrentUser: boolean;
 }
 
 interface Props {
   onBack?: () => void;
-  onNavigate?: (tab: string) => void;
+
+  onNavigate?: (
+    tab: string,
+  ) => void;
 }
 
 /* -------------------------------------------------------------------------- */
 /* Constants                                                                  */
 /* -------------------------------------------------------------------------- */
 
-const MAX_LEADERBOARD_ENTRIES = 50;
+const MAX_LEADERBOARD_ENTRIES =
+  50;
+
+const COLOURS = {
+  forest950: '#172018',
+  forest900: '#1C261D',
+  forest800: '#2C3B2E',
+  forest700: '#3D503F',
+
+  parchment100: '#F6EFD9',
+  parchment200: '#E8DCC0',
+
+  ink900: '#2A2420',
+  ink700: '#514A40',
+
+  bronze700: '#5F4B32',
+  bronze600: '#6B563A',
+  bronze500: '#B08D57',
+  bronze400: '#C3A06A',
+
+  rust800: '#71301C',
+  rust700: '#7F321B',
+  rust600: '#8C3A20',
+
+  success700: '#3E6546',
+  success300: '#BFE3C0',
+
+  warning300: '#E6C580',
+  danger300: '#FFB4A2',
+} as const;
+
+const MONO_FONT =
+  Platform.OS === 'ios'
+    ? 'Courier'
+    : 'monospace';
+
+const MONO_BOLD_FONT =
+  Platform.OS === 'ios'
+    ? 'Courier-Bold'
+    : 'monospace';
 
 /* -------------------------------------------------------------------------- */
 /* Helpers                                                                    */
 /* -------------------------------------------------------------------------- */
 
-const normaliseName = (value: unknown): string => {
-  const name = typeof value === 'string' ? value.trim() : '';
-
-  return name ? name.toUpperCase() : 'AGENT';
+// Keeps development diagnostics out of production console output.
+const logDevelopmentWarning = (
+  message: string,
+  error?: unknown,
+): void => {
+  if (__DEV__) {
+    console.warn(
+      message,
+      error ?? '',
+    );
+  }
 };
 
-const formatPoints = (value: unknown): string => {
+// Safely converts an Explorer name into the field-interface format.
+const normaliseUsername = (
+  value: unknown,
+  fallback =
+    'EXPLORER',
+): string => {
   if (
-    typeof value !== 'number' ||
-    !Number.isFinite(value)
+    typeof value !==
+    'string'
   ) {
-    return '0';
+    return fallback;
   }
 
-  return value.toLocaleString();
+  const trimmed =
+    value.trim();
+
+  return trimmed
+    ? trimmed.toUpperCase()
+    : fallback;
+};
+
+// Protects the leaderboard from malformed point values.
+const normalisePoints = (
+  value: unknown,
+): number => {
+  if (
+    typeof value !==
+      'number' ||
+    !Number.isFinite(
+      value,
+    ) ||
+    value < 0
+  ) {
+    return 0;
+  }
+
+  return Math.floor(
+    value,
+  );
+};
+
+// Formats points consistently across the field interface.
+const formatPoints = (
+  points: number,
+): string =>
+  points.toLocaleString();
+
+// Uses the same rank thresholds as Dashboard.
+const getRankTitle = (
+  points: number,
+): string => {
+  if (
+    points >=
+    3000
+  ) {
+    return 'MASTER EXPLORER';
+  }
+
+  if (
+    points >=
+    1500
+  ) {
+    return 'TRAILBLAZER III';
+  }
+
+  if (
+    points >=
+    500
+  ) {
+    return 'PATHFINDER II';
+  }
+
+  return 'NOVICE SCOUT I';
+};
+
+// Provides readable podium labels without inventing additional ranks.
+const getPodiumLabel = (
+  rank: number,
+): string => {
+  switch (rank) {
+    case 1:
+      return 'FIRST';
+
+    case 2:
+      return 'SECOND';
+
+    case 3:
+      return 'THIRD';
+
+    default:
+      return `#${rank}`;
+  }
 };
 
 /* -------------------------------------------------------------------------- */
-/* Leaderboard Screen                                                         */
+/* Leaderboard                                                               */
 /* -------------------------------------------------------------------------- */
 
-export const LeaderboardScreen: React.FC<Props> = ({
-  onNavigate,
-}) => {
-  const insets = useSafeAreaInsets();
-  const { width, height } = useWindowDimensions();
+export const LeaderboardScreen:
+  React.FC<Props> = ({
+    onBack,
+    onNavigate,
+  }) => {
+    const {
+      width,
+      height,
+    } =
+      useWindowDimensions();
 
-  const isLandscape = width > height;
-  const currentTab: NavigationTab = 'LEADERBOARD';
+    const insets =
+      useSafeAreaInsets();
 
-  const currentUserId = auth?.currentUser?.uid ?? '';
+    const isLandscape =
+      width > height;
 
-  const [manifest, setManifest] = useState<ExplorerEntry[]>([]);
-  const [loadingManifest, setLoadingManifest] = useState(true);
-  const [manifestError, setManifestError] = useState('');
-  const [retryKey, setRetryKey] = useState(0);
+    const currentTab:
+      NavigationTab =
+      'LEADERBOARD';
 
-  /* ------------------------------------------------------------------------ */
-  /* Navigation                                                               */
-  /* ------------------------------------------------------------------------ */
+    const currentUser =
+      auth.currentUser;
 
-  /**
-   * All social actions are intentionally routed through SocialScreen.
-   *
-   * LeaderboardScreen does not own:
-   * - friendship state
-   * - nearby explorers
-   * - Telegram messages
-   * - friendship requests
-   * - Telegram modals
-   *
-   * This keeps the leaderboard focused exclusively on rankings.
-   */
-  const navigateToSocial = () => {
-    if (!onNavigate) {
-      return;
-    }
+    const currentUserId =
+      currentUser?.uid ??
+      '';
 
-    onNavigate('SOCIAL');
-  };
+    /* ---------------------------------------------------------------------- */
+    /* Firestore state                                                       */
+    /* ---------------------------------------------------------------------- */
 
-  const handleAddFriendPress = () => {
-    navigateToSocial();
-  };
+    const [
+      manifest,
+      setManifest,
+    ] =
+      useState<
+        ExplorerEntry[]
+      >([]);
 
-  const handleDispatchTelegramPress = () => {
-    navigateToSocial();
-  };
+    const [
+      currentUserProfile,
+      setCurrentUserProfile,
+    ] =
+      useState<UserDocument | null>(
+        null,
+      );
 
-  /* ------------------------------------------------------------------------ */
-  /* Firestore Leaderboard                                                    */
-  /* ------------------------------------------------------------------------ */
+    const [
+      loadingManifest,
+      setLoadingManifest,
+    ] =
+      useState(true);
 
-  useEffect(() => {
-    if (!db) {
-      setManifestError('Database connection unavailable.');
-      setLoadingManifest(false);
-      return;
-    }
+    const [
+      loadingProfile,
+      setLoadingProfile,
+    ] =
+      useState(true);
 
-    setLoadingManifest(true);
-    setManifestError('');
+    const [
+      manifestError,
+      setManifestError,
+    ] =
+      useState<
+        string | null
+      >(null);
 
-    const leaderboardQuery = query(
-      collection(db, 'users'),
-      orderBy('totalPoints', 'desc'),
-      limit(MAX_LEADERBOARD_ENTRIES),
-    );
+    const [
+      profileError,
+      setProfileError,
+    ] =
+      useState<
+        string | null
+      >(null);
 
-    const unsubscribe = onSnapshot(
-      leaderboardQuery,
-      (snapshot) => {
-        const entries: ExplorerEntry[] = snapshot.docs.map(
-          (docSnap, index) => {
-            const data = docSnap.data() as UserDocument;
+    const [
+      retryKey,
+      setRetryKey,
+    ] =
+      useState(0);
 
-            const isUser = docSnap.id === currentUserId;
+    /* ---------------------------------------------------------------------- */
+    /* Firestore subscriptions                                               */
+    /* ---------------------------------------------------------------------- */
 
-            const username = normaliseName(data.username);
+    useEffect(() => {
+      if (
+        !currentUserId
+      ) {
+        setManifest(
+          [],
+        );
 
-            return {
-              uid: docSnap.id,
-              rank: String(index + 1).padStart(2, '0'),
-              name: isUser
-                ? `YOU - ${username}`
-                : username,
-              points: formatPoints(data.totalPoints),
-              isUser,
-            };
+        setCurrentUserProfile(
+          null,
+        );
+
+        setLoadingManifest(
+          false,
+        );
+
+        setLoadingProfile(
+          false,
+        );
+
+        setManifestError(
+          'EXPLORER SESSION REQUIRED',
+        );
+
+        setProfileError(
+          'PROFILE UNAVAILABLE',
+        );
+
+        return;
+      }
+
+      setLoadingManifest(
+        true,
+      );
+
+      setLoadingProfile(
+        true,
+      );
+
+      setManifestError(
+        null,
+      );
+
+      setProfileError(
+        null,
+      );
+
+      /* -------------------------------------------------------------------- */
+      /* Top explorers                                                        */
+      /* -------------------------------------------------------------------- */
+
+      const leaderboardQuery =
+        query(
+          collection(
+            db,
+            'users',
+          ),
+
+          orderBy(
+            'totalPoints',
+            'desc',
+          ),
+
+          limit(
+            MAX_LEADERBOARD_ENTRIES,
+          ),
+        );
+
+      const unsubscribeLeaderboard =
+        onSnapshot(
+          leaderboardQuery,
+
+          (
+            snapshot,
+          ) => {
+            const entries:
+              ExplorerEntry[] =
+              snapshot.docs.map(
+                (
+                  documentSnapshot,
+                  index,
+                ) => {
+                  const data =
+                    documentSnapshot.data() as
+                      UserDocument;
+
+                  return {
+                    uid:
+                      documentSnapshot.id,
+
+                    rank:
+                      index + 1,
+
+                    username:
+                      normaliseUsername(
+                        data.username,
+                      ),
+
+                    points:
+                      normalisePoints(
+                        data.totalPoints,
+                      ),
+
+                    isCurrentUser:
+                      documentSnapshot.id ===
+                      currentUserId,
+                  };
+                },
+              );
+
+            setManifest(
+              entries,
+            );
+
+            setManifestError(
+              null,
+            );
+
+            setLoadingManifest(
+              false,
+            );
+          },
+
+          (
+            error,
+          ) => {
+            logDevelopmentWarning(
+              '[Treasi Leaderboard] Manifest subscription failed:',
+              error,
+            );
+
+            /*
+             * Existing data remains visible if the live listener temporarily
+             * fails instead of replacing the screen with mock information.
+             */
+            setManifestError(
+              'EXPLORER MANIFEST SYNC OFFLINE',
+            );
+
+            setLoadingManifest(
+              false,
+            );
           },
         );
 
-        setManifest(entries);
-        setLoadingManifest(false);
-      },
-      () => {
-        setManifestError(
-          'Unable to sync the explorer manifest. Please try again.',
+      /* -------------------------------------------------------------------- */
+      /* Current Explorer profile                                             */
+      /* -------------------------------------------------------------------- */
+
+      const userReference =
+        doc(
+          db,
+          'users',
+          currentUserId,
         );
-        setLoadingManifest(false);
-      },
-    );
 
-    return unsubscribe;
-  }, [currentUserId, retryKey]);
+      const unsubscribeProfile =
+        onSnapshot(
+          userReference,
 
-  /* ------------------------------------------------------------------------ */
-  /* Render                                                                   */
-  /* ------------------------------------------------------------------------ */
+          (
+            snapshot,
+          ) => {
+            if (
+              snapshot.exists()
+            ) {
+              setCurrentUserProfile(
+                snapshot.data() as
+                  UserDocument,
+              );
 
-  return (
-    <View
-      style={[
-        styles.screen,
-        {
-          paddingLeft: Math.max(insets.left, 12),
-          paddingRight: Math.max(insets.right, 12),
-          paddingTop: Math.max(insets.top, 8),
-          paddingBottom: Math.max(insets.bottom, 8),
+              setProfileError(
+                null,
+              );
+            } else {
+              setCurrentUserProfile(
+                null,
+              );
+
+              setProfileError(
+                'EXPLORER PROFILE NOT FOUND',
+              );
+            }
+
+            setLoadingProfile(
+              false,
+            );
+          },
+
+          (
+            error,
+          ) => {
+            logDevelopmentWarning(
+              '[Treasi Leaderboard] Profile subscription failed:',
+              error,
+            );
+
+            setProfileError(
+              'EXPLORER PROFILE SYNC OFFLINE',
+            );
+
+            setLoadingProfile(
+              false,
+            );
+          },
+        );
+
+      return () => {
+        unsubscribeLeaderboard();
+        unsubscribeProfile();
+      };
+    }, [
+      currentUserId,
+      retryKey,
+    ]);
+
+    /* ---------------------------------------------------------------------- */
+    /* Derived leaderboard data                                              */
+    /* ---------------------------------------------------------------------- */
+
+    const topThree =
+      useMemo(
+        () =>
+          manifest.slice(
+            0,
+            3,
+          ),
+        [
+          manifest,
+        ],
+      );
+
+    const currentManifestEntry =
+      useMemo(
+        () =>
+          manifest.find(
+            (
+              entry,
+            ) =>
+              entry.uid ===
+              currentUserId,
+          ) ??
+          null,
+        [
+          currentUserId,
+          manifest,
+        ],
+      );
+
+    const currentPoints =
+      normalisePoints(
+        currentUserProfile
+          ?.totalPoints ??
+          currentManifestEntry
+            ?.points ??
+          0,
+      );
+
+    const currentUsername =
+      normaliseUsername(
+        currentUserProfile
+          ?.username ??
+          currentManifestEntry
+            ?.username ??
+          currentUser
+            ?.displayName ??
+          currentUser
+            ?.email
+            ?.split('@')[0],
+        'EXPLORER',
+      );
+
+    const currentRankText =
+      useMemo(
+        () => {
+          if (
+            loadingManifest
+          ) {
+            return 'CHECKING';
+          }
+
+          if (
+            currentManifestEntry
+          ) {
+            return `#${currentManifestEntry.rank}`;
+          }
+
+          if (
+            manifest.length >=
+            MAX_LEADERBOARD_ENTRIES
+          ) {
+            return `OUTSIDE TOP ${MAX_LEADERBOARD_ENTRIES}`;
+          }
+
+          return 'NOT RANKED';
         },
-      ]}
-    >
-      <View style={styles.content}>
-        {/* ---------------------------------------------------------------- */}
-        {/* Header                                                           */}
-        {/* ---------------------------------------------------------------- */}
+        [
+          currentManifestEntry,
+          loadingManifest,
+          manifest.length,
+        ],
+      );
 
-        <View style={styles.ledgerHeader}>
-          <StarIcon
-            color="#A64B2A"
-            size={14}
-          />
+    const syncErrorText =
+      useMemo(
+        () =>
+          [
+            manifestError,
+            profileError,
+          ]
+            .filter(
+              (
+                value,
+              ): value is string =>
+                Boolean(
+                  value,
+                ),
+            )
+            .join(
+              ' · ',
+            ),
+        [
+          manifestError,
+          profileError,
+        ],
+      );
 
-          <Text style={styles.header}>
-            FIELD MANIFEST
-          </Text>
+    /* ---------------------------------------------------------------------- */
+    /* Navigation                                                            */
+    /* ---------------------------------------------------------------------- */
 
-          <StarIcon
-            color="#A64B2A"
-            size={14}
-          />
-        </View>
+    const navigateToSocial =
+      useCallback(
+        (): void => {
+          onNavigate?.(
+            'SOCIAL',
+          );
+        },
+        [
+          onNavigate,
+        ],
+      );
 
-        <Text style={styles.subHeader}>
-          EXCAVATION POINTS LEDGER · SHASTA SECTOR
-        </Text>
+    const handleReturnToMap =
+      useCallback(
+        (): void => {
+          if (onBack) {
+            onBack();
+            return;
+          }
 
-        {/* ---------------------------------------------------------------- */}
-        {/* Table Header                                                     */}
-        {/* ---------------------------------------------------------------- */}
+          onNavigate?.(
+            'MAP',
+          );
+        },
+        [
+          onBack,
+          onNavigate,
+        ],
+      );
 
-        <View style={styles.tableHeader}>
-          <Text
-            style={[
-              styles.colHeader,
-              styles.rankColumn,
-            ]}
-          >
-            NO.
-          </Text>
+    /* ---------------------------------------------------------------------- */
+    /* Retry                                                                 */
+    /* ---------------------------------------------------------------------- */
 
-          <Text
-            style={[
-              styles.colHeader,
-              styles.nameColumn,
-            ]}
-          >
-            EXPLORER
-          </Text>
+    const handleRetry =
+      useCallback(
+        (): void => {
+          setManifestError(
+            null,
+          );
 
-          <Text
-            style={[
-              styles.colHeader,
-              styles.pointsColumn,
-            ]}
-          >
-            POINTS
-          </Text>
-        </View>
+          setProfileError(
+            null,
+          );
 
-        {/* ---------------------------------------------------------------- */}
-        {/* Leaderboard                                                      */}
-        {/* ---------------------------------------------------------------- */}
+          setLoadingManifest(
+            true,
+          );
 
-        {loadingManifest ? (
-          <View style={styles.loadingBox}>
-            <ActivityIndicator
-              size="small"
-              color="#2A2420"
-            />
+          setLoadingProfile(
+            true,
+          );
 
-            <Text style={styles.loadingText}>
-              SYNCING MANIFEST DATA...
-            </Text>
-          </View>
-        ) : manifestError ? (
-          <View style={styles.loadingBox}>
-            <Text style={styles.errorText}>
-              {manifestError}
-            </Text>
+          setRetryKey(
+            (
+              current,
+            ) =>
+              current + 1,
+          );
 
-            <TouchableOpacity
-              style={styles.retryButton}
-              onPress={() => {
-                setManifestError('');
-                setLoadingManifest(true);
-                setRetryKey((value) => value + 1);
-              }}
-              accessibilityRole="button"
-              accessibilityLabel="Retry leaderboard sync"
-            >
-              <Text style={styles.retryText}>
-                RETRY
-              </Text>
-            </TouchableOpacity>
-          </View>
-        ) : manifest.length === 0 ? (
-          <View style={styles.loadingBox}>
-            <Text style={styles.emptyText}>
-              NO EXPLORERS IN THE MANIFEST
-            </Text>
-          </View>
-        ) : (
-          <ScrollView
-            style={styles.leaderboardScroll}
-            contentContainerStyle={styles.ledgerList}
-            showsVerticalScrollIndicator={false}
-            accessibilityLabel="Explorer leaderboard"
-          >
-            {manifest.map((item) => (
-              <View
-                key={item.uid}
-                style={[
-                  styles.rowContainer,
-                  item.isUser && styles.rowHighlight,
-                ]}
-                accessible
-                accessibilityLabel={`Rank ${Number(
-                  item.rank,
-                )}. ${item.name}. ${item.points} points.`}
-              >
-                <Text
-                  style={[
-                    styles.rowText,
-                    styles.rankColumn,
-                    item.isUser &&
-                      styles.rowHighlightText,
-                  ]}
-                >
-                  {item.rank}
-                </Text>
+          AccessibilityInfo
+            .announceForAccessibility(
+              'Retrying Explorer manifest synchronisation.',
+            );
+        },
+        [],
+      );
 
-                <Text
-                  style={[
-                    styles.rowText,
-                    styles.nameColumn,
-                    item.isUser &&
-                      styles.rowHighlightText,
-                  ]}
-                  numberOfLines={1}
-                  ellipsizeMode="tail"
-                >
-                  {item.name}
-                </Text>
+    /* ---------------------------------------------------------------------- */
+    /* Render                                                                */
+    /* ---------------------------------------------------------------------- */
 
-                <View style={styles.dotLeaderContainer}>
-                  <Text
-                    style={styles.dotLeader}
-                    numberOfLines={1}
-                  >
-                    ................................
-                  </Text>
-                </View>
+    return (
+      <View
+        style={[
+          styles.screen,
+          {
+            paddingLeft:
+              Math.max(
+                insets.left,
+                12,
+              ),
 
-                <Text
-                  style={[
-                    styles.rowText,
-                    styles.pointsColumn,
-                    item.isUser &&
-                      styles.rowHighlightText,
-                  ]}
-                >
-                  {item.points}
-                </Text>
-              </View>
-            ))}
-          </ScrollView>
-        )}
+            paddingRight:
+              Math.max(
+                insets.right,
+                12,
+              ),
 
-        {/* ---------------------------------------------------------------- */}
-        {/* Social Actions                                                   */}
-        {/* ---------------------------------------------------------------- */}
+            paddingTop:
+              Math.max(
+                insets.top,
+                10,
+              ),
 
+            paddingBottom:
+              Math.max(
+                insets.bottom,
+                10,
+              ),
+          },
+        ]}
+      >
         <View
           style={[
-            styles.socialActions,
-            isLandscape
-              ? styles.socialActionsLandscape
-              : styles.socialActionsPortrait,
+            styles.layout,
+
+            {
+              flexDirection:
+                isLandscape
+                  ? 'row'
+                  : 'column',
+            },
           ]}
         >
-          {/* ADD FRIEND */}
-          <TouchableOpacity
-            activeOpacity={0.85}
-            style={styles.socialActionButton}
-            onPress={handleAddFriendPress}
-            accessibilityRole="button"
-            accessibilityLabel="Add friend"
-            accessibilityHint="Opens the Social screen where you can add friends"
-          >
-            <UserPlusIcon
-              color="#F3ECD8"
-              size={16}
-            />
+          {/* ================================================================ */}
+          {/* 60% — EXPLORER MANIFEST                                         */}
+          {/* ================================================================ */}
 
-            <Text style={styles.socialActionText}>
-              ADD FRIEND
-            </Text>
-          </TouchableOpacity>
-
-          {/* DISPATCH TELEGRAM */}
-          <TouchableOpacity
-            activeOpacity={0.85}
+          <View
             style={[
-              styles.socialActionButton,
-              styles.telegramActionButton,
-            ]}
-            onPress={handleDispatchTelegramPress}
-            accessibilityRole="button"
-            accessibilityLabel="Dispatch Telegram"
-            accessibilityHint="Opens the Social screen where you can dispatch a Telegram"
-          >
-            <SendIcon
-              color="#F3ECD8"
-              size={16}
-            />
+              styles.manifestPanel,
 
-            <Text style={styles.socialActionText}>
-              DISPATCH TELEGRAM
-            </Text>
-          </TouchableOpacity>
+              isLandscape
+                ? styles.manifestPanelLandscape
+                : styles.panelPortrait,
+            ]}
+          >
+            {/* -------------------------------------------------------------- */}
+            {/* Header                                                         */}
+            {/* -------------------------------------------------------------- */}
+
+            <View
+              style={
+                styles.manifestHeader
+              }
+            >
+              <View
+                style={
+                  styles.manifestTitleRow
+                }
+              >
+                <MaterialCommunityIcons
+                  accessible={
+                    false
+                  }
+                  importantForAccessibility="no"
+                  name="star-four-points"
+                  size={16}
+                  color={
+                    COLOURS.rust700
+                  }
+                />
+
+                <Text
+                  accessibilityRole="header"
+                  maxFontSizeMultiplier={
+                    1.6
+                  }
+                  style={
+                    styles.manifestTitle
+                  }
+                >
+                  FIELD MANIFEST
+                </Text>
+
+                <MaterialCommunityIcons
+                  accessible={
+                    false
+                  }
+                  importantForAccessibility="no"
+                  name="star-four-points"
+                  size={16}
+                  color={
+                    COLOURS.rust700
+                  }
+                />
+              </View>
+
+              <Text
+                maxFontSizeMultiplier={
+                  1.5
+                }
+                style={
+                  styles.manifestSubtitle
+                }
+              >
+                EXPLORER POINTS LEDGER · TOP{' '}
+                {
+                  MAX_LEADERBOARD_ENTRIES
+                }
+              </Text>
+            </View>
+
+            {/* -------------------------------------------------------------- */}
+            {/* Sync warning                                                   */}
+            {/* -------------------------------------------------------------- */}
+
+            {manifestError ? (
+              <View
+                accessible
+                accessibilityRole="alert"
+                accessibilityLiveRegion="polite"
+                style={
+                  styles.syncWarning
+                }
+              >
+                <Ionicons
+                  accessible={
+                    false
+                  }
+                  importantForAccessibility="no"
+                  name="cloud-offline-outline"
+                  size={17}
+                  color={
+                    COLOURS.parchment100
+                  }
+                />
+
+                <Text
+                  maxFontSizeMultiplier={
+                    1.6
+                  }
+                  style={
+                    styles.syncWarningText
+                  }
+                >
+                  {
+                    manifestError
+                  }
+                </Text>
+
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Retry leaderboard synchronisation"
+                  hitSlop={4}
+                  onPress={
+                    handleRetry
+                  }
+                  style={({
+                    pressed,
+                  }) => [
+                    styles.smallRetryButton,
+
+                    pressed &&
+                      styles.darkButtonPressed,
+                  ]}
+                >
+                  <Text
+                    style={
+                      styles.smallRetryText
+                    }
+                  >
+                    RETRY
+                  </Text>
+                </Pressable>
+              </View>
+            ) : null}
+
+            {/* -------------------------------------------------------------- */}
+            {/* Table header                                                   */}
+            {/* -------------------------------------------------------------- */}
+
+            <View
+              accessible={
+                false
+              }
+              importantForAccessibility="no-hide-descendants"
+              style={
+                styles.tableHeader
+              }
+            >
+              <Text
+                style={[
+                  styles.columnHeader,
+                  styles.rankColumn,
+                ]}
+              >
+                NO.
+              </Text>
+
+              <Text
+                style={[
+                  styles.columnHeader,
+                  styles.nameColumn,
+                ]}
+              >
+                EXPLORER
+              </Text>
+
+              <Text
+                style={[
+                  styles.columnHeader,
+                  styles.pointsColumn,
+                ]}
+              >
+                POINTS
+              </Text>
+            </View>
+
+            {/* -------------------------------------------------------------- */}
+            {/* Manifest                                                       */}
+            {/* -------------------------------------------------------------- */}
+
+            {loadingManifest &&
+            manifest.length ===
+              0 ? (
+              <View
+                accessible
+                accessibilityRole="progressbar"
+                accessibilityLabel="Loading Explorer leaderboard"
+                style={
+                  styles.loadingBox
+                }
+              >
+                <ActivityIndicator
+                  size="small"
+                  color={
+                    COLOURS.rust700
+                  }
+                />
+
+                <Text
+                  style={
+                    styles.loadingText
+                  }
+                >
+                  SYNCHRONISING MANIFEST…
+                </Text>
+              </View>
+            ) : manifest.length ===
+              0 ? (
+              <View
+                accessible
+                accessibilityLabel="No Explorers are currently available in the leaderboard."
+                style={
+                  styles.loadingBox
+                }
+              >
+                <MaterialCommunityIcons
+                  accessible={
+                    false
+                  }
+                  importantForAccessibility="no"
+                  name="account-search-outline"
+                  size={28}
+                  color={
+                    COLOURS.bronze700
+                  }
+                />
+
+                <Text
+                  style={
+                    styles.emptyText
+                  }
+                >
+                  NO EXPLORERS IN THE MANIFEST
+                </Text>
+
+                {manifestError ? (
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Retry leaderboard synchronisation"
+                    onPress={
+                      handleRetry
+                    }
+                    style={({
+                      pressed,
+                    }) => [
+                      styles.retryButton,
+
+                      pressed &&
+                        styles.primaryButtonPressed,
+                    ]}
+                  >
+                    <Text
+                      style={
+                        styles.retryButtonText
+                      }
+                    >
+                      RETRY MANIFEST
+                    </Text>
+                  </Pressable>
+                ) : null}
+              </View>
+            ) : (
+              <ScrollView
+                accessibilityLabel="Explorer leaderboard"
+                style={
+                  styles.leaderboardScroll
+                }
+                contentContainerStyle={
+                  styles.ledgerList
+                }
+                showsVerticalScrollIndicator={
+                  false
+                }
+              >
+                {manifest.map(
+                  (
+                    entry,
+                  ) => (
+                    <View
+                      key={
+                        entry.uid
+                      }
+                      accessible
+                      accessibilityLabel={`Rank ${entry.rank}. ${
+                        entry.isCurrentUser
+                          ? 'You, '
+                          : ''
+                      }${entry.username}. ${formatPoints(
+                        entry.points,
+                      )} points.`}
+                      style={[
+                        styles.rowContainer,
+
+                        entry.isCurrentUser &&
+                          styles.currentUserRow,
+                      ]}
+                    >
+                      <View
+                        accessible={
+                          false
+                        }
+                        importantForAccessibility="no-hide-descendants"
+                        style={
+                          styles.rankColumn
+                        }
+                      >
+                        <View
+                          style={[
+                            styles.rankBadge,
+
+                            entry.rank ===
+                              1 &&
+                              styles.rankBadgeFirst,
+
+                            entry.rank ===
+                              2 &&
+                              styles.rankBadgeSecond,
+
+                            entry.rank ===
+                              3 &&
+                              styles.rankBadgeThird,
+
+                            entry.isCurrentUser &&
+                              styles.currentUserRankBadge,
+                          ]}
+                        >
+                          <Text
+                            style={[
+                              styles.rankText,
+
+                              entry.isCurrentUser &&
+                                styles.currentUserRankText,
+                            ]}
+                          >
+                            {String(
+                              entry.rank,
+                            ).padStart(
+                              2,
+                              '0',
+                            )}
+                          </Text>
+                        </View>
+                      </View>
+
+                      <View
+                        accessible={
+                          false
+                        }
+                        importantForAccessibility="no-hide-descendants"
+                        style={
+                          styles.nameColumn
+                        }
+                      >
+                        <Text
+                          numberOfLines={
+                            1
+                          }
+                          ellipsizeMode="tail"
+                          style={[
+                            styles.explorerName,
+
+                            entry.isCurrentUser &&
+                              styles.currentUserText,
+                          ]}
+                        >
+                          {entry.isCurrentUser
+                            ? `YOU · ${entry.username}`
+                            : entry.username}
+                        </Text>
+
+                        <Text
+                          style={
+                            styles.explorerRankTitle
+                          }
+                        >
+                          {getRankTitle(
+                            entry.points,
+                          )}
+                        </Text>
+                      </View>
+
+                      <Text
+                        accessible={
+                          false
+                        }
+                        importantForAccessibility="no"
+                        style={[
+                          styles.pointsValue,
+                          styles.pointsColumn,
+
+                          entry.isCurrentUser &&
+                            styles.currentUserText,
+                        ]}
+                      >
+                        {formatPoints(
+                          entry.points,
+                        )}
+                      </Text>
+                    </View>
+                  ),
+                )}
+              </ScrollView>
+            )}
+
+            {/* -------------------------------------------------------------- */}
+            {/* Ledger note                                                    */}
+            {/* -------------------------------------------------------------- */}
+
+            <View
+              style={
+                styles.manifestFooter
+              }
+            >
+              <Text
+                maxFontSizeMultiplier={
+                  1.5
+                }
+                style={
+                  styles.manifestFooterText
+                }
+              >
+                RANKINGS USE CURRENT FIRESTORE TOTAL POINTS
+              </Text>
+
+              <Text
+                maxFontSizeMultiplier={
+                  1.5
+                }
+                style={
+                  styles.manifestFooterCount
+                }
+              >
+                {
+                  manifest.length
+                }
+                /
+                {
+                  MAX_LEADERBOARD_ENTRIES
+                }
+              </Text>
+            </View>
+          </View>
+
+          {/* ================================================================ */}
+          {/* 40% — COMMAND CONSOLE                                           */}
+          {/* ================================================================ */}
+
+          <View
+            style={[
+              styles.commandPanel,
+
+              isLandscape
+                ? styles.commandPanelLandscape
+                : styles.panelPortrait,
+            ]}
+          >
+            <ScrollView
+              style={
+                styles.commandScroll
+              }
+              contentContainerStyle={
+                styles.commandScrollContent
+              }
+              showsVerticalScrollIndicator={
+                false
+              }
+            >
+              {/* ------------------------------------------------------------ */}
+              {/* Current Explorer                                             */}
+              {/* ------------------------------------------------------------ */}
+
+              <View
+                style={
+                  styles.sectionHeaderRow
+                }
+              >
+                <Ionicons
+                  accessible={
+                    false
+                  }
+                  importantForAccessibility="no"
+                  name="person-circle-outline"
+                  size={17}
+                  color={
+                    COLOURS.bronze400
+                  }
+                />
+
+                <Text
+                  accessibilityRole="header"
+                  style={
+                    styles.sectionTitle
+                  }
+                >
+                  YOUR FIELD RECORD
+                </Text>
+              </View>
+
+              {loadingProfile ? (
+                <View
+                  accessible
+                  accessibilityRole="progressbar"
+                  accessibilityLabel="Loading your Explorer field record"
+                  style={
+                    styles.profileLoadingCard
+                  }
+                >
+                  <ActivityIndicator
+                    size="small"
+                    color={
+                      COLOURS.bronze400
+                    }
+                  />
+
+                  <Text
+                    style={
+                      styles.profileLoadingText
+                    }
+                  >
+                    CHECKING RECORD…
+                  </Text>
+                </View>
+              ) : (
+                <View
+                  accessible
+                  accessibilityLabel={`${currentUsername}. ${formatPoints(
+                    currentPoints,
+                  )} points. ${getRankTitle(
+                    currentPoints,
+                  )}. Leaderboard position ${currentRankText}.`}
+                  style={
+                    styles.currentRecordCard
+                  }
+                >
+                  <View
+                    accessible={
+                      false
+                    }
+                    importantForAccessibility="no-hide-descendants"
+                    style={
+                      styles.currentRecordTopRow
+                    }
+                  >
+                    <View
+                      style={
+                        styles.currentRecordIdentity
+                      }
+                    >
+                      <Text
+                        numberOfLines={
+                          1
+                        }
+                        style={
+                          styles.currentUsername
+                        }
+                      >
+                        {
+                          currentUsername
+                        }
+                      </Text>
+
+                      <Text
+                        style={
+                          styles.currentRankTitle
+                        }
+                      >
+                        {getRankTitle(
+                          currentPoints,
+                        )}
+                      </Text>
+                    </View>
+
+                    <View
+                      style={
+                        styles.currentPositionBadge
+                      }
+                    >
+                      <Text
+                        style={
+                          styles.currentPositionLabel
+                        }
+                      >
+                        POSITION
+                      </Text>
+
+                      <Text
+                        numberOfLines={
+                          2
+                        }
+                        style={
+                          styles.currentPositionValue
+                        }
+                      >
+                        {
+                          currentRankText
+                        }
+                      </Text>
+                    </View>
+                  </View>
+
+                  <View
+                    accessible={
+                      false
+                    }
+                    importantForAccessibility="no-hide-descendants"
+                    style={
+                      styles.currentPointsRow
+                    }
+                  >
+                    <Text
+                      style={
+                        styles.currentPointsValue
+                      }
+                    >
+                      {formatPoints(
+                        currentPoints,
+                      )}
+                    </Text>
+
+                    <Text
+                      style={
+                        styles.currentPointsLabel
+                      }
+                    >
+                      PTS
+                    </Text>
+                  </View>
+
+                  {profileError ? (
+                    <Text
+                      accessibilityRole="alert"
+                      style={
+                        styles.profileErrorText
+                      }
+                    >
+                      {
+                        profileError
+                      }
+                    </Text>
+                  ) : null}
+                </View>
+              )}
+
+              {/* ------------------------------------------------------------ */}
+              {/* Podium                                                       */}
+              {/* ------------------------------------------------------------ */}
+
+              <View
+                style={[
+                  styles.sectionHeaderRow,
+                  styles.sectionSpacing,
+                ]}
+              >
+                <MaterialCommunityIcons
+                  accessible={
+                    false
+                  }
+                  importantForAccessibility="no"
+                  name="podium"
+                  size={17}
+                  color={
+                    COLOURS.bronze400
+                  }
+                />
+
+                <Text
+                  accessibilityRole="header"
+                  style={
+                    styles.sectionTitle
+                  }
+                >
+                  LEADING EXPLORERS
+                </Text>
+              </View>
+
+              <View
+                style={
+                  styles.podiumList
+                }
+              >
+                {topThree.length >
+                0 ? (
+                  topThree.map(
+                    (
+                      entry,
+                    ) => (
+                      <View
+                        key={
+                          entry.uid
+                        }
+                        accessible
+                        accessibilityLabel={`${getPodiumLabel(
+                          entry.rank,
+                        )} place. ${entry.username}. ${formatPoints(
+                          entry.points,
+                        )} points.`}
+                        style={[
+                          styles.podiumCard,
+
+                          entry.rank ===
+                            1 &&
+                            styles.podiumCardFirst,
+
+                          entry.isCurrentUser &&
+                            styles.podiumCardCurrent,
+                        ]}
+                      >
+                        <View
+                          accessible={
+                            false
+                          }
+                          importantForAccessibility="no-hide-descendants"
+                          style={[
+                            styles.podiumRankCircle,
+
+                            entry.rank ===
+                              1 &&
+                              styles.podiumRankCircleFirst,
+                          ]}
+                        >
+                          <Text
+                            style={
+                              styles.podiumRankText
+                            }
+                          >
+                            {
+                              entry.rank
+                            }
+                          </Text>
+                        </View>
+
+                        <View
+                          accessible={
+                            false
+                          }
+                          importantForAccessibility="no-hide-descendants"
+                          style={
+                            styles.podiumIdentity
+                          }
+                        >
+                          <Text
+                            numberOfLines={
+                              1
+                            }
+                            style={
+                              styles.podiumName
+                            }
+                          >
+                            {
+                              entry.username
+                            }
+                          </Text>
+
+                          <Text
+                            style={
+                              styles.podiumLabel
+                            }
+                          >
+                            {getPodiumLabel(
+                              entry.rank,
+                            )}
+                          </Text>
+                        </View>
+
+                        <Text
+                          accessible={
+                            false
+                          }
+                          importantForAccessibility="no"
+                          style={
+                            styles.podiumPoints
+                          }
+                        >
+                          {formatPoints(
+                            entry.points,
+                          )}
+                        </Text>
+                      </View>
+                    ),
+                  )
+                ) : (
+                  <View
+                    style={
+                      styles.emptyPodiumCard
+                    }
+                  >
+                    <Text
+                      style={
+                        styles.emptyPodiumText
+                      }
+                    >
+                      LEADERS UNAVAILABLE
+                    </Text>
+                  </View>
+                )}
+              </View>
+
+              {/* ------------------------------------------------------------ */}
+              {/* Social actions                                               */}
+              {/* ------------------------------------------------------------ */}
+
+              <View
+                style={[
+                  styles.sectionHeaderRow,
+                  styles.sectionSpacing,
+                ]}
+              >
+                <Ionicons
+                  accessible={
+                    false
+                  }
+                  importantForAccessibility="no"
+                  name="people-outline"
+                  size={17}
+                  color={
+                    COLOURS.bronze400
+                  }
+                />
+
+                <Text
+                  accessibilityRole="header"
+                  style={
+                    styles.sectionTitle
+                  }
+                >
+                  EXPLORER NETWORK
+                </Text>
+              </View>
+
+              <View
+                style={
+                  styles.socialActions
+                }
+              >
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Add friend"
+                  accessibilityHint="Opens the Social screen where you can search for and add Explorers."
+                  accessibilityState={{
+                    disabled:
+                      !onNavigate,
+                  }}
+                  disabled={
+                    !onNavigate
+                  }
+                  onPress={
+                    navigateToSocial
+                  }
+                  style={({
+                    pressed,
+                  }) => [
+                    styles.socialButton,
+
+                    !onNavigate &&
+                      styles.disabledButton,
+
+                    pressed &&
+                      onNavigate &&
+                      styles.darkButtonPressed,
+                  ]}
+                >
+                  <Ionicons
+                    accessible={
+                      false
+                    }
+                    importantForAccessibility="no"
+                    name="person-add-outline"
+                    size={18}
+                    color={
+                      COLOURS.parchment100
+                    }
+                  />
+
+                  <Text
+                    style={
+                      styles.socialButtonText
+                    }
+                  >
+                    ADD FRIEND
+                  </Text>
+                </Pressable>
+
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Dispatch Telegram"
+                  accessibilityHint="Opens the Social screen where you can send a Telegram to another Explorer."
+                  accessibilityState={{
+                    disabled:
+                      !onNavigate,
+                  }}
+                  disabled={
+                    !onNavigate
+                  }
+                  onPress={
+                    navigateToSocial
+                  }
+                  style={({
+                    pressed,
+                  }) => [
+                    styles.socialButton,
+                    styles.telegramButton,
+
+                    !onNavigate &&
+                      styles.disabledButton,
+
+                    pressed &&
+                      onNavigate &&
+                      styles.primaryButtonPressed,
+                  ]}
+                >
+                  <Ionicons
+                    accessible={
+                      false
+                    }
+                    importantForAccessibility="no"
+                    name="paper-plane-outline"
+                    size={18}
+                    color={
+                      COLOURS.parchment100
+                    }
+                  />
+
+                  <Text
+                    style={
+                      styles.socialButtonText
+                    }
+                  >
+                    DISPATCH TELEGRAM
+                  </Text>
+                </Pressable>
+              </View>
+
+              {/* ------------------------------------------------------------ */}
+              {/* Return to map                                                */}
+              {/* ------------------------------------------------------------ */}
+
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Return to field map"
+                accessibilityHint="Returns to the Treasi Dashboard."
+                onPress={
+                  handleReturnToMap
+                }
+                style={({
+                  pressed,
+                }) => [
+                  styles.returnButton,
+
+                  pressed &&
+                    styles.lightButtonPressed,
+                ]}
+              >
+                <Ionicons
+                  accessible={
+                    false
+                  }
+                  importantForAccessibility="no"
+                  name="map-outline"
+                  size={17}
+                  color={
+                    COLOURS.bronze400
+                  }
+                />
+
+                <Text
+                  style={
+                    styles.returnButtonText
+                  }
+                >
+                  RETURN TO FIELD MAP
+                </Text>
+              </Pressable>
+
+              {syncErrorText &&
+              !manifestError ? (
+                <View
+                  accessible
+                  accessibilityRole="alert"
+                  style={
+                    styles.commandWarning
+                  }
+                >
+                  <Text
+                    style={
+                      styles.commandWarningText
+                    }
+                  >
+                    {
+                      syncErrorText
+                    }
+                  </Text>
+
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Retry Explorer data synchronisation"
+                    onPress={
+                      handleRetry
+                    }
+                    style={({
+                      pressed,
+                    }) => [
+                      styles.commandRetryButton,
+
+                      pressed &&
+                        styles.darkButtonPressed,
+                    ]}
+                  >
+                    <Text
+                      style={
+                        styles.commandRetryText
+                      }
+                    >
+                      RETRY
+                    </Text>
+                  </Pressable>
+                </View>
+              ) : null}
+            </ScrollView>
+
+            {/* -------------------------------------------------------------- */}
+            {/* Navigation                                                     */}
+            {/* -------------------------------------------------------------- */}
+
+            <FieldNavBar
+              currentTab={
+                currentTab
+              }
+              onNavigate={
+                onNavigate
+              }
+            />
+          </View>
         </View>
       </View>
+    );
+  };
 
-      {/* ------------------------------------------------------------------ */}
-      {/* Navigation                                                         */}
-      {/* ------------------------------------------------------------------ */}
-
-      <FieldNavBar
-        currentTab={currentTab}
-        onNavigate={onNavigate}
-      />
-    </View>
-  );
-};
+export default LeaderboardScreen;
 
 /* -------------------------------------------------------------------------- */
 /* Styles                                                                     */
 /* -------------------------------------------------------------------------- */
 
-const styles = StyleSheet.create({
-  screen: {
-    flex: 1,
-    backgroundColor: '#E8DCC0',
-  },
+const styles =
+  StyleSheet.create({
+    screen: {
+      flex: 1,
+      backgroundColor:
+        COLOURS.forest800,
+    },
 
-  content: {
-    flex: 1,
-    minHeight: 0,
-  },
+    layout: {
+      flex: 1,
+      minHeight: 0,
+      gap: 12,
+    },
 
-  /* Header */
+    panelPortrait: {
+      width: '100%',
+    },
 
-  ledgerHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-    paddingTop: 4,
-  },
+    /* ---------------------------------------------------------------------- */
+    /* 60% manifest panel                                                    */
+    /* ---------------------------------------------------------------------- */
 
-  header: {
-    color: '#2A2420',
-    fontWeight: 'bold',
-    fontSize: 18,
-    letterSpacing: 2,
-  },
+    manifestPanel: {
+      minWidth: 0,
+      minHeight: 0,
+      backgroundColor:
+        COLOURS.parchment200,
+      borderWidth: 2,
+      borderColor:
+        COLOURS.bronze600,
+      borderRadius: 7,
+      padding: 14,
+    },
 
-  subHeader: {
-    color: '#8A7B66',
-    fontSize: 9,
-    fontWeight: '700',
-    textAlign: 'center',
-    letterSpacing: 1.5,
-    marginTop: 2,
-    marginBottom: 10,
-  },
+    manifestPanelLandscape: {
+      flex: 0.6,
+    },
 
-  /* Table */
+    manifestHeader: {
+      paddingBottom: 10,
+      borderBottomWidth: 1,
+      borderBottomColor:
+        COLOURS.bronze600,
+    },
 
-  tableHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    borderBottomWidth: 1.5,
-    borderColor: '#2A2420',
-    paddingBottom: 6,
-    marginBottom: 6,
-  },
+    manifestTitleRow: {
+      flexDirection:
+        'row',
+      alignItems:
+        'center',
+      justifyContent:
+        'center',
+      gap: 8,
+    },
 
-  colHeader: {
-    color: '#2A2420',
-    fontSize: 10,
-    fontWeight: 'bold',
-    letterSpacing: 1,
-  },
+    manifestTitle: {
+      color:
+        COLOURS.ink900,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 18,
+      lineHeight: 24,
+      fontWeight:
+        '800',
+      letterSpacing: 1.8,
+      textAlign:
+        'center',
+    },
 
-  rankColumn: {
-    flex: 0.15,
-  },
+    manifestSubtitle: {
+      color:
+        COLOURS.bronze700,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 9.5,
+      lineHeight: 14,
+      fontWeight:
+        '700',
+      letterSpacing: 1,
+      textAlign:
+        'center',
+      marginTop: 4,
+    },
 
-  nameColumn: {
-    flex: 0.45,
-    minWidth: 0,
-  },
+    /* ---------------------------------------------------------------------- */
+    /* Sync warning                                                          */
+    /* ---------------------------------------------------------------------- */
 
-  pointsColumn: {
-    flex: 0.25,
-    textAlign: 'right',
-  },
+    syncWarning: {
+      minHeight: 52,
+      marginTop: 10,
+      paddingHorizontal: 10,
+      paddingVertical: 7,
+      flexDirection:
+        'row',
+      alignItems:
+        'center',
+      gap: 8,
+      backgroundColor:
+        COLOURS.rust700,
+      borderRadius: 5,
+      borderWidth: 1,
+      borderColor:
+        COLOURS.danger300,
+    },
 
-  leaderboardScroll: {
-    flex: 1,
-    minHeight: 0,
-  },
+    syncWarningText: {
+      flex: 1,
+      minWidth: 0,
+      color:
+        COLOURS.parchment100,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 9.5,
+      lineHeight: 14,
+      fontWeight:
+        '700',
+    },
 
-  ledgerList: {
-    paddingBottom: 10,
-  },
+    smallRetryButton: {
+      minWidth: 70,
+      minHeight: 48,
+      alignItems:
+        'center',
+      justifyContent:
+        'center',
+      paddingHorizontal: 10,
+      borderWidth: 1,
+      borderColor:
+        COLOURS.parchment100,
+      borderRadius: 4,
+    },
 
-  rowContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 7,
-    paddingHorizontal: 6,
-    borderRadius: 4,
-    marginBottom: 2,
-    minHeight: 34,
-  },
+    smallRetryText: {
+      color:
+        COLOURS.parchment100,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 9,
+      lineHeight: 13,
+      fontWeight:
+        '800',
+      letterSpacing: 0.6,
+    },
 
-  rowHighlight: {
-    backgroundColor: '#D9B98A',
-  },
+    /* ---------------------------------------------------------------------- */
+    /* Table                                                                 */
+    /* ---------------------------------------------------------------------- */
 
-  rowText: {
-    color: '#2A2420',
-    fontFamily:
-      Platform.OS === 'ios'
-        ? 'Courier'
-        : 'monospace',
-    fontSize: 12,
-    fontWeight: '600',
-  },
+    tableHeader: {
+      minHeight: 38,
+      flexDirection:
+        'row',
+      alignItems:
+        'center',
+      paddingHorizontal: 7,
+      borderBottomWidth: 1.5,
+      borderBottomColor:
+        COLOURS.ink900,
+    },
 
-  rowHighlightText: {
-    color: '#A64B2A',
-    fontWeight: 'bold',
-  },
+    columnHeader: {
+      color:
+        COLOURS.ink900,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 9.5,
+      lineHeight: 14,
+      fontWeight:
+        '800',
+      letterSpacing: 0.7,
+    },
 
-  dotLeaderContainer: {
-    flex: 0.15,
-    overflow: 'hidden',
-    alignItems: 'center',
-  },
+    rankColumn: {
+      width: 62,
+      flexShrink: 0,
+    },
 
-  dotLeader: {
-    color: '#B5A88F',
-    fontFamily:
-      Platform.OS === 'ios'
-        ? 'Courier'
-        : 'monospace',
-    fontSize: 10,
-  },
+    nameColumn: {
+      flex: 1,
+      minWidth: 0,
+    },
 
-  /* Loading / Empty */
+    pointsColumn: {
+      width: 100,
+      flexShrink: 0,
+      textAlign:
+        'right',
+    },
 
-  loadingBox: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    gap: 8,
-    paddingHorizontal: 20,
-  },
+    leaderboardScroll: {
+      flex: 1,
+      minHeight: 0,
+    },
 
-  loadingText: {
-    color: '#2A2420',
-    fontSize: 10,
-    fontWeight: 'bold',
-    letterSpacing: 1,
-    textAlign: 'center',
-  },
+    ledgerList: {
+      paddingTop: 5,
+      paddingBottom: 8,
+    },
 
-  errorText: {
-    color: '#A64B2A',
-    fontSize: 10,
-    fontWeight: 'bold',
-    letterSpacing: 0.5,
-    textAlign: 'center',
-    marginBottom: 8,
-  },
+    rowContainer: {
+      minHeight: 50,
+      flexDirection:
+        'row',
+      alignItems:
+        'center',
+      paddingHorizontal: 7,
+      paddingVertical: 5,
+      marginBottom: 3,
+      borderRadius: 5,
+      borderWidth: 1,
+      borderColor:
+        'transparent',
+    },
 
-  emptyText: {
-    color: '#8A7B66',
-    fontSize: 10,
-    fontWeight: 'bold',
-    letterSpacing: 1,
-    textAlign: 'center',
-  },
+    currentUserRow: {
+      backgroundColor:
+        '#D8C39B',
+      borderColor:
+        COLOURS.rust700,
+    },
 
-  retryButton: {
-    backgroundColor: '#A64B2A',
-    paddingHorizontal: 18,
-    paddingVertical: 9,
-    minHeight: 40,
-    borderRadius: 4,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
+    rankBadge: {
+      width: 38,
+      height: 38,
+      borderRadius: 19,
+      alignItems:
+        'center',
+      justifyContent:
+        'center',
+      backgroundColor:
+        COLOURS.parchment100,
+      borderWidth: 1,
+      borderColor:
+        COLOURS.bronze600,
+    },
 
-  retryText: {
-    color: '#F3ECD8',
-    fontSize: 9,
-    fontWeight: 'bold',
-    letterSpacing: 1,
-  },
+    rankBadgeFirst: {
+      borderWidth: 2,
+      borderColor:
+        COLOURS.rust700,
+    },
 
-  /* Social Actions */
+    rankBadgeSecond: {
+      borderColor:
+        COLOURS.bronze700,
+    },
 
-  socialActions: {
-    flexDirection: 'row',
-    gap: 8,
-    paddingTop: 8,
-    paddingBottom: 8,
-  },
+    rankBadgeThird: {
+      borderColor:
+        COLOURS.ink700,
+    },
 
-  socialActionsLandscape: {
-    minHeight: 52,
-  },
+    currentUserRankBadge: {
+      backgroundColor:
+        COLOURS.rust700,
+      borderColor:
+        COLOURS.rust800,
+    },
 
-  socialActionsPortrait: {
-    minHeight: 52,
-  },
+    rankText: {
+      color:
+        COLOURS.ink900,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 10.5,
+      lineHeight: 15,
+      fontWeight:
+        '800',
+    },
 
-  socialActionButton: {
-    flex: 1,
-    minHeight: 46,
-    backgroundColor: '#2C3B2E',
-    borderWidth: 1,
-    borderColor: '#B08D57',
-    borderRadius: 4,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 7,
-    paddingHorizontal: 8,
-  },
+    currentUserRankText: {
+      color:
+        COLOURS.parchment100,
+    },
 
-  telegramActionButton: {
-    backgroundColor: '#A64B2A',
-  },
+    explorerName: {
+      color:
+        COLOURS.ink900,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 11.5,
+      lineHeight: 16,
+      fontWeight:
+        '800',
+      letterSpacing: 0.35,
+    },
 
-  socialActionText: {
-    color: '#F3ECD8',
-    fontSize: 10,
-    fontWeight: 'bold',
-    letterSpacing: 1,
-    textAlign: 'center',
-  },
-});
+    explorerRankTitle: {
+      marginTop: 2,
+      color:
+        COLOURS.bronze700,
+      fontFamily:
+        MONO_FONT,
+      fontSize: 8.5,
+      lineHeight: 12,
+      fontWeight:
+        '700',
+      letterSpacing: 0.35,
+    },
+
+    pointsValue: {
+      color:
+        COLOURS.ink900,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 12,
+      lineHeight: 17,
+      fontWeight:
+        '800',
+    },
+
+    currentUserText: {
+      color:
+        COLOURS.rust800,
+    },
+
+    /* ---------------------------------------------------------------------- */
+    /* Manifest states                                                       */
+    /* ---------------------------------------------------------------------- */
+
+    loadingBox: {
+      flex: 1,
+      minHeight: 180,
+      justifyContent:
+        'center',
+      alignItems:
+        'center',
+      gap: 10,
+      paddingHorizontal: 20,
+    },
+
+    loadingText: {
+      color:
+        COLOURS.ink900,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 10,
+      lineHeight: 15,
+      fontWeight:
+        '800',
+      letterSpacing: 0.75,
+      textAlign:
+        'center',
+    },
+
+    emptyText: {
+      color:
+        COLOURS.bronze700,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 10,
+      lineHeight: 15,
+      fontWeight:
+        '800',
+      letterSpacing: 0.7,
+      textAlign:
+        'center',
+    },
+
+    retryButton: {
+      minHeight: 48,
+      minWidth: 160,
+      justifyContent:
+        'center',
+      alignItems:
+        'center',
+      paddingHorizontal: 16,
+      paddingVertical: 9,
+      marginTop: 5,
+      backgroundColor:
+        COLOURS.rust700,
+      borderRadius: 5,
+      borderWidth: 1,
+      borderColor:
+        COLOURS.rust800,
+    },
+
+    retryButtonText: {
+      color:
+        COLOURS.parchment100,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 10,
+      lineHeight: 15,
+      fontWeight:
+        '800',
+      letterSpacing: 0.7,
+    },
+
+    /* ---------------------------------------------------------------------- */
+    /* Manifest footer                                                       */
+    /* ---------------------------------------------------------------------- */
+
+    manifestFooter: {
+      minHeight: 30,
+      flexDirection:
+        'row',
+      justifyContent:
+        'space-between',
+      alignItems:
+        'center',
+      gap: 10,
+      paddingTop: 7,
+      borderTopWidth: 1,
+      borderTopColor:
+        COLOURS.bronze600,
+    },
+
+    manifestFooterText: {
+      flex: 1,
+      color:
+        COLOURS.bronze700,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 8,
+      lineHeight: 12,
+      fontWeight:
+        '700',
+      letterSpacing: 0.4,
+    },
+
+    manifestFooterCount: {
+      color:
+        COLOURS.rust700,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 9,
+      lineHeight: 13,
+      fontWeight:
+        '800',
+    },
+
+    /* ---------------------------------------------------------------------- */
+    /* 40% command panel                                                     */
+    /* ---------------------------------------------------------------------- */
+
+    commandPanel: {
+      minWidth: 0,
+      minHeight: 0,
+      padding: 12,
+      backgroundColor:
+        COLOURS.forest800,
+      borderWidth: 2,
+      borderColor:
+        COLOURS.bronze500,
+      borderRadius: 7,
+    },
+
+    commandPanelLandscape: {
+      flex: 0.4,
+    },
+
+    commandScroll: {
+      flex: 1,
+      minHeight: 0,
+      marginBottom: 8,
+    },
+
+    commandScrollContent: {
+      paddingBottom: 4,
+    },
+
+    sectionHeaderRow: {
+      minHeight: 27,
+      flexDirection:
+        'row',
+      alignItems:
+        'center',
+      gap: 6,
+      marginBottom: 7,
+    },
+
+    sectionSpacing: {
+      marginTop: 14,
+    },
+
+    sectionTitle: {
+      flexShrink: 1,
+      color:
+        COLOURS.bronze400,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 10.5,
+      lineHeight: 16,
+      fontWeight:
+        '800',
+      letterSpacing: 0.75,
+    },
+
+    /* ---------------------------------------------------------------------- */
+    /* Current record                                                        */
+    /* ---------------------------------------------------------------------- */
+
+    profileLoadingCard: {
+      minHeight: 120,
+      alignItems:
+        'center',
+      justifyContent:
+        'center',
+      gap: 8,
+      padding: 12,
+      backgroundColor:
+        COLOURS.forest950,
+      borderWidth: 1,
+      borderColor:
+        COLOURS.bronze500,
+      borderRadius: 5,
+    },
+
+    profileLoadingText: {
+      color:
+        COLOURS.parchment200,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 9.5,
+      lineHeight: 14,
+      fontWeight:
+        '700',
+      letterSpacing: 0.5,
+    },
+
+    currentRecordCard: {
+      padding: 11,
+      backgroundColor:
+        COLOURS.parchment200,
+      borderWidth: 2,
+      borderColor:
+        COLOURS.bronze600,
+      borderRadius: 5,
+    },
+
+    currentRecordTopRow: {
+      flexDirection:
+        'row',
+      alignItems:
+        'flex-start',
+      justifyContent:
+        'space-between',
+      gap: 10,
+    },
+
+    currentRecordIdentity: {
+      flex: 1,
+      minWidth: 0,
+    },
+
+    currentUsername: {
+      color:
+        COLOURS.ink900,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 13,
+      lineHeight: 18,
+      fontWeight:
+        '800',
+      letterSpacing: 0.45,
+    },
+
+    currentRankTitle: {
+      marginTop: 2,
+      color:
+        COLOURS.bronze700,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 8.5,
+      lineHeight: 13,
+      fontWeight:
+        '700',
+      letterSpacing: 0.4,
+    },
+
+    currentPositionBadge: {
+      maxWidth: 125,
+      minHeight: 48,
+      paddingHorizontal: 8,
+      paddingVertical: 6,
+      justifyContent:
+        'center',
+      alignItems:
+        'center',
+      backgroundColor:
+        COLOURS.forest800,
+      borderRadius: 4,
+    },
+
+    currentPositionLabel: {
+      color:
+        COLOURS.bronze400,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 7.5,
+      lineHeight: 11,
+      fontWeight:
+        '700',
+      letterSpacing: 0.45,
+    },
+
+    currentPositionValue: {
+      color:
+        COLOURS.parchment100,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 9,
+      lineHeight: 13,
+      fontWeight:
+        '800',
+      textAlign:
+        'center',
+    },
+
+    currentPointsRow: {
+      flexDirection:
+        'row',
+      alignItems:
+        'baseline',
+      justifyContent:
+        'center',
+      marginTop: 8,
+    },
+
+    currentPointsValue: {
+      color:
+        COLOURS.rust700,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 28,
+      lineHeight: 33,
+      fontWeight:
+        '900',
+    },
+
+    currentPointsLabel: {
+      color:
+        COLOURS.rust700,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 11,
+      lineHeight: 16,
+      fontWeight:
+        '800',
+      marginLeft: 5,
+    },
+
+    profileErrorText: {
+      marginTop: 7,
+      color:
+        COLOURS.rust800,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 8.5,
+      lineHeight: 13,
+      fontWeight:
+        '700',
+      textAlign:
+        'center',
+    },
+
+    /* ---------------------------------------------------------------------- */
+    /* Podium                                                                */
+    /* ---------------------------------------------------------------------- */
+
+    podiumList: {
+      gap: 6,
+    },
+
+    podiumCard: {
+      minHeight: 52,
+      flexDirection:
+        'row',
+      alignItems:
+        'center',
+      gap: 8,
+      paddingHorizontal: 8,
+      paddingVertical: 6,
+      backgroundColor:
+        COLOURS.forest950,
+      borderWidth: 1,
+      borderColor:
+        COLOURS.forest700,
+      borderRadius: 5,
+    },
+
+    podiumCardFirst: {
+      borderColor:
+        COLOURS.bronze400,
+    },
+
+    podiumCardCurrent: {
+      borderColor:
+        COLOURS.rust600,
+    },
+
+    podiumRankCircle: {
+      width: 34,
+      height: 34,
+      borderRadius: 17,
+      alignItems:
+        'center',
+      justifyContent:
+        'center',
+      flexShrink: 0,
+      backgroundColor:
+        COLOURS.forest800,
+      borderWidth: 1,
+      borderColor:
+        COLOURS.bronze500,
+    },
+
+    podiumRankCircleFirst: {
+      borderWidth: 2,
+      borderColor:
+        COLOURS.bronze400,
+    },
+
+    podiumRankText: {
+      color:
+        COLOURS.parchment100,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 11,
+      lineHeight: 16,
+      fontWeight:
+        '800',
+    },
+
+    podiumIdentity: {
+      flex: 1,
+      minWidth: 0,
+    },
+
+    podiumName: {
+      color:
+        COLOURS.parchment100,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 10,
+      lineHeight: 15,
+      fontWeight:
+        '800',
+    },
+
+    podiumLabel: {
+      color:
+        COLOURS.bronze400,
+      fontFamily:
+        MONO_FONT,
+      fontSize: 8,
+      lineHeight: 12,
+      fontWeight:
+        '700',
+    },
+
+    podiumPoints: {
+      color:
+        COLOURS.success300,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 11,
+      lineHeight: 16,
+      fontWeight:
+        '800',
+    },
+
+    emptyPodiumCard: {
+      minHeight: 52,
+      alignItems:
+        'center',
+      justifyContent:
+        'center',
+      padding: 8,
+      borderWidth: 1,
+      borderStyle:
+        'dashed',
+      borderColor:
+        COLOURS.bronze500,
+      borderRadius: 5,
+    },
+
+    emptyPodiumText: {
+      color:
+        COLOURS.bronze400,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 9,
+      lineHeight: 14,
+      fontWeight:
+        '700',
+      letterSpacing: 0.5,
+    },
+
+    /* ---------------------------------------------------------------------- */
+    /* Social actions                                                        */
+    /* ---------------------------------------------------------------------- */
+
+    socialActions: {
+      flexDirection:
+        'row',
+      gap: 7,
+    },
+
+    socialButton: {
+      flex: 1,
+      minHeight: 50,
+      flexDirection:
+        'row',
+      alignItems:
+        'center',
+      justifyContent:
+        'center',
+      gap: 6,
+      paddingHorizontal: 8,
+      paddingVertical: 8,
+      backgroundColor:
+        COLOURS.forest950,
+      borderWidth: 1,
+      borderColor:
+        COLOURS.bronze400,
+      borderRadius: 5,
+    },
+
+    telegramButton: {
+      backgroundColor:
+        COLOURS.rust700,
+      borderColor:
+        COLOURS.rust800,
+    },
+
+    socialButtonText: {
+      flexShrink: 1,
+      color:
+        COLOURS.parchment100,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 9,
+      lineHeight: 13,
+      fontWeight:
+        '800',
+      letterSpacing: 0.45,
+      textAlign:
+        'center',
+    },
+
+    disabledButton: {
+      opacity: 0.45,
+    },
+
+    /* ---------------------------------------------------------------------- */
+    /* Return button                                                         */
+    /* ---------------------------------------------------------------------- */
+
+    returnButton: {
+      minHeight: 48,
+      marginTop: 10,
+      flexDirection:
+        'row',
+      alignItems:
+        'center',
+      justifyContent:
+        'center',
+      gap: 7,
+      paddingHorizontal: 10,
+      paddingVertical: 8,
+      backgroundColor:
+        COLOURS.forest900,
+      borderWidth: 1,
+      borderColor:
+        COLOURS.bronze500,
+      borderRadius: 5,
+    },
+
+    returnButtonText: {
+      color:
+        COLOURS.bronze400,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 9.5,
+      lineHeight: 14,
+      fontWeight:
+        '800',
+      letterSpacing: 0.55,
+      textAlign:
+        'center',
+    },
+
+    /* ---------------------------------------------------------------------- */
+    /* Command error                                                         */
+    /* ---------------------------------------------------------------------- */
+
+    commandWarning: {
+      marginTop: 10,
+      padding: 9,
+      backgroundColor:
+        COLOURS.rust700,
+      borderWidth: 1,
+      borderColor:
+        COLOURS.danger300,
+      borderRadius: 5,
+    },
+
+    commandWarningText: {
+      color:
+        COLOURS.parchment100,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 8.5,
+      lineHeight: 13,
+      fontWeight:
+        '700',
+      textAlign:
+        'center',
+      marginBottom: 7,
+    },
+
+    commandRetryButton: {
+      minHeight: 48,
+      alignItems:
+        'center',
+      justifyContent:
+        'center',
+      borderWidth: 1,
+      borderColor:
+        COLOURS.parchment100,
+      borderRadius: 4,
+    },
+
+    commandRetryText: {
+      color:
+        COLOURS.parchment100,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 9,
+      lineHeight: 13,
+      fontWeight:
+        '800',
+    },
+
+    /* ---------------------------------------------------------------------- */
+    /* Interaction states                                                    */
+    /* ---------------------------------------------------------------------- */
+
+    darkButtonPressed: {
+      opacity: 0.78,
+      transform: [
+        {
+          scale: 0.985,
+        },
+      ],
+    },
+
+    primaryButtonPressed: {
+      backgroundColor:
+        COLOURS.rust600,
+      transform: [
+        {
+          scale: 0.985,
+        },
+      ],
+    },
+
+    lightButtonPressed: {
+      backgroundColor:
+        COLOURS.forest700,
+    },
+  });
