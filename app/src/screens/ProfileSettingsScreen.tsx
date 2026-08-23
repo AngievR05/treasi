@@ -1,44 +1,101 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
+
 import {
+  AccessibilityInfo,
   ActivityIndicator,
   Alert,
-  Animated,
-  Easing,
+  KeyboardAvoidingView,
+  Linking,
+  Modal,
   Platform,
+  Pressable,
   ScrollView,
   StyleSheet,
   Switch,
   Text,
   TextInput,
-  TouchableOpacity,
   useWindowDimensions,
   View,
 } from 'react-native';
+
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+
 import { Ionicons } from '@expo/vector-icons';
+
 import {
+  collection,
+  deleteField,
   doc,
-  getDoc,
+  getDocs,
+  limit,
   onSnapshot,
+  query,
   serverTimestamp,
   updateDoc,
+  where,
+  writeBatch,
 } from 'firebase/firestore';
+
 import {
+  reload,
+  sendEmailVerification,
+  sendPasswordResetEmail,
   signOut,
   updateProfile,
-  User,
+  type User,
 } from 'firebase/auth';
-import { db, auth } from '../config/firebase';
-import { FieldNavBar, NavigationTab } from '../components/FieldNavBar';
-import { UserDocument } from '../types/firestore';
+
+import { FirebaseError } from 'firebase/app';
+
+import {
+  auth,
+  db,
+} from '../config/firebase';
+
+import {
+  FieldNavBar,
+  type NavigationTab,
+} from '../components/FieldNavBar';
+
+import { OnboardingScreen } from './OnboardingScreen';
+
+import type {
+  UserDocument,
+} from '../types/firestore';
+
+/* -------------------------------------------------------------------------- */
+/* Types                                                                      */
+/* -------------------------------------------------------------------------- */
 
 interface ProfileSettingsScreenProps {
   onBack?: () => void;
+
   onSignOut: () => void;
-  onNavigate?: (tab: NavigationTab) => void;
+
+  onNavigate?: (
+    screen: string,
+  ) => void;
+
   userData?: UserDocument | null;
+
   isLoadingUserData?: boolean;
-  onUpdateUserSettings?: (updatedFields: Partial<UserDocument>) => Promise<void>;
+
+  onUpdateUserSettings?: (
+    updatedFields: Partial<UserDocument>,
+  ) => Promise<void>;
+
+  /*
+   * Account deletion needs secure server-side cleanup because Firestore,
+   * Authentication and retained account records cannot be deleted atomically
+   * from this client.
+   */
+  onDeleteAccount?: () => Promise<void>;
 }
 
 type SettingKey =
@@ -46,8 +103,7 @@ type SettingKey =
   | 'motionSensitivityEnabled'
   | 'batteryOptimizerEnabled'
   | 'nightModeEnabled'
-  | 'telemetryEnabled'
-  | 'skipOnboardingAuthFlow';
+  | 'telemetryEnabled';
 
 interface SettingConfig {
   key: SettingKey;
@@ -56,1272 +112,6383 @@ interface SettingConfig {
   description: string;
 }
 
-const SETTINGS: SettingConfig[] = [
+/* -------------------------------------------------------------------------- */
+/* Constants                                                                  */
+/* -------------------------------------------------------------------------- */
+
+const CALLSIGN_REGEX =
+  /^[A-Z0-9][A-Z0-9_-]{2,23}$/;
+
+const MAX_CALLSIGN_LENGTH = 24;
+
+const COLOURS = {
+  forest950: '#172018',
+  forest900: '#1C261D',
+  forest800: '#2C3B2E',
+  forest700: '#3D503F',
+
+  parchment100: '#F6EFD9',
+  parchment200: '#E8DCC0',
+
+  ink900: '#2A2420',
+  ink700: '#514A40',
+
+  bronze700: '#5F4B32',
+  bronze600: '#6B563A',
+  bronze500: '#B08D57',
+  bronze400: '#C3A06A',
+
+  rust800: '#71301C',
+  rust700: '#7F321B',
+  rust600: '#8C3A20',
+
+  success700: '#3E6546',
+  success300: '#BFE3C0',
+
+  warning300: '#E6C580',
+  danger300: '#FFB4A2',
+
+  white: '#FFFFFF',
+
+  overlay:
+    'rgba(10, 16, 11, 0.88)',
+} as const;
+
+const MONO_FONT =
+  Platform.OS === 'ios'
+    ? 'Courier'
+    : 'monospace';
+
+const MONO_BOLD_FONT =
+  Platform.OS === 'ios'
+    ? 'Courier-Bold'
+    : 'monospace';
+
+const SETTINGS:
+  SettingConfig[] = [
   {
-    key: 'hapticFeedbackEnabled',
-    label: 'HAPTIC TRIGGERS',
-    icon: 'radio-outline',
-    description: 'Enable tactile feedback for supported interactions.',
+    key:
+      'hapticFeedbackEnabled',
+
+    label:
+      'HAPTIC FEEDBACK',
+
+    icon:
+      'phone-portrait-outline',
+
+    description:
+      'Use tactile confirmation for supported field interactions and successful excavations.',
   },
+
   {
-    key: 'motionSensitivityEnabled',
-    label: 'SENSOR SENSITIVITY',
-    icon: 'flash-outline',
-    description: 'Enable the motion sensitivity preference used by supported sensor interactions.',
+    key:
+      'motionSensitivityEnabled',
+
+    label:
+      'SENSITIVE SHAKE DETECTION',
+
+    icon:
+      'pulse-outline',
+
+    description:
+      'Use the more sensitive motion threshold when shake excavation is available.',
   },
+
   {
-    key: 'batteryOptimizerEnabled',
-    label: 'BATTERY OPTIMIZE',
-    icon: 'battery-charging-outline',
-    description: 'Enable the battery optimisation preference used by supported location polling.',
+    key:
+      'telemetryEnabled',
+
+    label:
+      'LOCATION SHARING',
+
+    icon:
+      'location-outline',
+
+    description:
+      'Allow supported social features to publish your latest shared position to your Explorer profile.',
   },
+
   {
-    key: 'nightModeEnabled',
-    label: 'NIGHT FIELD MODE',
-    icon: 'moon-outline',
-    description: 'Enable the saved night-mode preference for supported UI.',
+    key:
+      'batteryOptimizerEnabled',
+
+    label:
+      'BATTERY SAVER PREFERENCE',
+
+    icon:
+      'battery-half-outline',
+
+    description:
+      'Save the reduced-power preference for location and sensor features that support battery optimisation.',
   },
+
   {
-    key: 'telemetryEnabled',
-    label: 'TELEMETRY LOGS',
-    icon: 'stats-chart-outline',
-    description: 'Enable the saved telemetry preference for supported location/sensor features.',
-  },
-  {
-    key: 'skipOnboardingAuthFlow',
-    label: 'BYPASS ONBOARDING',
-    icon: 'caret-forward-outline',
-    description: 'Persist the preference used by the app startup flow to bypass onboarding where supported.',
+    key:
+      'nightModeEnabled',
+
+    label:
+      'NIGHT FIELD PREFERENCE',
+
+    icon:
+      'moon-outline',
+
+    description:
+      'Save your night-interface preference for screens that support alternate field presentation.',
   },
 ];
 
-const safeString = (value: unknown, fallback = ''): string => {
-  return typeof value === 'string' ? value : fallback;
-};
+const DEFAULT_SETTINGS:
+  Pick<
+    UserDocument,
+    | 'hapticFeedbackEnabled'
+    | 'motionSensitivityEnabled'
+    | 'batteryOptimizerEnabled'
+    | 'nightModeEnabled'
+    | 'telemetryEnabled'
+    | 'skipOnboardingAuthFlow'
+  > = {
+    hapticFeedbackEnabled:
+      true,
 
-const sanitiseUsername = (value: string): string => value.trim().replace(/\s+/g, ' ');
+    motionSensitivityEnabled:
+      false,
 
-const buildHandle = (username: string): string => {
-  const clean = username.trim().toLowerCase();
-  return clean ? `@${clean.replace(/\s+/g, '_')}` : '@unregistered';
-};
+    batteryOptimizerEnabled:
+      false,
 
-const getFriendlyAuthError = (error: unknown, fallback: string): string => {
-  const code =
-    typeof error === 'object' &&
-    error !== null &&
-    'code' in error &&
-    typeof (error as { code?: unknown }).code === 'string'
-      ? (error as { code: string }).code
-      : '';
+    nightModeEnabled:
+      false,
 
-  switch (code) {
-    case 'auth/network-request-failed':
-      return 'Network connection failed. Please check your connection and try again.';
-    case 'auth/requires-recent-login':
-      return 'Please sign in again before making this profile change.';
-    case 'auth/user-disabled':
-      return 'This Firebase account has been disabled.';
-    default:
-      return fallback;
+    telemetryEnabled:
+      false,
+
+    skipOnboardingAuthFlow:
+      false,
+  };
+
+/* -------------------------------------------------------------------------- */
+/* Helpers                                                                    */
+/* -------------------------------------------------------------------------- */
+
+// Keeps development diagnostics out of production output.
+const logDevelopmentWarning = (
+  message: string,
+  error?: unknown,
+): void => {
+  if (__DEV__) {
+    console.warn(
+      message,
+      error ?? '',
+    );
   }
 };
 
-const formatMemberSince = (createdAt: unknown): string => {
-  if (!createdAt) return 'N/A';
+// Announces important feedback to screen readers.
+const announce = (
+  message: string,
+): void => {
+  AccessibilityInfo
+    .announceForAccessibility(
+      message,
+    );
+};
+
+// Shows matching visual and accessibility feedback.
+const showAccessibleAlert = (
+  title: string,
+  message: string,
+): void => {
+  announce(
+    `${title}. ${message}`,
+  );
+
+  Alert.alert(
+    title,
+    message,
+  );
+};
+
+// Safely converts unknown data into visible text.
+const safeString = (
+  value: unknown,
+  fallback = '',
+): string =>
+  typeof value ===
+    'string'
+    ? value
+    : fallback;
+
+// Converts callsigns to the same format used during registration.
+const normaliseCallsign = (
+  value: string,
+): string =>
+  value
+    .trim()
+    .toUpperCase();
+
+// Builds a readable profile handle.
+const buildHandle = (
+  username: string,
+): string => {
+  const clean =
+    username
+      .trim()
+      .toLowerCase();
+
+  return clean
+    ? `@${clean.replace(
+        /[^a-z0-9_-]/g,
+        '_',
+      )}`
+    : '@unregistered';
+};
+
+// Formats the account creation timestamp using British English.
+const formatMemberSince = (
+  createdAt: unknown,
+): string => {
+  if (!createdAt) {
+    return 'N/A';
+  }
 
   try {
-    const maybeTimestamp = createdAt as {
-      toDate?: () => Date;
-    };
+    const possibleTimestamp =
+      createdAt as {
+        toDate?: () => Date;
+      };
 
     const date =
-      typeof maybeTimestamp.toDate === 'function'
-        ? maybeTimestamp.toDate()
-        : createdAt instanceof Date
+      typeof possibleTimestamp
+        .toDate ===
+        'function'
+        ? possibleTimestamp
+            .toDate()
+        : createdAt instanceof
+            Date
           ? createdAt
-          : new Date(createdAt as string | number);
+          : new Date(
+              createdAt as
+                string | number,
+            );
 
-    if (Number.isNaN(date.getTime())) return 'N/A';
+    if (
+      Number.isNaN(
+        date.getTime(),
+      )
+    ) {
+      return 'N/A';
+    }
 
-    return `${date.toLocaleString('default', {
-      month: 'short',
-    }).toUpperCase()} ${date.getFullYear()}`;
+    return date
+      .toLocaleDateString(
+        'en-GB',
+        {
+          month:
+            'short',
+
+          year:
+            'numeric',
+        },
+      )
+      .toUpperCase();
   } catch {
     return 'N/A';
   }
 };
 
-const calculateBadgeRank = (points: number): string => {
-  if (points >= 500) return 'COMMANDER I';
-  if (points >= 250) return 'PATHFINDER II';
-  if (points >= 100) return 'TRAILBLAZER III';
-  return 'RECON SCOUT';
+// Uses the same rank thresholds as Dashboard and Leaderboard.
+const calculateRank = (
+  points: number,
+): string => {
+  if (
+    points >=
+    3000
+  ) {
+    return 'MASTER EXPLORER';
+  }
+
+  if (
+    points >=
+    1500
+  ) {
+    return 'TRAILBLAZER III';
+  }
+
+  if (
+    points >=
+    500
+  ) {
+    return 'PATHFINDER II';
+  }
+
+  return 'NOVICE SCOUT I';
 };
 
-const normaliseBoolean = (value: unknown): boolean => value === true;
+// Normalises malformed preference values.
+const normaliseBoolean = (
+  value: unknown,
+): boolean =>
+  value === true;
 
-export const ProfileSettingsScreen: React.FC<ProfileSettingsScreenProps> = ({
-  onBack,
-  onSignOut,
-  onNavigate,
-  userData: parentUserData = null,
-  isLoadingUserData = false,
-  onUpdateUserSettings,
-}) => {
-  const insets = useSafeAreaInsets();
-  const { width, height } = useWindowDimensions();
-  const isLandscape = width > height;
+// Converts Firebase errors into user-facing messages.
+const getFriendlyError = (
+  error: unknown,
+  fallback: string,
+): string => {
+  if (
+    error instanceof
+    FirebaseError
+  ) {
+    switch (
+      error.code
+    ) {
+      case 'auth/network-request-failed':
+        return 'The network connection failed. Check your connection and try again.';
 
-  const [localUserData, setLocalUserData] = useState<UserDocument | null>(parentUserData);
-  const [isLoadingProfile, setIsLoadingProfile] = useState<boolean>(
-    isLoadingUserData && !parentUserData,
-  );
-  const [profileError, setProfileError] = useState<string>('');
+      case 'auth/requires-recent-login':
+        return 'Firebase requires a recent sign-in before this security action can continue.';
 
-  const [isSavingProfile, setIsSavingProfile] = useState<boolean>(false);
-  const [isSavingSetting, setIsSavingSetting] = useState<SettingKey | null>(null);
-  const [isLoggingOut, setIsLoggingOut] = useState<boolean>(false);
-  const [isEditing, setIsEditing] = useState<boolean>(false);
+      case 'auth/too-many-requests':
+        return 'Too many requests were made. Wait a moment before trying again.';
 
-  const [hapticTriggers, setHapticTriggers] = useState(false);
-  const [sensorSensitivity, setSensorSensitivity] = useState(false);
-  const [batteryOptimize, setBatteryOptimize] = useState(false);
-  const [nightFieldMode, setNightFieldMode] = useState(false);
-  const [telemetryEnabled, setTelemetryEnabled] = useState(false);
-  const [skipOnboardingAuthFlow, setSkipOnboardingAuthFlow] = useState(false);
+      case 'auth/user-disabled':
+        return 'This Firebase account has been disabled.';
 
-  const [agentName, setAgentName] = useState('');
-  const [editingOriginalName, setEditingOriginalName] = useState('');
+      case 'auth/invalid-email':
+        return 'The account email address is invalid.';
 
-  const editBtnScale = useRef(new Animated.Value(1)).current;
-  const signOutBtnScale = useRef(new Animated.Value(1)).current;
+      case 'permission-denied':
+      case 'firestore/permission-denied':
+        return 'Treasi does not have permission to make this profile change.';
 
-  const currentFirebaseUser = auth.currentUser;
-  const currentUid = currentFirebaseUser?.uid ?? localUserData?.uid ?? 'N/A';
+      case 'unavailable':
+      case 'firestore/unavailable':
+        return 'The field network is temporarily unavailable. Try again when your connection is restored.';
 
-  const applyUserDataToLocalState = useCallback((data: UserDocument | null) => {
-    setLocalUserData(data);
-
-    if (!data) return;
-
-    const username =
-      safeString(data.username) ||
-      safeString(auth.currentUser?.displayName) ||
-      'UNREGISTERED_AGENT';
-
-    setAgentName(username);
-    setHapticTriggers(normaliseBoolean(data.hapticFeedbackEnabled));
-    setSensorSensitivity(normaliseBoolean(data.motionSensitivityEnabled));
-    setBatteryOptimize(normaliseBoolean(data.batteryOptimizerEnabled));
-    setNightFieldMode(normaliseBoolean(data.nightModeEnabled));
-    setTelemetryEnabled(normaliseBoolean(data.telemetryEnabled));
-    setSkipOnboardingAuthFlow(normaliseBoolean(data.skipOnboardingAuthFlow));
-  }, []);
-
-  useEffect(() => {
-    applyUserDataToLocalState(parentUserData);
-  }, [applyUserDataToLocalState, parentUserData]);
-
-  /*
-   * The profile can fetch its own Firestore document so it remains correct even
-   * when App.tsx does not pass userData. A real-time listener keeps the profile
-   * in sync after excavation points/settings changes elsewhere in the app.
-   */
-  useEffect(() => {
-    const uid = auth.currentUser?.uid;
-
-    if (!db || !uid) {
-      setIsLoadingProfile(false);
-      if (!parentUserData) {
-        setLocalUserData(null);
-        setProfileError('No authenticated Firebase user was found.');
-      }
-      return;
+      default:
+        break;
     }
+  }
 
-    setIsLoadingProfile(true);
-    setProfileError('');
+  if (
+    error instanceof
+    Error &&
+    error.message
+  ) {
+    return error.message;
+  }
 
-    const userRef = doc(db, 'users', uid);
+  return fallback;
+};
 
-    const unsubscribe = onSnapshot(
-      userRef,
-      (snapshot) => {
-        if (!snapshot.exists()) {
-          // Keep any valid parent-provided data while we report the missing document.
-          setProfileError(
-            'Your Firebase authentication is active, but your profile document could not be found.',
-          );
-          setIsLoadingProfile(false);
-          return;
-        }
+/* -------------------------------------------------------------------------- */
+/* Profile Settings Screen                                                    */
+/* -------------------------------------------------------------------------- */
 
-        applyUserDataToLocalState(snapshot.data() as UserDocument);
-        setProfileError('');
-        setIsLoadingProfile(false);
-      },
-      () => {
-        setIsLoadingProfile(false);
+export const ProfileSettingsScreen:
+  React.FC<
+    ProfileSettingsScreenProps
+  > = ({
+    onBack,
+    onSignOut,
+    onNavigate,
+    userData:
+      parentUserData =
+        null,
+    isLoadingUserData =
+      false,
+    onUpdateUserSettings,
+    onDeleteAccount,
+  }) => {
+    const insets =
+      useSafeAreaInsets();
 
-        // Fall back to a one-time get if the listener fails and parent data is absent.
-        if (!localUserData) {
-          getDoc(userRef)
-            .then((snapshot) => {
-              if (snapshot.exists()) {
-                applyUserDataToLocalState(snapshot.data() as UserDocument);
-                setProfileError('');
-              } else {
-                setProfileError('Unable to find your Treasi profile document.');
-              }
-            })
-            .catch(() => {
-              setProfileError('Unable to load your profile. Please try again.');
-            });
-        }
-      },
-    );
+    const {
+      width,
+      height,
+    } =
+      useWindowDimensions();
 
-    return unsubscribe;
-  }, [applyUserDataToLocalState, localUserData, parentUserData]);
+    const isLandscape =
+      width > height;
 
-  const triggerPressAnimation = useCallback(
-    (animValue: Animated.Value, callback?: () => void) => {
-      Animated.sequence([
-        Animated.timing(animValue, {
-          toValue: 0.94,
-          duration: 80,
-          easing: Easing.out(Easing.ease),
-          useNativeDriver: true,
-        }),
-        Animated.spring(animValue, {
-          toValue: 1,
-          friction: 4,
-          tension: 40,
-          useNativeDriver: true,
-        }),
-      ]).start(() => {
-        callback?.();
-      });
-    },
-    [],
-  );
+    const currentTab:
+      NavigationTab =
+      'PROFILE';
 
-  const persistUserFields = useCallback(
-    async (fields: Partial<UserDocument>): Promise<void> => {
-      const uid = auth.currentUser?.uid ?? localUserData?.uid;
+    const currentFirebaseUser =
+      auth.currentUser;
 
-      if (!uid) {
-        throw new Error('No authenticated Firebase user session found.');
-      }
+    const currentUid =
+      currentFirebaseUser
+        ?.uid ??
+      parentUserData
+        ?.uid ??
+      '';
 
-      if (onUpdateUserSettings) {
-        await onUpdateUserSettings(fields);
-      } else {
-        if (!db) throw new Error('Firebase database is unavailable.');
+    const isMountedRef =
+      useRef(true);
 
-        await updateDoc(doc(db, 'users', uid), {
-          ...fields,
-          updatedAt: serverTimestamp(),
-        });
-      }
+    /* ---------------------------------------------------------------------- */
+    /* Profile state                                                          */
+    /* ---------------------------------------------------------------------- */
 
-      setLocalUserData((previous) =>
-        previous
-          ? {
-              ...previous,
-              ...fields,
-            }
-          : previous,
+    const [
+      localUserData,
+      setLocalUserData,
+    ] =
+      useState<
+        UserDocument | null
+      >(
+        parentUserData,
       );
-    },
-    [localUserData?.uid, onUpdateUserSettings],
-  );
 
-  const handleToggleChange = useCallback(
-    async (
-      key: SettingKey,
-      value: boolean,
-      setter: React.Dispatch<React.SetStateAction<boolean>>,
-    ) => {
-      if (isSavingSetting) return;
+    const [
+      isLoadingProfile,
+      setIsLoadingProfile,
+    ] =
+      useState(
+        isLoadingUserData &&
+          !parentUserData,
+      );
 
-      const previousValue =
-        key === 'hapticFeedbackEnabled'
-          ? hapticTriggers
-          : key === 'motionSensitivityEnabled'
-            ? sensorSensitivity
-            : key === 'batteryOptimizerEnabled'
-              ? batteryOptimize
-              : key === 'nightModeEnabled'
-                ? nightFieldMode
-                : key === 'telemetryEnabled'
-                  ? telemetryEnabled
-                  : skipOnboardingAuthFlow;
+    const [
+      profileError,
+      setProfileError,
+    ] =
+      useState<
+        string | null
+      >(null);
 
-      setter(value);
-      setIsSavingSetting(key);
-      setProfileError('');
+    const [
+      retryKey,
+      setRetryKey,
+    ] =
+      useState(0);
 
-      try {
-        await persistUserFields({ [key]: value } as Partial<UserDocument>);
-      } catch (error) {
-        setter(previousValue);
-        const message =
-          error instanceof Error
-            ? error.message
-            : 'Failed to save this preference to Firestore.';
-        Alert.alert('CALIBRATION ERROR', message);
-      } finally {
-        setIsSavingSetting(null);
-      }
-    },
-    [
-      batteryOptimize,
-      hapticTriggers,
-      isSavingSetting,
-      nightFieldMode,
-      persistUserFields,
-      sensorSensitivity,
-      skipOnboardingAuthFlow,
+    const [
+      authRefreshKey,
+      setAuthRefreshKey,
+    ] =
+      useState(0);
+
+    /* ---------------------------------------------------------------------- */
+    /* Settings state                                                         */
+    /* ---------------------------------------------------------------------- */
+
+    const [
+      hapticFeedbackEnabled,
+      setHapticFeedbackEnabled,
+    ] =
+      useState(true);
+
+    const [
+      motionSensitivityEnabled,
+      setMotionSensitivityEnabled,
+    ] =
+      useState(false);
+
+    const [
+      batteryOptimizerEnabled,
+      setBatteryOptimizerEnabled,
+    ] =
+      useState(false);
+
+    const [
+      nightModeEnabled,
+      setNightModeEnabled,
+    ] =
+      useState(false);
+
+    const [
       telemetryEnabled,
-    ],
-  );
+      setTelemetryEnabled,
+    ] =
+      useState(false);
 
-  const handleStartEditing = useCallback(() => {
-    triggerPressAnimation(editBtnScale, () => {
-      setEditingOriginalName(agentName);
-      setIsEditing(true);
-    });
-  }, [agentName, editBtnScale, triggerPressAnimation]);
+    const [
+      isSavingSetting,
+      setIsSavingSetting,
+    ] =
+      useState<
+        SettingKey | null
+      >(null);
 
-  const handleCancelEditing = useCallback(() => {
-    setAgentName(editingOriginalName);
-    setIsEditing(false);
-  }, [editingOriginalName]);
+    const [
+      isResettingPreferences,
+      setIsResettingPreferences,
+    ] =
+      useState(false);
 
-  const handleSaveProfile = useCallback(() => {
-    triggerPressAnimation(editBtnScale, async () => {
-      if (isSavingProfile) return;
+    const [
+      isClearingLocation,
+      setIsClearingLocation,
+    ] =
+      useState(false);
 
-      const cleanUsername = sanitiseUsername(agentName);
+    /* ---------------------------------------------------------------------- */
+    /* Identity state                                                         */
+    /* ---------------------------------------------------------------------- */
 
-      if (!cleanUsername) {
-        Alert.alert('INVALID CALLSIGN', 'Agent callsign cannot be empty.');
-        return;
-      }
+    const [
+      isEditingIdentity,
+      setIsEditingIdentity,
+    ] =
+      useState(false);
 
-      if (cleanUsername.length < 2) {
-        Alert.alert(
-          'INVALID CALLSIGN',
-          'Agent callsign must contain at least 2 characters.',
-        );
-        return;
-      }
+    const [
+      callsign,
+      setCallsign,
+    ] =
+      useState('');
 
-      const currentUser: User | null = auth.currentUser;
+    const [
+      originalCallsign,
+      setOriginalCallsign,
+    ] =
+      useState('');
 
-      try {
-        setIsSavingProfile(true);
-        setProfileError('');
+    const [
+      callsignError,
+      setCallsignError,
+    ] =
+      useState<
+        string | null
+      >(null);
 
-        // Update Firebase Authentication displayName when available.
-        if (currentUser && currentUser.displayName !== cleanUsername) {
-          await updateProfile(currentUser, {
-            displayName: cleanUsername,
-          });
-        }
+    const [
+      isSavingIdentity,
+      setIsSavingIdentity,
+    ] =
+      useState(false);
 
-        // Keep the Firestore username and Auth display name aligned.
-        await persistUserFields({
-          username: cleanUsername,
+    /* ---------------------------------------------------------------------- */
+    /* Account actions                                                        */
+    /* ---------------------------------------------------------------------- */
+
+    const [
+      isSigningOut,
+      setIsSigningOut,
+    ] =
+      useState(false);
+
+    const [
+      isSendingVerification,
+      setIsSendingVerification,
+    ] =
+      useState(false);
+
+    const [
+      isSendingPasswordReset,
+      setIsSendingPasswordReset,
+    ] =
+      useState(false);
+
+    const [
+      verificationSent,
+      setVerificationSent,
+    ] =
+      useState(false);
+
+    const [
+      deleteModalVisible,
+      setDeleteModalVisible,
+    ] =
+      useState(false);
+
+    const [
+      deleteConfirmation,
+      setDeleteConfirmation,
+    ] =
+      useState('');
+
+    const [
+      isDeletingAccount,
+      setIsDeletingAccount,
+    ] =
+      useState(false);
+
+    /* ---------------------------------------------------------------------- */
+    /* Onboarding / accessibility                                             */
+    /* ---------------------------------------------------------------------- */
+
+    const [
+      onboardingVisible,
+      setOnboardingVisible,
+    ] =
+      useState(false);
+
+    const [
+      reduceMotionEnabled,
+      setReduceMotionEnabled,
+    ] =
+      useState(false);
+
+    /* ---------------------------------------------------------------------- */
+    /* Lifecycle                                                              */
+    /* ---------------------------------------------------------------------- */
+
+    useEffect(() => {
+      isMountedRef.current =
+        true;
+
+      return () => {
+        isMountedRef.current =
+          false;
+      };
+    }, []);
+
+    /* ---------------------------------------------------------------------- */
+    /* Reduced Motion                                                         */
+    /* ---------------------------------------------------------------------- */
+
+    useEffect(() => {
+      let mounted =
+        true;
+
+      AccessibilityInfo
+        .isReduceMotionEnabled()
+        .then(
+          (
+            enabled,
+          ) => {
+            if (
+              mounted
+            ) {
+              setReduceMotionEnabled(
+                enabled,
+              );
+            }
+          },
+        )
+        .catch(() => {
+          // The settings screen remains usable if this preference is unavailable.
         });
 
-        setAgentName(cleanUsername);
-        setEditingOriginalName(cleanUsername);
-        setIsEditing(false);
-      } catch (error) {
-        const friendlyMessage = getFriendlyAuthError(
-          error,
-          'Failed to update the user profile.',
-        );
+      const subscription =
+        AccessibilityInfo
+          .addEventListener(
+            'reduceMotionChanged',
+            setReduceMotionEnabled,
+          );
 
-        setAgentName(editingOriginalName || agentName);
-        Alert.alert('PROFILE UPDATE ERROR', friendlyMessage);
-      } finally {
-        setIsSavingProfile(false);
-      }
-    });
-  }, [
-    agentName,
-    editBtnScale,
-    editingOriginalName,
-    isSavingProfile,
-    persistUserFields,
-    triggerPressAnimation,
-  ]);
+      return () => {
+        mounted =
+          false;
 
-  const handleLogoutConfirmed = useCallback(() => {
-    if (isLoggingOut) return;
+        subscription.remove();
+      };
+    }, []);
 
-    triggerPressAnimation(signOutBtnScale, async () => {
-      try {
-        setIsLoggingOut(true);
+    /* ---------------------------------------------------------------------- */
+    /* Apply profile state                                                    */
+    /* ---------------------------------------------------------------------- */
 
-        await signOut(auth);
+    const applyProfileData =
+      useCallback(
+        (
+          data:
+            UserDocument,
+        ): void => {
+          setLocalUserData(
+            data,
+          );
 
-        // App.tsx remains responsible for changing the global screen state.
-        onSignOut();
-      } catch (error) {
-        Alert.alert(
-          'LOGOUT FAILED',
-          getFriendlyAuthError(error, 'Could not sign out of the current session.'),
-        );
-      } finally {
-        setIsLoggingOut(false);
-      }
-    });
-  }, [isLoggingOut, onSignOut, signOutBtnScale, triggerPressAnimation]);
+          const username =
+            safeString(
+              data.username,
+            ) ||
+            safeString(
+              auth.currentUser
+                ?.displayName,
+            ) ||
+            'EXPLORER';
 
-  const handleSignOutPress = useCallback(() => {
-    if (isLoggingOut) return;
+          setCallsign(
+            username,
+          );
 
-    Alert.alert(
-      'TERMINATE SESSION',
-      'Are you sure you want to sign out of Treasi?',
-      [
-        { text: 'CANCEL', style: 'cancel' },
-        {
-          text: 'LOGOUT',
-          style: 'destructive',
-          onPress: handleLogoutConfirmed,
+          setOriginalCallsign(
+            username,
+          );
+
+          setHapticFeedbackEnabled(
+            data.hapticFeedbackEnabled !==
+              false,
+          );
+
+          setMotionSensitivityEnabled(
+            normaliseBoolean(
+              data.motionSensitivityEnabled,
+            ),
+          );
+
+          setBatteryOptimizerEnabled(
+            normaliseBoolean(
+              data.batteryOptimizerEnabled,
+            ),
+          );
+
+          setNightModeEnabled(
+            normaliseBoolean(
+              data.nightModeEnabled,
+            ),
+          );
+
+          setTelemetryEnabled(
+            normaliseBoolean(
+              data.telemetryEnabled,
+            ),
+          );
         },
-      ],
-    );
-  }, [handleLogoutConfirmed, isLoggingOut]);
+        [],
+      );
 
-  const currentEmail = safeString(
-    localUserData?.email,
-    auth.currentUser?.email ?? 'N/A',
-  );
+    useEffect(() => {
+      if (
+        parentUserData
+      ) {
+        applyProfileData(
+          parentUserData,
+        );
+      }
+    }, [
+      applyProfileData,
+      parentUserData,
+    ]);
 
-  const currentUsername =
-    safeString(localUserData?.username) ||
-    safeString(auth.currentUser?.displayName) ||
-    agentName ||
-    'UNREGISTERED_AGENT';
+    /* ---------------------------------------------------------------------- */
+    /* Live profile subscription                                              */
+    /* ---------------------------------------------------------------------- */
 
-  const handle = useMemo(() => buildHandle(currentUsername), [currentUsername]);
+    useEffect(() => {
+      const user =
+        auth.currentUser;
 
-  const totalPoints =
-    typeof localUserData?.totalPoints === 'number' &&
-    Number.isFinite(localUserData.totalPoints)
-      ? localUserData.totalPoints
-      : 0;
+      if (!user) {
+        setIsLoadingProfile(
+          false,
+        );
 
-  const rank = calculateBadgeRank(totalPoints);
-  const memberSince = formatMemberSince(localUserData?.createdAt);
+        if (
+          !parentUserData
+        ) {
+          setLocalUserData(
+            null,
+          );
 
-  const accountStatus = currentFirebaseUser
-    ? 'ACTIVE'
-    : 'SIGNED OUT';
+          setProfileError(
+            'No authenticated Explorer session was found.',
+          );
+        }
 
-  const onboardingStatus = localUserData?.hasCompletedOnboarding
-    ? 'ACTIVE'
-    : 'PENDING';
+        return;
+      }
 
-  const isProfileLoading = isLoadingProfile || (isLoadingUserData && !localUserData);
+      setIsLoadingProfile(
+        true,
+      );
 
-  const renderSetting = (
-    config: SettingConfig,
-    value: boolean,
-    setter: React.Dispatch<React.SetStateAction<boolean>>,
-  ) => {
-    const saving = isSavingSetting === config.key;
+      setProfileError(
+        null,
+      );
 
-    return (
-      <View
-        key={config.key}
-        style={styles.toggleCard}
-        accessible
-        accessibilityLabel={`${config.label}. ${value ? 'On' : 'Off'}. ${config.description}`}
-      >
-        <View style={styles.toggleLabelGroup}>
-          <Ionicons name={config.icon} size={12} color="#B08D57" />
-          <View style={styles.toggleTextGroup}>
-            <Text style={styles.toggleText}>{config.label}</Text>
-            <Text style={styles.toggleDescription}>{config.description}</Text>
-          </View>
-        </View>
+      const userReference =
+        doc(
+          db,
+          'users',
+          user.uid,
+        );
 
-        {saving ? (
-          <ActivityIndicator size="small" color="#A64B2A" />
-        ) : (
-          <Switch
-            trackColor={{ false: '#161E17', true: '#A64B2A' }}
-            thumbColor={value ? '#F3ECD8' : '#7A6B58'}
-            ios_backgroundColor="#161E17"
-            onValueChange={(nextValue) =>
-              void handleToggleChange(config.key, nextValue, setter)
+      const unsubscribe =
+        onSnapshot(
+          userReference,
+
+          (
+            snapshot,
+          ) => {
+            if (
+              !snapshot.exists()
+            ) {
+              setProfileError(
+                'Your Firebase sign-in is active, but the Treasi profile document could not be found.',
+              );
+
+              setIsLoadingProfile(
+                false,
+              );
+
+              return;
             }
-            value={value}
-            accessible
-            accessibilityRole="switch"
-            accessibilityLabel={config.label}
-            accessibilityState={{ checked: value, disabled: !!isSavingSetting }}
-          />
-        )}
-      </View>
-    );
-  };
 
-  if (isProfileLoading && !localUserData) {
-    return (
-      <View style={[styles.safeAreaContainer, styles.centeredLoading]}>
-        <ActivityIndicator size="large" color="#B08D57" />
-        <Text style={styles.loadingText}>FETCHING AGENT PROFILE...</Text>
-      </View>
-    );
-  }
+            applyProfileData(
+              snapshot.data() as
+                UserDocument,
+            );
 
-  if (!localUserData && !currentFirebaseUser) {
-    return (
-      <View style={[styles.safeAreaContainer, styles.centeredLoading]}>
-        <Ionicons name="person-circle-outline" size={52} color="#B08D57" />
-        <Text style={styles.loadingText}>NO ACTIVE AGENT SESSION</Text>
+            setProfileError(
+              null,
+            );
 
-        {onBack && (
-          <TouchableOpacity
-            style={styles.backButtonStandalone}
-            onPress={onBack}
-            accessibilityRole="button"
-            accessibilityLabel="Back to Dashboard"
-          >
-            <Ionicons name="chevron-back-sharp" size={11} color="#B08D57" />
-            <Text style={styles.backText}>DASHBOARD</Text>
-          </TouchableOpacity>
-        )}
-      </View>
-    );
-  }
+            setIsLoadingProfile(
+              false,
+            );
+          },
 
-  return (
-    <View
-      style={[
-        styles.safeAreaContainer,
-        {
-          paddingLeft: Math.max(insets.left, 12),
-          paddingRight: Math.max(insets.right, 12),
-          paddingTop: Math.max(insets.top, 8),
-          paddingBottom: Math.max(insets.bottom, 8),
+          (
+            error,
+          ) => {
+            logDevelopmentWarning(
+              '[Treasi Profile] Profile subscription failed:',
+              error,
+            );
+
+            setProfileError(
+              getFriendlyError(
+                error,
+                'Treasi could not synchronise your Explorer profile.',
+              ),
+            );
+
+            setIsLoadingProfile(
+              false,
+            );
+          },
+        );
+
+      return unsubscribe;
+    }, [
+      applyProfileData,
+      parentUserData,
+      retryKey,
+    ]);
+
+    /* ---------------------------------------------------------------------- */
+    /* Generic preference persistence                                         */
+    /* ---------------------------------------------------------------------- */
+
+    const persistUserFields =
+      useCallback(
+        async (
+          fields:
+            Partial<UserDocument>,
+        ): Promise<void> => {
+          const uid =
+            auth.currentUser
+              ?.uid ??
+            localUserData
+              ?.uid;
+
+          if (!uid) {
+            throw new Error(
+              'No authenticated Explorer session was found.',
+            );
+          }
+
+          if (
+            onUpdateUserSettings
+          ) {
+            await onUpdateUserSettings(
+              fields,
+            );
+          } else {
+            await updateDoc(
+              doc(
+                db,
+                'users',
+                uid,
+              ),
+              {
+                ...fields,
+
+                updatedAt:
+                  serverTimestamp(),
+              },
+            );
+          }
+
+          setLocalUserData(
+            (
+              previous,
+            ) =>
+              previous
+                ? {
+                    ...previous,
+                    ...fields,
+                  }
+                : previous,
+          );
         },
-      ]}
-    >
-      <View style={[styles.splitWrapper, !isLandscape && styles.portraitWrapper]}>
-        <View style={styles.leftViewport}>
-          <View style={styles.cardInnerBorder}>
-            <View style={styles.cardHeader}>
-              <View style={styles.headerTitleGroup}>
-                <Ionicons name="document-text-outline" size={13} color="#2A2420" />
-                <Text style={styles.headerTitle}> FIELD IDENTITY LOG</Text>
-              </View>
+        [
+          localUserData
+            ?.uid,
+          onUpdateUserSettings,
+        ],
+      );
 
-              <Text style={styles.headerTag}>
-                UID:{' '}
-                {currentUid !== 'N/A'
-                  ? currentUid.substring(0, 8).toUpperCase()
-                  : 'N/A'}
-              </Text>
-            </View>
+    /* ---------------------------------------------------------------------- */
+    /* Setting state helper                                                   */
+    /* ---------------------------------------------------------------------- */
 
-            <View style={styles.identityRow}>
-              <View style={styles.avatarBox}>
-                <Ionicons name="person" size={32} color="#E8DCC0" />
-              </View>
+    const getSettingValue =
+      useCallback(
+        (
+          key:
+            SettingKey,
+        ): boolean => {
+          switch (key) {
+            case 'hapticFeedbackEnabled':
+              return hapticFeedbackEnabled;
 
-              <View style={styles.identityDetails}>
-                {isEditing ? (
-                  <View style={styles.editInputGroup}>
-                    <TextInput
-                      style={styles.textInput}
-                      value={agentName}
-                      onChangeText={setAgentName}
-                      placeholder="AGENT CALLSIGN"
-                      placeholderTextColor="#8C7A6B"
-                      autoCapitalize="words"
-                      autoCorrect={false}
-                      editable={!isSavingProfile}
-                      accessibilityRole="none"
-                      accessibilityLabel="Agent Callsign Input"
-                      accessibilityHint="Enter the username that will be displayed across Treasi"
-                    />
-                    <Text style={styles.editHint}>
-                      Use 2 or more characters. Spaces are allowed.
-                    </Text>
-                  </View>
-                ) : (
-                  <>
-                    <Text style={styles.agentName} numberOfLines={1}>
-                      {currentUsername}
-                    </Text>
-                    <Text style={styles.handleText} numberOfLines={1}>
-                      {handle}
-                    </Text>
-                  </>
-                )}
+            case 'motionSensitivityEnabled':
+              return motionSensitivityEnabled;
 
-                <View style={styles.badgeContainer}>
-                  <Ionicons
-                    name="shield-checkmark"
-                    size={10}
-                    color="#F3ECD8"
-                    style={styles.badgeIcon}
-                  />
-                  <Text style={styles.badgeText}>{rank}</Text>
-                </View>
-              </View>
-            </View>
+            case 'batteryOptimizerEnabled':
+              return batteryOptimizerEnabled;
 
-            <View style={styles.dashedDivider} />
+            case 'nightModeEnabled':
+              return nightModeEnabled;
 
-            {profileError ? (
-              <View
-                style={styles.profileErrorBox}
-                accessible
-                accessibilityRole="alert"
-                accessibilityLiveRegion="polite"
-              >
-                <Ionicons name="warning-outline" size={13} color="#A64B2A" />
-                <Text style={styles.profileErrorText}>{profileError}</Text>
-              </View>
-            ) : null}
+            case 'telemetryEnabled':
+              return telemetryEnabled;
 
-            <View style={styles.metaGrid}>
-              <View style={styles.metaRow}>
-                <Text style={styles.metaKey}>MEMBER SINCE</Text>
-                <Text style={styles.metaVal}>{memberSince}</Text>
-              </View>
+            default:
+              return false;
+          }
+        },
+        [
+          batteryOptimizerEnabled,
+          hapticFeedbackEnabled,
+          motionSensitivityEnabled,
+          nightModeEnabled,
+          telemetryEnabled,
+        ],
+      );
 
-              <View style={styles.metaRow}>
-                <Text style={styles.metaKey}>ACCOUNT STATUS</Text>
-                <Text style={styles.metaVal}>{accountStatus}</Text>
-              </View>
+    const setSettingValue =
+      useCallback(
+        (
+          key:
+            SettingKey,
+          value:
+            boolean,
+        ): void => {
+          switch (key) {
+            case 'hapticFeedbackEnabled':
+              setHapticFeedbackEnabled(
+                value,
+              );
+              break;
 
-              <View style={styles.metaRow}>
-                <Text style={styles.metaKey}>FIELD PERMIT</Text>
-                <View style={styles.permitStarRow}>
-                  <Ionicons name="star" size={9} color="#2A2420" />
-                  <Ionicons name="star" size={9} color="#2A2420" />
-                  <Ionicons name="star" size={9} color="#2A2420" />
-                  <Text style={styles.metaVal}> {onboardingStatus}</Text>
-                </View>
-              </View>
+            case 'motionSensitivityEnabled':
+              setMotionSensitivityEnabled(
+                value,
+              );
+              break;
 
-              <View style={styles.metaRow}>
-                <Text style={styles.metaKey}>EXP POINTS</Text>
-                <Text style={styles.metaVal}>{totalPoints.toLocaleString()} PTS</Text>
-              </View>
+            case 'batteryOptimizerEnabled':
+              setBatteryOptimizerEnabled(
+                value,
+              );
+              break;
 
-              <View style={styles.metaRow}>
-                <Text style={styles.metaKey}>RANK</Text>
-                <Text style={styles.metaVal}>{rank}</Text>
-              </View>
+            case 'nightModeEnabled':
+              setNightModeEnabled(
+                value,
+              );
+              break;
 
-              <View style={styles.metaRow}>
-                <Text style={styles.metaKey}>EMAIL</Text>
-                <Text
-                  style={styles.metaVal}
-                  numberOfLines={1}
-                  ellipsizeMode="tail"
-                >
-                  {currentEmail}
-                </Text>
-              </View>
+            case 'telemetryEnabled':
+              setTelemetryEnabled(
+                value,
+              );
+              break;
 
-              <View style={styles.metaRow}>
-                <Text style={styles.metaKey}>FIREBASE UID</Text>
-                <Text
-                  style={styles.metaVal}
-                  numberOfLines={1}
-                  ellipsizeMode="middle"
-                >
-                  {currentUid}
-                </Text>
-              </View>
-            </View>
+            default:
+              break;
+          }
+        },
+        [],
+      );
 
-            {isEditing ? (
-              <View style={styles.editActionsRow}>
-                <Animated.View
-                  style={{ flex: 1, transform: [{ scale: editBtnScale }] }}
-                >
-                  <TouchableOpacity
-                    style={styles.editProfileButton}
-                    activeOpacity={0.8}
-                    disabled={isSavingProfile}
-                    onPress={handleSaveProfile}
-                    accessibilityRole="button"
-                    accessibilityLabel="Save identity record"
-                  >
-                    {isSavingProfile ? (
-                      <ActivityIndicator size="small" color="#2A2420" />
-                    ) : (
-                      <>
-                        <Ionicons
-                          name="checkmark-sharp"
-                          size={13}
-                          color="#2A2420"
-                          style={styles.btnIcon}
-                        />
-                        <Text style={styles.editProfileText}>SAVE IDENTITY</Text>
-                      </>
-                    )}
-                  </TouchableOpacity>
-                </Animated.View>
+    /* ---------------------------------------------------------------------- */
+    /* Toggle preference                                                      */
+    /* ---------------------------------------------------------------------- */
 
-                <TouchableOpacity
-                  style={styles.cancelEditButton}
-                  activeOpacity={0.8}
-                  disabled={isSavingProfile}
-                  onPress={handleCancelEditing}
-                  accessibilityRole="button"
-                  accessibilityLabel="Cancel identity editing"
-                >
-                  <Ionicons name="close-outline" size={13} color="#2A2420" />
-                  <Text style={styles.editProfileText}>CANCEL</Text>
-                </TouchableOpacity>
-              </View>
-            ) : (
-              <Animated.View style={{ transform: [{ scale: editBtnScale }] }}>
-                <TouchableOpacity
-                  style={styles.editProfileButton}
-                  activeOpacity={0.8}
-                  disabled={isSavingProfile}
-                  onPress={handleStartEditing}
-                  accessibilityRole="button"
-                  accessibilityLabel="Edit identity details"
-                  accessibilityHint="Opens the callsign editing form"
-                >
-                  <Ionicons
-                    name="create-outline"
-                    size={13}
-                    color="#2A2420"
-                    style={styles.btnIcon}
-                  />
-                  <Text style={styles.editProfileText}>EDIT IDENTITY DETAILS</Text>
-                </TouchableOpacity>
-              </Animated.View>
-            )}
-          </View>
-        </View>
+    const handleToggleChange =
+      useCallback(
+        async (
+          key:
+            SettingKey,
+          nextValue:
+            boolean,
+        ): Promise<void> => {
+          if (
+            isSavingSetting
+          ) {
+            return;
+          }
 
-        <View style={styles.rightViewport}>
-          <ScrollView
-            showsVerticalScrollIndicator={false}
-            contentContainerStyle={styles.scrollContent}
+          const previousValue =
+            getSettingValue(
+              key,
+            );
+
+          setSettingValue(
+            key,
+            nextValue,
+          );
+
+          setIsSavingSetting(
+            key,
+          );
+
+          try {
+            /*
+             * Disabling location sharing also deletes the previously stored
+             * shared position immediately instead of leaving stale telemetry.
+             */
+            if (
+              key ===
+                'telemetryEnabled' &&
+              !nextValue
+            ) {
+              const uid =
+                auth.currentUser
+                  ?.uid;
+
+              if (!uid) {
+                throw new Error(
+                  'No authenticated Explorer session was found.',
+                );
+              }
+
+              await updateDoc(
+                doc(
+                  db,
+                  'users',
+                  uid,
+                ),
+                {
+                  telemetryEnabled:
+                    false,
+
+                  location:
+                    deleteField(),
+
+                  updatedAt:
+                    serverTimestamp(),
+                },
+              );
+
+              setLocalUserData(
+                (
+                  previous,
+                ) =>
+                  previous
+                    ? {
+                        ...previous,
+
+                        telemetryEnabled:
+                          false,
+
+                        location:
+                          null,
+                      }
+                    : previous,
+              );
+
+              return;
+            }
+
+            await persistUserFields(
+              {
+                [key]:
+                  nextValue,
+              } as
+                Partial<UserDocument>,
+            );
+          } catch (
+            error: unknown
+          ) {
+            setSettingValue(
+              key,
+              previousValue,
+            );
+
+            showAccessibleAlert(
+              'Preference Error',
+              getFriendlyError(
+                error,
+                'Treasi could not save this preference.',
+              ),
+            );
+          } finally {
+            if (
+              isMountedRef.current
+            ) {
+              setIsSavingSetting(
+                null,
+              );
+            }
+          }
+        },
+        [
+          getSettingValue,
+          isSavingSetting,
+          persistUserFields,
+          setSettingValue,
+        ],
+      );
+
+    /* ---------------------------------------------------------------------- */
+    /* Clear shared location                                                  */
+    /* ---------------------------------------------------------------------- */
+
+    const handleClearSharedLocation =
+      useCallback(
+        async (): Promise<void> => {
+          const user =
+            auth.currentUser;
+
+          if (
+            !user ||
+            isClearingLocation
+          ) {
+            return;
+          }
+
+          setIsClearingLocation(
+            true,
+          );
+
+          try {
+            await updateDoc(
+              doc(
+                db,
+                'users',
+                user.uid,
+              ),
+              {
+                telemetryEnabled:
+                  false,
+
+                location:
+                  deleteField(),
+
+                updatedAt:
+                  serverTimestamp(),
+              },
+            );
+
+            setTelemetryEnabled(
+              false,
+            );
+
+            setLocalUserData(
+              (
+                previous,
+              ) =>
+                previous
+                  ? {
+                      ...previous,
+
+                      telemetryEnabled:
+                        false,
+
+                      location:
+                        null,
+                    }
+                  : previous,
+            );
+
+            showAccessibleAlert(
+              'Location Sharing Cleared',
+              'Your saved shared position was removed and Location Sharing was switched off.',
+            );
+          } catch (
+            error: unknown
+          ) {
+            showAccessibleAlert(
+              'Location Error',
+              getFriendlyError(
+                error,
+                'Treasi could not clear your shared position.',
+              ),
+            );
+          } finally {
+            if (
+              isMountedRef.current
+            ) {
+              setIsClearingLocation(
+                false,
+              );
+            }
+          }
+        },
+        [
+          isClearingLocation,
+        ],
+      );
+
+    /* ---------------------------------------------------------------------- */
+    /* Reset preferences                                                      */
+    /* ---------------------------------------------------------------------- */
+
+    const executePreferenceReset =
+      useCallback(
+        async (): Promise<void> => {
+          const user =
+            auth.currentUser;
+
+          if (
+            !user ||
+            isResettingPreferences
+          ) {
+            return;
+          }
+
+          setIsResettingPreferences(
+            true,
+          );
+
+          try {
+            await updateDoc(
+              doc(
+                db,
+                'users',
+                user.uid,
+              ),
+              {
+                ...DEFAULT_SETTINGS,
+
+                location:
+                  deleteField(),
+
+                updatedAt:
+                  serverTimestamp(),
+              },
+            );
+
+            setHapticFeedbackEnabled(
+              true,
+            );
+
+            setMotionSensitivityEnabled(
+              false,
+            );
+
+            setBatteryOptimizerEnabled(
+              false,
+            );
+
+            setNightModeEnabled(
+              false,
+            );
+
+            setTelemetryEnabled(
+              false,
+            );
+
+            setLocalUserData(
+              (
+                previous,
+              ) =>
+                previous
+                  ? {
+                      ...previous,
+
+                      ...DEFAULT_SETTINGS,
+
+                      location:
+                        null,
+                    }
+                  : previous,
+            );
+
+            showAccessibleAlert(
+              'Preferences Restored',
+              'Treasi preferences were restored to their default values. Stored location sharing was also cleared.',
+            );
+          } catch (
+            error: unknown
+          ) {
+            showAccessibleAlert(
+              'Reset Failed',
+              getFriendlyError(
+                error,
+                'Treasi could not restore your default preferences.',
+              ),
+            );
+          } finally {
+            if (
+              isMountedRef.current
+            ) {
+              setIsResettingPreferences(
+                false,
+              );
+            }
+          }
+        },
+        [
+          isResettingPreferences,
+        ],
+      );
+
+    const handleResetPreferences =
+      useCallback(
+        (): void => {
+          if (
+            isResettingPreferences
+          ) {
+            return;
+          }
+
+          Alert.alert(
+            'RESET FIELD PREFERENCES',
+            'Restore feedback, motion, battery, display and location-sharing preferences to their Treasi defaults?',
+            [
+              {
+                text:
+                  'CANCEL',
+
+                style:
+                  'cancel',
+              },
+
+              {
+                text:
+                  'RESET',
+
+                style:
+                  'destructive',
+
+                onPress: () => {
+                  void executePreferenceReset();
+                },
+              },
+            ],
+          );
+        },
+        [
+          executePreferenceReset,
+          isResettingPreferences,
+        ],
+      );
+
+    /* ---------------------------------------------------------------------- */
+    /* Edit identity                                                          */
+    /* ---------------------------------------------------------------------- */
+
+    const handleStartEditingIdentity =
+      useCallback(
+        (): void => {
+          const currentName =
+            safeString(
+              localUserData
+                ?.username,
+            ) ||
+            safeString(
+              auth.currentUser
+                ?.displayName,
+            ) ||
+            'EXPLORER';
+
+          setOriginalCallsign(
+            currentName,
+          );
+
+          setCallsign(
+            currentName,
+          );
+
+          setCallsignError(
+            null,
+          );
+
+          setIsEditingIdentity(
+            true,
+          );
+        },
+        [
+          localUserData
+            ?.username,
+        ],
+      );
+
+    const handleCancelIdentityEdit =
+      useCallback(
+        (): void => {
+          setCallsign(
+            originalCallsign,
+          );
+
+          setCallsignError(
+            null,
+          );
+
+          setIsEditingIdentity(
+            false,
+          );
+        },
+        [
+          originalCallsign,
+        ],
+      );
+
+    const handleSaveIdentity =
+      useCallback(
+        async (): Promise<void> => {
+          const user:
+            User | null =
+            auth.currentUser;
+
+          if (
+            !user ||
+            isSavingIdentity
+          ) {
+            return;
+          }
+
+          const nextCallsign =
+            normaliseCallsign(
+              callsign,
+            );
+
+          if (
+            !CALLSIGN_REGEX.test(
+              nextCallsign,
+            )
+          ) {
+            const message =
+              'Use 3–24 characters. The first character must be a letter or number; only letters, numbers, underscores and hyphens are allowed.';
+
+            setCallsignError(
+              message,
+            );
+
+            announce(
+              `Invalid callsign. ${message}`,
+            );
+
+            return;
+          }
+
+          if (
+            nextCallsign ===
+            normaliseCallsign(
+              originalCallsign,
+            )
+          ) {
+            setCallsign(
+              nextCallsign,
+            );
+
+            setCallsignError(
+              null,
+            );
+
+            setIsEditingIdentity(
+              false,
+            );
+
+            return;
+          }
+
+          setIsSavingIdentity(
+            true,
+          );
+
+          setCallsignError(
+            null,
+          );
+
+          const previousAuthName =
+            user.displayName;
+
+          try {
+            /*
+             * The current schema does not provide an atomic callsign
+             * reservation collection, so this is a best-effort duplicate
+             * check rather than a strict uniqueness guarantee.
+             */
+            const duplicateQuery =
+              query(
+                collection(
+                  db,
+                  'users',
+                ),
+
+                where(
+                  'username',
+                  '==',
+                  nextCallsign,
+                ),
+
+                limit(2),
+              );
+
+            const duplicateSnapshot =
+              await getDocs(
+                duplicateQuery,
+              );
+
+            const duplicateExists =
+              duplicateSnapshot
+                .docs
+                .some(
+                  (
+                    snapshotDocument,
+                  ) =>
+                    snapshotDocument.id !==
+                    user.uid,
+                );
+
+            if (
+              duplicateExists
+            ) {
+              setCallsignError(
+                'That Explorer callsign is already in use.',
+              );
+
+              announce(
+                'That Explorer callsign is already in use.',
+              );
+
+              return;
+            }
+
+            await updateProfile(
+              user,
+              {
+                displayName:
+                  nextCallsign,
+              },
+            );
+
+            try {
+              const userReference =
+                doc(
+                  db,
+                  'users',
+                  user.uid,
+                );
+
+              const activityReference =
+                doc(
+                  collection(
+                    db,
+                    'activity_feed',
+                  ),
+                );
+
+              const batch =
+                writeBatch(
+                  db,
+                );
+
+              batch.update(
+                userReference,
+                {
+                  username:
+                    nextCallsign,
+
+                  updatedAt:
+                    serverTimestamp(),
+                },
+              );
+
+              batch.set(
+                activityReference,
+                {
+                  activityId:
+                    activityReference.id,
+
+                  userId:
+                    user.uid,
+
+                  username:
+                    nextCallsign,
+
+                  type:
+                    'PROFILE_UPDATED',
+
+                  message:
+                    'UPDATED EXPLORER CALLSIGN',
+
+                  targetId:
+                    user.uid,
+
+                  createdAt:
+                    serverTimestamp(),
+                },
+              );
+
+              await batch.commit();
+            } catch (
+              firestoreError:
+                unknown
+            ) {
+              /*
+               * Roll back the Auth display name when Firestore could not
+               * complete the corresponding identity update.
+               */
+              try {
+                await updateProfile(
+                  user,
+                  {
+                    displayName:
+                      previousAuthName,
+                  },
+                );
+              } catch (
+                rollbackError:
+                  unknown
+              ) {
+                logDevelopmentWarning(
+                  '[Treasi Profile] Auth display-name rollback failed:',
+                  rollbackError,
+                );
+              }
+
+              throw firestoreError;
+            }
+
+            if (
+              !isMountedRef.current
+            ) {
+              return;
+            }
+
+            setCallsign(
+              nextCallsign,
+            );
+
+            setOriginalCallsign(
+              nextCallsign,
+            );
+
+            setLocalUserData(
+              (
+                previous,
+              ) =>
+                previous
+                  ? {
+                      ...previous,
+
+                      username:
+                        nextCallsign,
+                    }
+                  : previous,
+            );
+
+            setIsEditingIdentity(
+              false,
+            );
+
+            announce(
+              `Explorer callsign updated to ${nextCallsign}.`,
+            );
+          } catch (
+            error: unknown
+          ) {
+            const message =
+              getFriendlyError(
+                error,
+                'Treasi could not update your Explorer identity.',
+              );
+
+            setCallsignError(
+              message,
+            );
+
+            announce(
+              `Profile update failed. ${message}`,
+            );
+          } finally {
+            if (
+              isMountedRef.current
+            ) {
+              setIsSavingIdentity(
+                false,
+              );
+            }
+          }
+        },
+        [
+          callsign,
+          isSavingIdentity,
+          originalCallsign,
+        ],
+      );
+
+    /* ---------------------------------------------------------------------- */
+    /* Verification email                                                     */
+    /* ---------------------------------------------------------------------- */
+
+    const handleSendVerification =
+      useCallback(
+        async (): Promise<void> => {
+          const user =
+            auth.currentUser;
+
+          if (
+            !user ||
+            user.emailVerified ||
+            isSendingVerification
+          ) {
+            return;
+          }
+
+          setIsSendingVerification(
+            true,
+          );
+
+          try {
+            await sendEmailVerification(
+              user,
+            );
+
+            if (
+              !isMountedRef.current
+            ) {
+              return;
+            }
+
+            setVerificationSent(
+              true,
+            );
+
+            showAccessibleAlert(
+              'Verification Sent',
+              'Firebase sent a verification link to your account email address.',
+            );
+          } catch (
+            error: unknown
+          ) {
+            showAccessibleAlert(
+              'Verification Failed',
+              getFriendlyError(
+                error,
+                'Treasi could not send the verification email.',
+              ),
+            );
+          } finally {
+            if (
+              isMountedRef.current
+            ) {
+              setIsSendingVerification(
+                false,
+              );
+            }
+          }
+        },
+        [
+          isSendingVerification,
+        ],
+      );
+
+    /* ---------------------------------------------------------------------- */
+    /* Password reset                                                         */
+    /* ---------------------------------------------------------------------- */
+
+    const handlePasswordReset =
+      useCallback(
+        async (): Promise<void> => {
+          const email =
+            auth.currentUser
+              ?.email ??
+            localUserData
+              ?.email;
+
+          if (
+            !email ||
+            isSendingPasswordReset
+          ) {
+            return;
+          }
+
+          setIsSendingPasswordReset(
+            true,
+          );
+
+          try {
+            await sendPasswordResetEmail(
+              auth,
+              email,
+            );
+
+            showAccessibleAlert(
+              'Reset Email Sent',
+              'Firebase sent password-reset instructions to your account email address.',
+            );
+          } catch (
+            error: unknown
+          ) {
+            showAccessibleAlert(
+              'Password Reset Failed',
+              getFriendlyError(
+                error,
+                'Treasi could not send the password-reset email.',
+              ),
+            );
+          } finally {
+            if (
+              isMountedRef.current
+            ) {
+              setIsSendingPasswordReset(
+                false,
+              );
+            }
+          }
+        },
+        [
+          isSendingPasswordReset,
+          localUserData
+            ?.email,
+        ],
+      );
+
+    /* ---------------------------------------------------------------------- */
+    /* Refresh account                                                        */
+    /* ---------------------------------------------------------------------- */
+
+    const handleRefreshProfile =
+      useCallback(
+        async (): Promise<void> => {
+          setProfileError(
+            null,
+          );
+
+          setIsLoadingProfile(
+            true,
+          );
+
+          try {
+            const user =
+              auth.currentUser;
+
+            if (user) {
+              await reload(
+                user,
+              );
+
+              setAuthRefreshKey(
+                (
+                  current,
+                ) =>
+                  current + 1,
+              );
+            }
+
+            setRetryKey(
+              (
+                current,
+              ) =>
+                current + 1,
+            );
+
+            announce(
+              'Explorer profile refresh started.',
+            );
+          } catch (
+            error: unknown
+          ) {
+            setIsLoadingProfile(
+              false,
+            );
+
+            showAccessibleAlert(
+              'Refresh Failed',
+              getFriendlyError(
+                error,
+                'Treasi could not refresh the account status.',
+              ),
+            );
+          }
+        },
+        [],
+      );
+
+    /* ---------------------------------------------------------------------- */
+    /* System settings                                                        */
+    /* ---------------------------------------------------------------------- */
+
+    const handleOpenSystemSettings =
+      useCallback(
+        async (): Promise<void> => {
+          if (
+            Platform.OS ===
+            'web'
+          ) {
+            showAccessibleAlert(
+              'Browser Settings',
+              'Use your browser site settings to manage location, permissions and accessibility preferences for Treasi.',
+            );
+
+            return;
+          }
+
+          try {
+            await Linking
+              .openSettings();
+          } catch (
+            error: unknown
+          ) {
+            logDevelopmentWarning(
+              '[Treasi Profile] Unable to open system settings:',
+              error,
+            );
+
+            showAccessibleAlert(
+              'Settings Unavailable',
+              'Open your device settings manually to change Treasi permissions.',
+            );
+          }
+        },
+        [],
+      );
+
+    /* ---------------------------------------------------------------------- */
+    /* Sign out                                                               */
+    /* ---------------------------------------------------------------------- */
+
+    const executeSignOut =
+      useCallback(
+        async (): Promise<void> => {
+          if (
+            isSigningOut
+          ) {
+            return;
+          }
+
+          setIsSigningOut(
+            true,
+          );
+
+          try {
+            await signOut(
+              auth,
+            );
+
+            onSignOut();
+          } catch (
+            error: unknown
+          ) {
+            showAccessibleAlert(
+              'Sign Out Failed',
+              getFriendlyError(
+                error,
+                'Treasi could not end the current Explorer session.',
+              ),
+            );
+          } finally {
+            if (
+              isMountedRef.current
+            ) {
+              setIsSigningOut(
+                false,
+              );
+            }
+          }
+        },
+        [
+          isSigningOut,
+          onSignOut,
+        ],
+      );
+
+    const handleSignOut =
+      useCallback(
+        (): void => {
+          if (
+            isSigningOut
+          ) {
+            return;
+          }
+
+          Alert.alert(
+            'END EXPLORER SESSION',
+            'Sign out of Treasi on this device?',
+            [
+              {
+                text:
+                  'CANCEL',
+
+                style:
+                  'cancel',
+              },
+
+              {
+                text:
+                  'SIGN OUT',
+
+                style:
+                  'destructive',
+
+                onPress: () => {
+                  void executeSignOut();
+                },
+              },
+            ],
+          );
+        },
+        [
+          executeSignOut,
+          isSigningOut,
+        ],
+      );
+
+    /* ---------------------------------------------------------------------- */
+    /* Delete account                                                         */
+    /* ---------------------------------------------------------------------- */
+
+    const handleOpenDeleteAccount =
+      useCallback(
+        (): void => {
+          setDeleteConfirmation(
+            '',
+          );
+
+          setDeleteModalVisible(
+            true,
+          );
+        },
+        [],
+      );
+
+    const handleConfirmDeleteAccount =
+      useCallback(
+        async (): Promise<void> => {
+          if (
+            deleteConfirmation
+              .trim()
+              .toUpperCase() !==
+            'DELETE'
+          ) {
+            return;
+          }
+
+          /*
+           * Do not delete Firebase Auth alone. Doing so would leave the
+           * Firestore profile and email behind because the current rules
+           * intentionally prohibit client deletion of user documents.
+           */
+          if (
+            !onDeleteAccount
+          ) {
+            showAccessibleAlert(
+              'Secure Deletion Not Configured',
+              'Treasi will not delete only your Firebase sign-in while leaving your profile data behind. A secure server-side account deletion handler must be configured before this operation can be enabled.',
+            );
+
+            return;
+          }
+
+          if (
+            isDeletingAccount
+          ) {
+            return;
+          }
+
+          setIsDeletingAccount(
+            true,
+          );
+
+          try {
+            await onDeleteAccount();
+
+            if (
+              !isMountedRef.current
+            ) {
+              return;
+            }
+
+            setDeleteModalVisible(
+              false,
+            );
+
+            setDeleteConfirmation(
+              '',
+            );
+
+            /*
+             * The parent navigator may safely redirect after the secure
+             * deletion handler has removed the account.
+             */
+            onSignOut();
+          } catch (
+            error: unknown
+          ) {
+            showAccessibleAlert(
+              'Account Deletion Failed',
+              getFriendlyError(
+                error,
+                'Treasi could not securely delete the account.',
+              ),
+            );
+          } finally {
+            if (
+              isMountedRef.current
+            ) {
+              setIsDeletingAccount(
+                false,
+              );
+            }
+          }
+        },
+        [
+          deleteConfirmation,
+          isDeletingAccount,
+          onDeleteAccount,
+          onSignOut,
+        ],
+      );
+
+    /* ---------------------------------------------------------------------- */
+    /* Derived profile information                                            */
+    /* ---------------------------------------------------------------------- */
+
+    const currentUsername =
+      safeString(
+        localUserData
+          ?.username,
+      ) ||
+      safeString(
+        currentFirebaseUser
+          ?.displayName,
+      ) ||
+      'EXPLORER';
+
+    const currentEmail =
+      safeString(
+        localUserData
+          ?.email,
+        currentFirebaseUser
+          ?.email ??
+          'N/A',
+      );
+
+    const handle =
+      useMemo(
+        () =>
+          buildHandle(
+            currentUsername,
+          ),
+        [
+          currentUsername,
+        ],
+      );
+
+    const totalPoints =
+      typeof localUserData
+        ?.totalPoints ===
+        'number' &&
+      Number.isFinite(
+        localUserData
+          .totalPoints,
+      )
+        ? Math.max(
+            0,
+            Math.floor(
+              localUserData
+                .totalPoints,
+            ),
+          )
+        : 0;
+
+    const rank =
+      calculateRank(
+        totalPoints,
+      );
+
+    const memberSince =
+      formatMemberSince(
+        localUserData
+          ?.createdAt,
+      );
+
+    /*
+     * authRefreshKey intentionally participates so a Firebase reload causes
+     * this value to be re-read even though the User object identity is stable.
+     */
+    const emailVerified =
+      useMemo(
+        () =>
+          auth.currentUser
+            ?.emailVerified ===
+          true,
+        [
+          authRefreshKey,
+          currentFirebaseUser
+            ?.uid,
+        ],
+      );
+
+    const onboardingComplete =
+      localUserData
+        ?.hasCompletedOnboarding ===
+      true;
+
+    const hasSharedLocation =
+      Boolean(
+        localUserData
+          ?.location,
+      );
+
+    const isProfileLoading =
+      isLoadingProfile ||
+      (
+        isLoadingUserData &&
+        !localUserData
+      );
+
+    /* ---------------------------------------------------------------------- */
+    /* Setting renderer                                                       */
+    /* ---------------------------------------------------------------------- */
+
+    const renderSetting =
+      (
+        config:
+          SettingConfig,
+      ): React.ReactNode => {
+        const value =
+          getSettingValue(
+            config.key,
+          );
+
+        const saving =
+          isSavingSetting ===
+          config.key;
+
+        return (
+          <View
+            key={
+              config.key
+            }
+            accessible
+            accessibilityLabel={`${config.label}. ${
+              value
+                ? 'On'
+                : 'Off'
+            }. ${config.description}`}
+            style={
+              styles.settingCard
+            }
           >
-            <View style={styles.panelHeaderRow}>
-              <Ionicons
-                name="hardware-chip-outline"
-                size={11}
-                color="#A64B2A"
-              />
-              <Text style={styles.panelTitle}> CALIBRATION ARRAY</Text>
-              {(isSavingProfile || !!isSavingSetting) && (
+            <View
+              accessible={
+                false
+              }
+              importantForAccessibility="no-hide-descendants"
+              style={
+                styles.settingIdentity
+              }
+            >
+              <View
+                style={
+                  styles.settingIcon
+                }
+              >
+                <Ionicons
+                  name={
+                    config.icon
+                  }
+                  size={18}
+                  color={
+                    COLOURS.rust700
+                  }
+                />
+              </View>
+
+              <View
+                style={
+                  styles.settingTextGroup
+                }
+              >
+                <Text
+                  style={
+                    styles.settingLabel
+                  }
+                >
+                  {
+                    config.label
+                  }
+                </Text>
+
+                <Text
+                  maxFontSizeMultiplier={
+                    1.7
+                  }
+                  style={
+                    styles.settingDescription
+                  }
+                >
+                  {
+                    config.description
+                  }
+                </Text>
+              </View>
+            </View>
+
+            <View
+              style={
+                styles.settingControl
+              }
+            >
+              {saving ? (
                 <ActivityIndicator
                   size="small"
-                  color="#A64B2A"
-                  style={{ marginLeft: 6 }}
+                  color={
+                    COLOURS.rust700
+                  }
+                />
+              ) : (
+                <Switch
+                  accessibilityLabel={
+                    config.label
+                  }
+                  accessibilityRole="switch"
+                  accessibilityState={{
+                    checked:
+                      value,
+
+                    disabled:
+                      Boolean(
+                        isSavingSetting,
+                      ),
+                  }}
+                  disabled={
+                    Boolean(
+                      isSavingSetting,
+                    )
+                  }
+                  ios_backgroundColor={
+                    COLOURS.bronze600
+                  }
+                  thumbColor={
+                    value
+                      ? COLOURS.parchment100
+                      : '#7A6B58'
+                  }
+                  trackColor={{
+                    false:
+                      '#B7A98C',
+
+                    true:
+                      COLOURS.rust700,
+                  }}
+                  value={
+                    value
+                  }
+                  onValueChange={(
+                    nextValue,
+                  ) => {
+                    void handleToggleChange(
+                      config.key,
+                      nextValue,
+                    );
+                  }}
                 />
               )}
             </View>
+          </View>
+        );
+      };
 
-            <View style={styles.panelDivider} />
+    /* ---------------------------------------------------------------------- */
+    /* Loading / missing session                                              */
+    /* ---------------------------------------------------------------------- */
 
-            {renderSetting(
-              SETTINGS[0],
-              hapticTriggers,
-              setHapticTriggers,
-            )}
+    if (
+      isProfileLoading &&
+      !localUserData
+    ) {
+      return (
+        <View
+          accessible
+          accessibilityRole="progressbar"
+          accessibilityLabel="Loading Explorer profile"
+          style={[
+            styles.screen,
+            styles.centeredState,
+          ]}
+        >
+          <ActivityIndicator
+            size="large"
+            color={
+              COLOURS.bronze400
+            }
+          />
 
-            {renderSetting(
-              SETTINGS[1],
-              sensorSensitivity,
-              setSensorSensitivity,
-            )}
+          <Text
+            style={
+              styles.loadingText
+            }
+          >
+            FETCHING EXPLORER PROFILE…
+          </Text>
+        </View>
+      );
+    }
 
-            {renderSetting(
-              SETTINGS[2],
-              batteryOptimize,
-              setBatteryOptimize,
-            )}
+    if (
+      !localUserData &&
+      !currentFirebaseUser
+    ) {
+      return (
+        <View
+          style={[
+            styles.screen,
+            styles.centeredState,
+          ]}
+        >
+          <Ionicons
+            name="person-circle-outline"
+            size={52}
+            color={
+              COLOURS.bronze400
+            }
+          />
 
-            {renderSetting(
-              SETTINGS[3],
-              nightFieldMode,
-              setNightFieldMode,
-            )}
+          <Text
+            accessibilityRole="header"
+            style={
+              styles.loadingText
+            }
+          >
+            NO ACTIVE EXPLORER SESSION
+          </Text>
 
-            {renderSetting(
-              SETTINGS[4],
-              telemetryEnabled,
-              setTelemetryEnabled,
-            )}
+          {onBack ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Return to Dashboard"
+              onPress={
+                onBack
+              }
+              style={({
+                pressed,
+              }) => [
+                styles.standaloneBackButton,
 
-            {renderSetting(
-              SETTINGS[5],
-              skipOnboardingAuthFlow,
-              setSkipOnboardingAuthFlow,
-            )}
-
-            <View style={styles.behaviourNote}>
-              <Ionicons
-                name="information-circle-outline"
-                size={12}
-                color="#B08D57"
-              />
-              <Text style={styles.behaviourNoteText}>
-                Preferences are saved to your Firestore profile and remain available
-                to supported application features. A setting can only change another
-                screen's runtime behaviour when that feature reads the same saved value.
-              </Text>
-            </View>
-
-            <Animated.View
-              style={{
-                transform: [{ scale: signOutBtnScale }],
-              }}
+                pressed &&
+                  styles.darkPressed,
+              ]}
             >
-              <TouchableOpacity
-                style={styles.signOutButton}
-                activeOpacity={0.8}
-                disabled={isLoggingOut}
-                onPress={handleSignOutPress}
-                accessibilityRole="button"
-                accessibilityLabel={
-                  isLoggingOut ? 'Logging out' : 'Logout Session'
+              <Ionicons
+                name="arrow-back"
+                size={17}
+                color={
+                  COLOURS.parchment100
                 }
-                accessibilityState={{ disabled: isLoggingOut }}
-              >
-                {isLoggingOut ? (
-                  <>
-                    <ActivityIndicator size="small" color="#F3ECD8" />
-                    <Text style={styles.signOutText}>ENDING SESSION...</Text>
-                  </>
-                ) : (
-                  <>
-                    <Ionicons
-                      name="log-out-outline"
-                      size={13}
-                      color="#F3ECD8"
-                    />
-                    <Text style={styles.signOutText}>LOGOUT SESSION</Text>
-                  </>
-                )}
-              </TouchableOpacity>
-            </Animated.View>
+              />
 
-            {onBack && (
-              <TouchableOpacity
-                style={styles.backButton}
-                onPress={onBack}
-                accessibilityRole="button"
-                accessibilityLabel="Back to Dashboard"
+              <Text
+                style={
+                  styles.standaloneBackText
+                }
+              >
+                RETURN
+              </Text>
+            </Pressable>
+          ) : null}
+        </View>
+      );
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /* Render                                                                 */
+    /* ---------------------------------------------------------------------- */
+
+    return (
+      <KeyboardAvoidingView
+        style={
+          styles.screen
+        }
+        behavior={
+          Platform.OS ===
+          'ios'
+            ? 'padding'
+            : undefined
+        }
+      >
+        <View
+          style={[
+            styles.splitWrapper,
+
+            {
+              flexDirection:
+                isLandscape
+                  ? 'row'
+                  : 'column',
+
+              paddingLeft:
+                Math.max(
+                  insets.left,
+                  12,
+                ),
+
+              paddingRight:
+                Math.max(
+                  insets.right,
+                  12,
+                ),
+
+              paddingTop:
+                Math.max(
+                  insets.top,
+                  10,
+                ),
+
+              paddingBottom:
+                Math.max(
+                  insets.bottom,
+                  10,
+                ),
+            },
+          ]}
+        >
+          {/* ================================================================ */}
+          {/* 60% — SETTINGS                                                  */}
+          {/* ================================================================ */}
+
+          <View
+            style={[
+              styles.settingsPanel,
+
+              isLandscape
+                ? styles.settingsPanelLandscape
+                : styles.panelPortrait,
+            ]}
+          >
+            <View
+              style={
+                styles.settingsHeader
+              }
+            >
+              <View
+                style={
+                  styles.headerIdentity
+                }
               >
                 <Ionicons
-                  name="chevron-back-sharp"
-                  size={11}
-                  color="#B08D57"
+                  accessible={
+                    false
+                  }
+                  importantForAccessibility="no"
+                  name="options-outline"
+                  size={20}
+                  color={
+                    COLOURS.rust700
+                  }
                 />
-                <Text style={styles.backText}> DASHBOARD</Text>
-              </TouchableOpacity>
-            )}
-          </ScrollView>
 
-          <View style={styles.navBarContainer}>
+                <View
+                  style={
+                    styles.headerTextGroup
+                  }
+                >
+                  <Text
+                    accessibilityRole="header"
+                    maxFontSizeMultiplier={
+                      1.6
+                    }
+                    style={
+                      styles.settingsTitle
+                    }
+                  >
+                    FIELD SETTINGS
+                  </Text>
+
+                  <Text
+                    maxFontSizeMultiplier={
+                      1.5
+                    }
+                    style={
+                      styles.settingsSubtitle
+                    }
+                  >
+                    FEEDBACK · PRIVACY · GUIDANCE · ACCOUNT
+                  </Text>
+                </View>
+              </View>
+
+              {isSavingSetting ||
+              isSavingIdentity ||
+              isResettingPreferences ? (
+                <ActivityIndicator
+                  size="small"
+                  color={
+                    COLOURS.rust700
+                  }
+                />
+              ) : null}
+            </View>
+
+            {profileError ? (
+              <View
+                accessible
+                accessibilityRole="alert"
+                accessibilityLiveRegion="polite"
+                style={
+                  styles.profileErrorCard
+                }
+              >
+                <Ionicons
+                  name="warning-outline"
+                  size={18}
+                  color={
+                    COLOURS.rust800
+                  }
+                />
+
+                <Text
+                  maxFontSizeMultiplier={
+                    1.7
+                  }
+                  style={
+                    styles.profileErrorText
+                  }
+                >
+                  {
+                    profileError
+                  }
+                </Text>
+
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Retry profile synchronisation"
+                  onPress={() => {
+                    void handleRefreshProfile();
+                  }}
+                  style={({
+                    pressed,
+                  }) => [
+                    styles.errorRetryButton,
+
+                    pressed &&
+                      styles.lightPressed,
+                  ]}
+                >
+                  <Text
+                    style={
+                      styles.errorRetryText
+                    }
+                  >
+                    RETRY
+                  </Text>
+                </Pressable>
+              </View>
+            ) : null}
+
+            <ScrollView
+              style={
+                styles.settingsScroll
+              }
+              contentContainerStyle={
+                styles.settingsScrollContent
+              }
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={
+                false
+              }
+            >
+              {/* ------------------------------------------------------------ */}
+              {/* Feedback                                                     */}
+              {/* ------------------------------------------------------------ */}
+
+              <View
+                style={
+                  styles.sectionHeader
+                }
+              >
+                <Ionicons
+                  accessible={
+                    false
+                  }
+                  importantForAccessibility="no"
+                  name="pulse-outline"
+                  size={16}
+                  color={
+                    COLOURS.rust700
+                  }
+                />
+
+                <Text
+                  accessibilityRole="header"
+                  style={
+                    styles.sectionTitle
+                  }
+                >
+                  FIELD FEEDBACK
+                </Text>
+              </View>
+
+              {renderSetting(
+                SETTINGS[0],
+              )}
+
+              {renderSetting(
+                SETTINGS[1],
+              )}
+
+              {/* ------------------------------------------------------------ */}
+              {/* Privacy                                                      */}
+              {/* ------------------------------------------------------------ */}
+
+              <View
+                style={[
+                  styles.sectionHeader,
+                  styles.sectionSpacing,
+                ]}
+              >
+                <Ionicons
+                  accessible={
+                    false
+                  }
+                  importantForAccessibility="no"
+                  name="shield-checkmark-outline"
+                  size={16}
+                  color={
+                    COLOURS.rust700
+                  }
+                />
+
+                <Text
+                  accessibilityRole="header"
+                  style={
+                    styles.sectionTitle
+                  }
+                >
+                  POSITION & PRIVACY
+                </Text>
+              </View>
+
+              {renderSetting(
+                SETTINGS[2],
+              )}
+
+              <View
+                accessible
+                accessibilityLabel={`Saved shared position: ${
+                  hasSharedLocation
+                    ? 'present'
+                    : 'none'
+                }.`}
+                style={
+                  styles.statusStrip
+                }
+              >
+                <View
+                  accessible={
+                    false
+                  }
+                  importantForAccessibility="no-hide-descendants"
+                  style={
+                    styles.statusStripIdentity
+                  }
+                >
+                  <Ionicons
+                    name={
+                      hasSharedLocation
+                        ? 'location'
+                        : 'location-outline'
+                    }
+                    size={16}
+                    color={
+                      hasSharedLocation
+                        ? COLOURS.success700
+                        : COLOURS.bronze700
+                    }
+                  />
+
+                  <View
+                    style={
+                      styles.statusStripTextGroup
+                    }
+                  >
+                    <Text
+                      style={
+                        styles.statusStripTitle
+                      }
+                    >
+                      SAVED SHARED POSITION
+                    </Text>
+
+                    <Text
+                      style={
+                        styles.statusStripValue
+                      }
+                    >
+                      {hasSharedLocation
+                        ? 'POSITION STORED'
+                        : 'NO POSITION STORED'}
+                    </Text>
+                  </View>
+                </View>
+
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Stop location sharing and clear saved position"
+                  accessibilityHint="Turns Location Sharing off and removes the stored position from your Firestore profile."
+                  accessibilityState={{
+                    disabled:
+                      isClearingLocation ||
+                      (
+                        !hasSharedLocation &&
+                        !telemetryEnabled
+                      ),
+
+                    busy:
+                      isClearingLocation,
+                  }}
+                  disabled={
+                    isClearingLocation ||
+                    (
+                      !hasSharedLocation &&
+                      !telemetryEnabled
+                    )
+                  }
+                  onPress={() => {
+                    void handleClearSharedLocation();
+                  }}
+                  style={({
+                    pressed,
+                  }) => [
+                    styles.compactActionButton,
+
+                    (
+                      isClearingLocation ||
+                      (
+                        !hasSharedLocation &&
+                        !telemetryEnabled
+                      )
+                    ) &&
+                      styles.disabledButton,
+
+                    pressed &&
+                      !isClearingLocation &&
+                      styles.lightPressed,
+                  ]}
+                >
+                  {isClearingLocation ? (
+                    <ActivityIndicator
+                      size="small"
+                      color={
+                        COLOURS.ink900
+                      }
+                    />
+                  ) : (
+                    <>
+                      <Ionicons
+                        name="trash-bin-outline"
+                        size={16}
+                        color={
+                          COLOURS.ink900
+                        }
+                      />
+
+                      <Text
+                        style={
+                          styles.compactActionText
+                        }
+                      >
+                        CLEAR
+                      </Text>
+                    </>
+                  )}
+                </Pressable>
+              </View>
+
+              <View
+                style={
+                  styles.informationCard
+                }
+              >
+                <Ionicons
+                  accessible={
+                    false
+                  }
+                  importantForAccessibility="no"
+                  name="information-circle-outline"
+                  size={17}
+                  color={
+                    COLOURS.bronze700
+                  }
+                />
+
+                <Text
+                  maxFontSizeMultiplier={
+                    1.7
+                  }
+                  style={
+                    styles.informationText
+                  }
+                >
+                  Social may calculate nearby range locally even when sharing is off. Your position is only written to your profile when Location Sharing is enabled.
+                </Text>
+              </View>
+
+              {/* ------------------------------------------------------------ */}
+              {/* Power and display                                            */}
+              {/* ------------------------------------------------------------ */}
+
+              <View
+                style={[
+                  styles.sectionHeader,
+                  styles.sectionSpacing,
+                ]}
+              >
+                <Ionicons
+                  accessible={
+                    false
+                  }
+                  importantForAccessibility="no"
+                  name="contrast-outline"
+                  size={16}
+                  color={
+                    COLOURS.rust700
+                  }
+                />
+
+                <Text
+                  accessibilityRole="header"
+                  style={
+                    styles.sectionTitle
+                  }
+                >
+                  POWER & DISPLAY
+                </Text>
+              </View>
+
+              {renderSetting(
+                SETTINGS[3],
+              )}
+
+              {renderSetting(
+                SETTINGS[4],
+              )}
+
+              <View
+                accessible
+                accessibilityLabel={`System Reduce Motion is ${
+                  reduceMotionEnabled
+                    ? 'enabled'
+                    : 'disabled'
+                }.`}
+                style={
+                  styles.systemStatusCard
+                }
+              >
+                <View
+                  accessible={
+                    false
+                  }
+                  importantForAccessibility="no-hide-descendants"
+                  style={
+                    styles.settingIdentity
+                  }
+                >
+                  <View
+                    style={
+                      styles.settingIcon
+                    }
+                  >
+                    <Ionicons
+                      name="accessibility-outline"
+                      size={18}
+                      color={
+                        COLOURS.rust700
+                      }
+                    />
+                  </View>
+
+                  <View
+                    style={
+                      styles.settingTextGroup
+                    }
+                  >
+                    <Text
+                      style={
+                        styles.settingLabel
+                      }
+                    >
+                      SYSTEM REDUCE MOTION
+                    </Text>
+
+                    <Text
+                      maxFontSizeMultiplier={
+                        1.7
+                      }
+                      style={
+                        styles.settingDescription
+                      }
+                    >
+                      Treasi reads the operating system preference on supported screens rather than overriding it here.
+                    </Text>
+                  </View>
+                </View>
+
+                <View
+                  style={[
+                    styles.systemBadge,
+
+                    reduceMotionEnabled
+                      ? styles.systemBadgeOn
+                      : styles.systemBadgeOff,
+                  ]}
+                >
+                  <Text
+                    style={
+                      styles.systemBadgeText
+                    }
+                  >
+                    {reduceMotionEnabled
+                      ? 'ON'
+                      : 'OFF'}
+                  </Text>
+                </View>
+              </View>
+
+              {/* ------------------------------------------------------------ */}
+              {/* Guidance                                                     */}
+              {/* ------------------------------------------------------------ */}
+
+              <View
+                style={[
+                  styles.sectionHeader,
+                  styles.sectionSpacing,
+                ]}
+              >
+                <Ionicons
+                  accessible={
+                    false
+                  }
+                  importantForAccessibility="no"
+                  name="map-outline"
+                  size={16}
+                  color={
+                    COLOURS.rust700
+                  }
+                />
+
+                <Text
+                  accessibilityRole="header"
+                  style={
+                    styles.sectionTitle
+                  }
+                >
+                  GUIDANCE & DEVICE
+                </Text>
+              </View>
+
+              <View
+                style={
+                  styles.actionGrid
+                }
+              >
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Review onboarding"
+                  accessibilityHint="Opens the Treasi onboarding guide without changing your completion status."
+                  onPress={() =>
+                    setOnboardingVisible(
+                      true,
+                    )
+                  }
+                  style={({
+                    pressed,
+                  }) => [
+                    styles.actionCard,
+
+                    pressed &&
+                      styles.lightPressed,
+                  ]}
+                >
+                  <Ionicons
+                    name="book-outline"
+                    size={21}
+                    color={
+                      COLOURS.rust700
+                    }
+                  />
+
+                  <View
+                    style={
+                      styles.actionCardTextGroup
+                    }
+                  >
+                    <Text
+                      style={
+                        styles.actionCardTitle
+                      }
+                    >
+                      REVIEW ONBOARDING
+                    </Text>
+
+                    <Text
+                      maxFontSizeMultiplier={
+                        1.7
+                      }
+                      style={
+                        styles.actionCardDescription
+                      }
+                    >
+                      Revisit Treasi orientation, location and sensor guidance.
+                    </Text>
+                  </View>
+
+                  <Ionicons
+                    name="chevron-forward"
+                    size={17}
+                    color={
+                      COLOURS.bronze700
+                    }
+                  />
+                </Pressable>
+
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Open system settings"
+                  accessibilityHint="Opens device settings for Treasi permissions when supported."
+                  onPress={() => {
+                    void handleOpenSystemSettings();
+                  }}
+                  style={({
+                    pressed,
+                  }) => [
+                    styles.actionCard,
+
+                    pressed &&
+                      styles.lightPressed,
+                  ]}
+                >
+                  <Ionicons
+                    name="settings-outline"
+                    size={21}
+                    color={
+                      COLOURS.rust700
+                    }
+                  />
+
+                  <View
+                    style={
+                      styles.actionCardTextGroup
+                    }
+                  >
+                    <Text
+                      style={
+                        styles.actionCardTitle
+                      }
+                    >
+                      SYSTEM PERMISSIONS
+                    </Text>
+
+                    <Text
+                      maxFontSizeMultiplier={
+                        1.7
+                      }
+                      style={
+                        styles.actionCardDescription
+                      }
+                    >
+                      Manage location and application permissions at operating-system level.
+                    </Text>
+                  </View>
+
+                  <Ionicons
+                    name="open-outline"
+                    size={17}
+                    color={
+                      COLOURS.bronze700
+                    }
+                  />
+                </Pressable>
+
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Refresh Explorer profile"
+                  accessibilityHint="Reloads Firebase Authentication status and the Firestore profile."
+                  accessibilityState={{
+                    busy:
+                      isLoadingProfile,
+                  }}
+                  onPress={() => {
+                    void handleRefreshProfile();
+                  }}
+                  style={({
+                    pressed,
+                  }) => [
+                    styles.actionCard,
+
+                    pressed &&
+                      styles.lightPressed,
+                  ]}
+                >
+                  {isLoadingProfile ? (
+                    <ActivityIndicator
+                      size="small"
+                      color={
+                        COLOURS.rust700
+                      }
+                    />
+                  ) : (
+                    <Ionicons
+                      name="refresh-outline"
+                      size={21}
+                      color={
+                        COLOURS.rust700
+                      }
+                    />
+                  )}
+
+                  <View
+                    style={
+                      styles.actionCardTextGroup
+                    }
+                  >
+                    <Text
+                      style={
+                        styles.actionCardTitle
+                      }
+                    >
+                      REFRESH FIELD RECORD
+                    </Text>
+
+                    <Text
+                      maxFontSizeMultiplier={
+                        1.7
+                      }
+                      style={
+                        styles.actionCardDescription
+                      }
+                    >
+                      Recheck profile data, email verification and account state.
+                    </Text>
+                  </View>
+
+                  <Ionicons
+                    name="chevron-forward"
+                    size={17}
+                    color={
+                      COLOURS.bronze700
+                    }
+                  />
+                </Pressable>
+              </View>
+
+              {/* ------------------------------------------------------------ */}
+              {/* Security                                                     */}
+              {/* ------------------------------------------------------------ */}
+
+              <View
+                style={[
+                  styles.sectionHeader,
+                  styles.sectionSpacing,
+                ]}
+              >
+                <Ionicons
+                  accessible={
+                    false
+                  }
+                  importantForAccessibility="no"
+                  name="key-outline"
+                  size={16}
+                  color={
+                    COLOURS.rust700
+                  }
+                />
+
+                <Text
+                  accessibilityRole="header"
+                  style={
+                    styles.sectionTitle
+                  }
+                >
+                  ACCOUNT SECURITY
+                </Text>
+              </View>
+
+              <View
+                style={
+                  styles.actionGrid
+                }
+              >
+                {!emailVerified ? (
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Send email verification"
+                    accessibilityHint="Sends a Firebase verification link to your account email."
+                    accessibilityState={{
+                      disabled:
+                        isSendingVerification,
+
+                      busy:
+                        isSendingVerification,
+                    }}
+                    disabled={
+                      isSendingVerification
+                    }
+                    onPress={() => {
+                      void handleSendVerification();
+                    }}
+                    style={({
+                      pressed,
+                    }) => [
+                      styles.actionCard,
+
+                      isSendingVerification &&
+                        styles.disabledButton,
+
+                      pressed &&
+                        !isSendingVerification &&
+                        styles.lightPressed,
+                    ]}
+                  >
+                    {isSendingVerification ? (
+                      <ActivityIndicator
+                        size="small"
+                        color={
+                          COLOURS.rust700
+                        }
+                      />
+                    ) : (
+                      <Ionicons
+                        name="mail-unread-outline"
+                        size={21}
+                        color={
+                          COLOURS.rust700
+                        }
+                      />
+                    )}
+
+                    <View
+                      style={
+                        styles.actionCardTextGroup
+                      }
+                    >
+                      <Text
+                        style={
+                          styles.actionCardTitle
+                        }
+                      >
+                        {verificationSent
+                          ? 'VERIFICATION SENT'
+                          : 'VERIFY EMAIL'}
+                      </Text>
+
+                      <Text
+                        maxFontSizeMultiplier={
+                          1.7
+                        }
+                        style={
+                          styles.actionCardDescription
+                        }
+                      >
+                        Send a Firebase verification link to {currentEmail}.
+                      </Text>
+                    </View>
+
+                    <Ionicons
+                      name="chevron-forward"
+                      size={17}
+                      color={
+                        COLOURS.bronze700
+                      }
+                    />
+                  </Pressable>
+                ) : (
+                  <View
+                    accessible
+                    accessibilityLabel="Account email is verified."
+                    style={[
+                      styles.actionCard,
+                      styles.verifiedCard,
+                    ]}
+                  >
+                    <Ionicons
+                      name="checkmark-circle"
+                      size={21}
+                      color={
+                        COLOURS.success700
+                      }
+                    />
+
+                    <View
+                      style={
+                        styles.actionCardTextGroup
+                      }
+                    >
+                      <Text
+                        style={[
+                          styles.actionCardTitle,
+                          styles.verifiedText,
+                        ]}
+                      >
+                        EMAIL VERIFIED
+                      </Text>
+
+                      <Text
+                        style={
+                          styles.actionCardDescription
+                        }
+                      >
+                        Firebase has verified this account email.
+                      </Text>
+                    </View>
+                  </View>
+                )}
+
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Send password reset email"
+                  accessibilityHint="Sends Firebase password-reset instructions to your account email."
+                  accessibilityState={{
+                    disabled:
+                      isSendingPasswordReset,
+
+                    busy:
+                      isSendingPasswordReset,
+                  }}
+                  disabled={
+                    isSendingPasswordReset
+                  }
+                  onPress={() => {
+                    void handlePasswordReset();
+                  }}
+                  style={({
+                    pressed,
+                  }) => [
+                    styles.actionCard,
+
+                    isSendingPasswordReset &&
+                      styles.disabledButton,
+
+                    pressed &&
+                      !isSendingPasswordReset &&
+                      styles.lightPressed,
+                  ]}
+                >
+                  {isSendingPasswordReset ? (
+                    <ActivityIndicator
+                      size="small"
+                      color={
+                        COLOURS.rust700
+                      }
+                    />
+                  ) : (
+                    <Ionicons
+                      name="key-outline"
+                      size={21}
+                      color={
+                        COLOURS.rust700
+                      }
+                    />
+                  )}
+
+                  <View
+                    style={
+                      styles.actionCardTextGroup
+                    }
+                  >
+                    <Text
+                      style={
+                        styles.actionCardTitle
+                      }
+                    >
+                      RESET PASSWORD
+                    </Text>
+
+                    <Text
+                      maxFontSizeMultiplier={
+                        1.7
+                      }
+                      style={
+                        styles.actionCardDescription
+                      }
+                    >
+                      Email secure Firebase password-reset instructions.
+                    </Text>
+                  </View>
+
+                  <Ionicons
+                    name="chevron-forward"
+                    size={17}
+                    color={
+                      COLOURS.bronze700
+                    }
+                  />
+                </Pressable>
+              </View>
+
+              {/* ------------------------------------------------------------ */}
+              {/* Reset                                                        */}
+              {/* ------------------------------------------------------------ */}
+
+              <View
+                style={[
+                  styles.sectionHeader,
+                  styles.sectionSpacing,
+                ]}
+              >
+                <Ionicons
+                  accessible={
+                    false
+                  }
+                  importantForAccessibility="no"
+                  name="refresh-circle-outline"
+                  size={16}
+                  color={
+                    COLOURS.rust700
+                  }
+                />
+
+                <Text
+                  accessibilityRole="header"
+                  style={
+                    styles.sectionTitle
+                  }
+                >
+                  RESTORE
+                </Text>
+              </View>
+
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Restore default Treasi preferences"
+                accessibilityHint="Resets saved feedback, motion, battery, display and location-sharing preferences."
+                accessibilityState={{
+                  disabled:
+                    isResettingPreferences,
+
+                  busy:
+                    isResettingPreferences,
+                }}
+                disabled={
+                  isResettingPreferences
+                }
+                onPress={
+                  handleResetPreferences
+                }
+                style={({
+                  pressed,
+                }) => [
+                  styles.resetButton,
+
+                  isResettingPreferences &&
+                    styles.disabledButton,
+
+                  pressed &&
+                    !isResettingPreferences &&
+                    styles.lightPressed,
+                ]}
+              >
+                {isResettingPreferences ? (
+                  <ActivityIndicator
+                    size="small"
+                    color={
+                      COLOURS.ink900
+                    }
+                  />
+                ) : (
+                  <Ionicons
+                    name="refresh-outline"
+                    size={18}
+                    color={
+                      COLOURS.ink900
+                    }
+                  />
+                )}
+
+                <View
+                  style={
+                    styles.resetButtonTextGroup
+                  }
+                >
+                  <Text
+                    style={
+                      styles.resetButtonTitle
+                    }
+                  >
+                    RESTORE DEFAULT PREFERENCES
+                  </Text>
+
+                  <Text
+                    maxFontSizeMultiplier={
+                      1.7
+                    }
+                    style={
+                      styles.resetButtonDescription
+                    }
+                  >
+                    Haptics return on; motion sensitivity, battery preference, night preference and location sharing return off.
+                  </Text>
+                </View>
+              </Pressable>
+
+              {/* ------------------------------------------------------------ */}
+              {/* Danger zone                                                  */}
+              {/* ------------------------------------------------------------ */}
+
+              <View
+                style={[
+                  styles.sectionHeader,
+                  styles.sectionSpacing,
+                ]}
+              >
+                <Ionicons
+                  accessible={
+                    false
+                  }
+                  importantForAccessibility="no"
+                  name="warning-outline"
+                  size={16}
+                  color={
+                    COLOURS.rust800
+                  }
+                />
+
+                <Text
+                  accessibilityRole="header"
+                  style={[
+                    styles.sectionTitle,
+                    styles.dangerSectionTitle,
+                  ]}
+                >
+                  ACCOUNT CONTROL
+                </Text>
+              </View>
+
+              <View
+                style={
+                  styles.dangerZone
+                }
+              >
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Sign out"
+                  accessibilityHint="Ends the current Treasi session without deleting account data."
+                  accessibilityState={{
+                    disabled:
+                      isSigningOut,
+
+                    busy:
+                      isSigningOut,
+                  }}
+                  disabled={
+                    isSigningOut
+                  }
+                  onPress={
+                    handleSignOut
+                  }
+                  style={({
+                    pressed,
+                  }) => [
+                    styles.signOutButton,
+
+                    isSigningOut &&
+                      styles.disabledButton,
+
+                    pressed &&
+                      !isSigningOut &&
+                      styles.darkPressed,
+                  ]}
+                >
+                  {isSigningOut ? (
+                    <ActivityIndicator
+                      size="small"
+                      color={
+                        COLOURS.parchment100
+                      }
+                    />
+                  ) : (
+                    <Ionicons
+                      name="log-out-outline"
+                      size={18}
+                      color={
+                        COLOURS.parchment100
+                      }
+                    />
+                  )}
+
+                  <Text
+                    style={
+                      styles.signOutText
+                    }
+                  >
+                    {isSigningOut
+                      ? 'ENDING SESSION...'
+                      : 'SIGN OUT'}
+                  </Text>
+                </Pressable>
+
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Delete Treasi account"
+                  accessibilityHint="Opens the permanent account deletion confirmation."
+                  onPress={
+                    handleOpenDeleteAccount
+                  }
+                  style={({
+                    pressed,
+                  }) => [
+                    styles.deleteAccountButton,
+
+                    pressed &&
+                      styles.dangerPressed,
+                  ]}
+                >
+                  <Ionicons
+                    name="trash-outline"
+                    size={18}
+                    color={
+                      COLOURS.rust800
+                    }
+                  />
+
+                  <View
+                    style={
+                      styles.deleteButtonTextGroup
+                    }
+                  >
+                    <Text
+                      style={
+                        styles.deleteAccountTitle
+                      }
+                    >
+                      DELETE ACCOUNT
+                    </Text>
+
+                    <Text
+                      maxFontSizeMultiplier={
+                        1.7
+                      }
+                      style={
+                        styles.deleteAccountDescription
+                      }
+                    >
+                      Permanent deletion requires secure Firestore and Firebase Authentication cleanup.
+                    </Text>
+                  </View>
+                </Pressable>
+              </View>
+            </ScrollView>
+          </View>
+
+          {/* ================================================================ */}
+          {/* 40% — PROFILE                                                   */}
+          {/* ================================================================ */}
+
+          <View
+            style={[
+              styles.profilePanel,
+
+              isLandscape
+                ? styles.profilePanelLandscape
+                : styles.panelPortrait,
+            ]}
+          >
+            <ScrollView
+              style={
+                styles.profileScroll
+              }
+              contentContainerStyle={
+                styles.profileScrollContent
+              }
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={
+                false
+              }
+            >
+              <View
+                style={
+                  styles.profileHeader
+                }
+              >
+                <View
+                  style={
+                    styles.profileHeaderIdentity
+                  }
+                >
+                  <Ionicons
+                    accessible={
+                      false
+                    }
+                    importantForAccessibility="no"
+                    name="person-circle-outline"
+                    size={19}
+                    color={
+                      COLOURS.bronze400
+                    }
+                  />
+
+                  <View
+                    style={
+                      styles.headerTextGroup
+                    }
+                  >
+                    <Text
+                      accessibilityRole="header"
+                      style={
+                        styles.profileTitle
+                      }
+                    >
+                      FIELD IDENTITY
+                    </Text>
+
+                    <Text
+                      style={
+                        styles.profileSubtitle
+                      }
+                    >
+                      EXPLORER ACCOUNT RECORD
+                    </Text>
+                  </View>
+                </View>
+
+                {onBack ? (
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Return to Dashboard"
+                    onPress={
+                      onBack
+                    }
+                    style={({
+                      pressed,
+                    }) => [
+                      styles.backButton,
+
+                      pressed &&
+                        styles.darkPressed,
+                    ]}
+                  >
+                    <Ionicons
+                      name="arrow-back"
+                      size={18}
+                      color={
+                        COLOURS.bronze400
+                      }
+                    />
+                  </Pressable>
+                ) : null}
+              </View>
+
+              {/* ------------------------------------------------------------ */}
+              {/* Identity card                                                */}
+              {/* ------------------------------------------------------------ */}
+
+              <View
+                style={
+                  styles.identityCard
+                }
+              >
+                <View
+                  style={
+                    styles.identityTopRow
+                  }
+                >
+                  <View
+                    accessible={
+                      false
+                    }
+                    importantForAccessibility="no-hide-descendants"
+                    style={
+                      styles.avatar
+                    }
+                  >
+                    <Ionicons
+                      name="person"
+                      size={31}
+                      color={
+                        COLOURS.parchment100
+                      }
+                    />
+                  </View>
+
+                  <View
+                    style={
+                      styles.identityMain
+                    }
+                  >
+                    {isEditingIdentity ? (
+                      <>
+                        <Text
+                          style={
+                            styles.identityInputLabel
+                          }
+                        >
+                          EXPLORER CALLSIGN
+                        </Text>
+
+                        <TextInput
+                          accessibilityLabel="Explorer callsign"
+                          accessibilityHint="Use three to twenty-four letters, numbers, underscores or hyphens."
+                          autoCapitalize="characters"
+                          autoCorrect={
+                            false
+                          }
+                          editable={
+                            !isSavingIdentity
+                          }
+                          maxLength={
+                            MAX_CALLSIGN_LENGTH
+                          }
+                          placeholder="EXPLORER_CALLSIGN"
+                          placeholderTextColor={
+                            COLOURS.bronze700
+                          }
+                          selectionColor={
+                            COLOURS.rust700
+                          }
+                          value={
+                            callsign
+                          }
+                          onChangeText={(
+                            value,
+                          ) => {
+                            setCallsign(
+                              value.toUpperCase(),
+                            );
+
+                            setCallsignError(
+                              null,
+                            );
+                          }}
+                          style={[
+                            styles.identityInput,
+
+                            callsignError &&
+                              styles.identityInputError,
+                          ]}
+                        />
+
+                        {callsignError ? (
+                          <Text
+                            accessibilityRole="alert"
+                            accessibilityLiveRegion="assertive"
+                            style={
+                              styles.callsignErrorText
+                            }
+                          >
+                            {
+                              callsignError
+                            }
+                          </Text>
+                        ) : (
+                          <Text
+                            maxFontSizeMultiplier={
+                              1.6
+                            }
+                            style={
+                              styles.identityInputHelp
+                            }
+                          >
+                            3–24 characters · A–Z · 0–9 · _ · -
+                          </Text>
+                        )}
+                      </>
+                    ) : (
+                      <>
+                        <Text
+                          numberOfLines={
+                            1
+                          }
+                          style={
+                            styles.profileName
+                          }
+                        >
+                          {
+                            currentUsername
+                          }
+                        </Text>
+
+                        <Text
+                          numberOfLines={
+                            1
+                          }
+                          style={
+                            styles.profileHandle
+                          }
+                        >
+                          {
+                            handle
+                          }
+                        </Text>
+                      </>
+                    )}
+
+                    <View
+                      accessible
+                      accessibilityLabel={`Explorer rank ${rank}`}
+                      style={
+                        styles.rankBadge
+                      }
+                    >
+                      <Ionicons
+                        accessible={
+                          false
+                        }
+                        importantForAccessibility="no"
+                        name="shield-checkmark"
+                        size={13}
+                        color={
+                          COLOURS.parchment100
+                        }
+                      />
+
+                      <Text
+                        style={
+                          styles.rankBadgeText
+                        }
+                      >
+                        {
+                          rank
+                        }
+                      </Text>
+                    </View>
+                  </View>
+                </View>
+
+                {isEditingIdentity ? (
+                  <View
+                    style={
+                      styles.identityEditActions
+                    }
+                  >
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel="Save Explorer callsign"
+                      accessibilityState={{
+                        disabled:
+                          isSavingIdentity,
+
+                        busy:
+                          isSavingIdentity,
+                      }}
+                      disabled={
+                        isSavingIdentity
+                      }
+                      onPress={() => {
+                        void handleSaveIdentity();
+                      }}
+                      style={({
+                        pressed,
+                      }) => [
+                        styles.identitySaveButton,
+
+                        isSavingIdentity &&
+                          styles.disabledButton,
+
+                        pressed &&
+                          !isSavingIdentity &&
+                          styles.primaryPressed,
+                      ]}
+                    >
+                      {isSavingIdentity ? (
+                        <ActivityIndicator
+                          size="small"
+                          color={
+                            COLOURS.parchment100
+                          }
+                        />
+                      ) : (
+                        <Ionicons
+                          name="checkmark"
+                          size={17}
+                          color={
+                            COLOURS.parchment100
+                          }
+                        />
+                      )}
+
+                      <Text
+                        style={
+                          styles.identitySaveText
+                        }
+                      >
+                        SAVE
+                      </Text>
+                    </Pressable>
+
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel="Cancel callsign editing"
+                      accessibilityState={{
+                        disabled:
+                          isSavingIdentity,
+                      }}
+                      disabled={
+                        isSavingIdentity
+                      }
+                      onPress={
+                        handleCancelIdentityEdit
+                      }
+                      style={({
+                        pressed,
+                      }) => [
+                        styles.identityCancelButton,
+
+                        isSavingIdentity &&
+                          styles.disabledButton,
+
+                        pressed &&
+                          !isSavingIdentity &&
+                          styles.lightPressed,
+                      ]}
+                    >
+                      <Text
+                        style={
+                          styles.identityCancelText
+                        }
+                      >
+                        CANCEL
+                      </Text>
+                    </Pressable>
+                  </View>
+                ) : (
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Edit Explorer identity"
+                    accessibilityHint="Lets you change your Treasi callsign."
+                    onPress={
+                      handleStartEditingIdentity
+                    }
+                    style={({
+                      pressed,
+                    }) => [
+                      styles.identityEditButton,
+
+                      pressed &&
+                        styles.lightPressed,
+                    ]}
+                  >
+                    <Ionicons
+                      name="create-outline"
+                      size={16}
+                      color={
+                        COLOURS.ink900
+                      }
+                    />
+
+                    <Text
+                      style={
+                        styles.identityEditText
+                      }
+                    >
+                      EDIT CALLSIGN
+                    </Text>
+                  </Pressable>
+                )}
+              </View>
+
+              {/* ------------------------------------------------------------ */}
+              {/* Explorer points                                              */}
+              {/* ------------------------------------------------------------ */}
+
+              <View
+                accessible
+                accessibilityLabel={`${totalPoints.toLocaleString(
+                  'en-GB',
+                )} Explorer points. Rank ${rank}.`}
+                style={
+                  styles.pointsCard
+                }
+              >
+                <Text
+                  accessible={
+                    false
+                  }
+                  importantForAccessibility="no"
+                  style={
+                    styles.pointsValue
+                  }
+                >
+                  {totalPoints.toLocaleString(
+                    'en-GB',
+                  )}
+                </Text>
+
+                <Text
+                  accessible={
+                    false
+                  }
+                  importantForAccessibility="no"
+                  style={
+                    styles.pointsLabel
+                  }
+                >
+                  EXPLORER POINTS
+                </Text>
+              </View>
+
+              {/* ------------------------------------------------------------ */}
+              {/* Account record                                               */}
+              {/* ------------------------------------------------------------ */}
+
+              <View
+                style={
+                  styles.profileSectionHeader
+                }
+              >
+                <Ionicons
+                  accessible={
+                    false
+                  }
+                  importantForAccessibility="no"
+                  name="document-text-outline"
+                  size={15}
+                  color={
+                    COLOURS.bronze400
+                  }
+                />
+
+                <Text
+                  accessibilityRole="header"
+                  style={
+                    styles.profileSectionTitle
+                  }
+                >
+                  ACCOUNT RECORD
+                </Text>
+              </View>
+
+              <View
+                style={
+                  styles.recordCard
+                }
+              >
+                <View
+                  style={
+                    styles.recordRow
+                  }
+                >
+                  <Text
+                    style={
+                      styles.recordKey
+                    }
+                  >
+                    MEMBER SINCE
+                  </Text>
+
+                  <Text
+                    style={
+                      styles.recordValue
+                    }
+                  >
+                    {
+                      memberSince
+                    }
+                  </Text>
+                </View>
+
+                <View
+                  style={
+                    styles.recordRow
+                  }
+                >
+                  <Text
+                    style={
+                      styles.recordKey
+                    }
+                  >
+                    AUTH STATUS
+                  </Text>
+
+                  <Text
+                    style={[
+                      styles.recordValue,
+
+                      styles.recordValueSuccess,
+                    ]}
+                  >
+                    ACTIVE
+                  </Text>
+                </View>
+
+                <View
+                  style={
+                    styles.recordRow
+                  }
+                >
+                  <Text
+                    style={
+                      styles.recordKey
+                    }
+                  >
+                    EMAIL
+                  </Text>
+
+                  <Text
+                    numberOfLines={
+                      1
+                    }
+                    ellipsizeMode="middle"
+                    style={
+                      styles.recordValue
+                    }
+                  >
+                    {
+                      currentEmail
+                    }
+                  </Text>
+                </View>
+
+                <View
+                  style={
+                    styles.recordRow
+                  }
+                >
+                  <Text
+                    style={
+                      styles.recordKey
+                    }
+                  >
+                    EMAIL VERIFIED
+                  </Text>
+
+                  <Text
+                    style={[
+                      styles.recordValue,
+
+                      emailVerified
+                        ? styles.recordValueSuccess
+                        : styles.recordValueWarning,
+                    ]}
+                  >
+                    {emailVerified
+                      ? 'YES'
+                      : 'NO'}
+                  </Text>
+                </View>
+
+                <View
+                  style={
+                    styles.recordRow
+                  }
+                >
+                  <Text
+                    style={
+                      styles.recordKey
+                    }
+                  >
+                    ONBOARDING
+                  </Text>
+
+                  <Text
+                    style={[
+                      styles.recordValue,
+
+                      onboardingComplete
+                        ? styles.recordValueSuccess
+                        : styles.recordValueWarning,
+                    ]}
+                  >
+                    {onboardingComplete
+                      ? 'COMPLETE'
+                      : 'PENDING'}
+                  </Text>
+                </View>
+
+                <View
+                  style={
+                    styles.recordRow
+                  }
+                >
+                  <Text
+                    style={
+                      styles.recordKey
+                    }
+                  >
+                    LOCATION SHARE
+                  </Text>
+
+                  <Text
+                    style={[
+                      styles.recordValue,
+
+                      telemetryEnabled
+                        ? styles.recordValueSuccess
+                        : styles.recordValueMuted,
+                    ]}
+                  >
+                    {telemetryEnabled
+                      ? 'ON'
+                      : 'OFF'}
+                  </Text>
+                </View>
+
+                <View
+                  style={[
+                    styles.recordRow,
+                    styles.recordRowLast,
+                  ]}
+                >
+                  <Text
+                    style={
+                      styles.recordKey
+                    }
+                  >
+                    FIREBASE UID
+                  </Text>
+
+                  <Text
+                    numberOfLines={
+                      1
+                    }
+                    ellipsizeMode="middle"
+                    style={
+                      styles.recordValue
+                    }
+                  >
+                    {currentUid ||
+                      'N/A'}
+                  </Text>
+                </View>
+              </View>
+
+              {/* ------------------------------------------------------------ */}
+              {/* Field status                                                 */}
+              {/* ------------------------------------------------------------ */}
+
+              <View
+                style={
+                  styles.profileSectionHeader
+                }
+              >
+                <Ionicons
+                  accessible={
+                    false
+                  }
+                  importantForAccessibility="no"
+                  name="checkmark-done-circle-outline"
+                  size={15}
+                  color={
+                    COLOURS.bronze400
+                  }
+                />
+
+                <Text
+                  accessibilityRole="header"
+                  style={
+                    styles.profileSectionTitle
+                  }
+                >
+                  FIELD STATUS
+                </Text>
+              </View>
+
+              <View
+                style={
+                  styles.statusGrid
+                }
+              >
+                <View
+                  accessible
+                  accessibilityLabel={`Haptic feedback ${
+                    hapticFeedbackEnabled
+                      ? 'enabled'
+                      : 'disabled'
+                  }`}
+                  style={
+                    styles.profileStatusCard
+                  }
+                >
+                  <Ionicons
+                    name="phone-portrait-outline"
+                    size={18}
+                    color={
+                      hapticFeedbackEnabled
+                        ? COLOURS.success300
+                        : COLOURS.bronze400
+                    }
+                  />
+
+                  <Text
+                    style={
+                      styles.profileStatusLabel
+                    }
+                  >
+                    HAPTICS
+                  </Text>
+
+                  <Text
+                    style={
+                      styles.profileStatusValue
+                    }
+                  >
+                    {hapticFeedbackEnabled
+                      ? 'ON'
+                      : 'OFF'}
+                  </Text>
+                </View>
+
+                <View
+                  accessible
+                  accessibilityLabel={`Motion sensitivity ${
+                    motionSensitivityEnabled
+                      ? 'sensitive'
+                      : 'standard'
+                  }`}
+                  style={
+                    styles.profileStatusCard
+                  }
+                >
+                  <Ionicons
+                    name="pulse-outline"
+                    size={18}
+                    color={
+                      COLOURS.bronze400
+                    }
+                  />
+
+                  <Text
+                    style={
+                      styles.profileStatusLabel
+                    }
+                  >
+                    MOTION
+                  </Text>
+
+                  <Text
+                    style={
+                      styles.profileStatusValue
+                    }
+                  >
+                    {motionSensitivityEnabled
+                      ? 'SENSITIVE'
+                      : 'STANDARD'}
+                  </Text>
+                </View>
+              </View>
+
+              <View
+                style={
+                  styles.profileNote
+                }
+              >
+                <Ionicons
+                  accessible={
+                    false
+                  }
+                  importantForAccessibility="no"
+                  name="information-circle-outline"
+                  size={16}
+                  color={
+                    COLOURS.bronze400
+                  }
+                />
+
+                <Text
+                  maxFontSizeMultiplier={
+                    1.7
+                  }
+                  style={
+                    styles.profileNoteText
+                  }
+                >
+                  Treasi only claims settings that are actually stored in the current profile schema. Unsupported preferences are not presented as fake working controls.
+                </Text>
+              </View>
+            </ScrollView>
+
             <FieldNavBar
-              currentTab="PROFILE"
-              onNavigate={(tab) => onNavigate?.(tab as NavigationTab)}
+              currentTab={
+                currentTab
+              }
+              onNavigate={(
+                tab,
+              ) =>
+                onNavigate?.(
+                  tab,
+                )
+              }
             />
           </View>
         </View>
-      </View>
-    </View>
-  );
-};
 
-const fontMonospace = Platform.OS === 'ios' ? 'Courier' : 'monospace';
+        {/* ================================================================== */}
+        {/* Onboarding review                                                  */}
+        {/* ================================================================== */}
 
-const styles = StyleSheet.create({
-  safeAreaContainer: {
-    flex: 1,
-    backgroundColor: '#1E281F',
-  },
-  centeredLoading: {
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingHorizontal: 24,
-  },
-  loadingText: {
-    fontFamily: fontMonospace,
-    color: '#E8DCC0',
-    fontSize: 11,
-    marginTop: 10,
-    letterSpacing: 1,
-    textAlign: 'center',
-  },
-  splitWrapper: {
-    flex: 1,
-    flexDirection: 'row',
-    borderRadius: 8,
-    overflow: 'hidden',
-    borderWidth: 2,
-    borderColor: '#B08D57',
-  },
-  portraitWrapper: {
-    flexDirection: 'column',
-  },
-  leftViewport: {
-    flex: 0.58,
-    backgroundColor: '#E8DCC0',
-    padding: 8,
-    minHeight: 0,
-  },
-  cardInnerBorder: {
-    flex: 1,
-    borderWidth: 1,
-    borderColor: '#2A2420',
-    padding: 8,
-    justifyContent: 'space-between',
-    minHeight: 0,
-  },
-  cardHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    gap: 8,
-  },
-  headerTitleGroup: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flex: 1,
-  },
-  headerTitle: {
-    fontFamily: fontMonospace,
-    color: '#2A2420',
-    fontWeight: 'bold',
-    fontSize: 11,
-    letterSpacing: 1.1,
-  },
-  headerTag: {
-    fontFamily: fontMonospace,
-    color: '#2A2420',
-    fontSize: 9.5,
-    fontWeight: '700',
-  },
-  identityRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginVertical: 4,
-  },
-  avatarBox: {
-    width: 44,
-    height: 44,
-    backgroundColor: '#2C3B2E',
-    borderWidth: 2,
-    borderColor: '#B08D57',
-    borderRadius: 4,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 8,
-  },
-  identityDetails: {
-    flex: 1,
-    minWidth: 0,
-  },
-  agentName: {
-    fontFamily: fontMonospace,
-    fontSize: 14,
-    fontWeight: 'bold',
-    color: '#2A2420',
-    letterSpacing: 0.8,
-  },
-  handleText: {
-    fontFamily: fontMonospace,
-    fontSize: 9.5,
-    color: '#5C5248',
-    marginBottom: 3,
-  },
-  editInputGroup: {
-    marginBottom: 2,
-  },
-  editHint: {
-    color: '#6E6152',
-    fontFamily: fontMonospace,
-    fontSize: 7,
-    marginTop: 2,
-  },
-  textInput: {
-    fontFamily: fontMonospace,
-    backgroundColor: '#F3ECD8',
-    borderWidth: 1,
-    borderColor: '#2A2420',
-    borderRadius: 3,
-    paddingHorizontal: 5,
-    paddingVertical: 4,
-    fontSize: 10,
-    color: '#2A2420',
-    marginBottom: 2,
-    minHeight: 34,
-  },
-  badgeContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    alignSelf: 'flex-start',
-    backgroundColor: '#A64B2A',
-    paddingVertical: 2,
-    paddingHorizontal: 5,
-    borderRadius: 6,
-  },
-  badgeIcon: {
-    marginRight: 3,
-  },
-  badgeText: {
-    fontFamily: fontMonospace,
-    color: '#F3ECD8',
-    fontSize: 8,
-    fontWeight: 'bold',
-    letterSpacing: 0.7,
-  },
-  dashedDivider: {
-    borderStyle: 'dashed',
-    borderBottomWidth: 1,
-    borderColor: '#2A2420',
-    marginVertical: 4,
-    opacity: 0.4,
-  },
-  profileErrorBox: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-    borderWidth: 1,
-    borderColor: '#A64B2A',
-    backgroundColor: '#F3ECD8',
-    padding: 6,
-    borderRadius: 4,
-    marginBottom: 5,
-  },
-  profileErrorText: {
-    flex: 1,
-    color: '#A64B2A',
-    fontFamily: fontMonospace,
-    fontSize: 7.5,
-    fontWeight: 'bold',
-  },
-  metaGrid: {
-    marginVertical: 2,
-  },
-  metaRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    gap: 8,
-    marginBottom: 4,
-  },
-  metaKey: {
-    fontFamily: fontMonospace,
-    color: '#2A2420',
-    fontSize: 8.5,
-    fontWeight: '600',
-    letterSpacing: 0.5,
-    flexShrink: 0,
-  },
-  metaVal: {
-    fontFamily: fontMonospace,
-    color: '#2A2420',
-    fontSize: 8.5,
-    fontWeight: 'bold',
-    maxWidth: '58%',
-    textAlign: 'right',
-  },
-  permitStarRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  editActionsRow: {
-    flexDirection: 'row',
-    gap: 5,
-    marginTop: 3,
-  },
-  editProfileButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 1,
-    borderColor: '#2A2420',
-    backgroundColor: '#F3ECD8',
-    paddingVertical: 5,
-    borderRadius: 3,
-    minHeight: 30,
-  },
-  cancelEditButton: {
-    flex: 0.42,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 1,
-    borderColor: '#8A7B66',
-    backgroundColor: '#D9C8A9',
-    paddingVertical: 5,
-    borderRadius: 3,
-    minHeight: 30,
-  },
-  btnIcon: {
-    marginRight: 4,
-  },
-  editProfileText: {
-    fontFamily: fontMonospace,
-    fontSize: 8,
-    fontWeight: 'bold',
-    color: '#2A2420',
-    letterSpacing: 0.8,
-  },
-  rightViewport: {
-    flex: 0.42,
-    backgroundColor: '#2C3B2E',
-    borderLeftWidth: 2,
-    borderColor: '#B08D57',
-    padding: 6,
-    justifyContent: 'space-between',
-    minHeight: 0,
-  },
-  scrollContent: {
-    paddingBottom: 5,
-  },
-  panelHeaderRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  panelTitle: {
-    fontFamily: fontMonospace,
-    color: '#E8DCC0',
-    fontWeight: 'bold',
-    fontSize: 10,
-    letterSpacing: 0.8,
-  },
-  panelDivider: {
-    height: 1,
-    backgroundColor: '#B08D57',
-    opacity: 0.4,
-    marginVertical: 4,
-  },
-  toggleCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    backgroundColor: '#1E281F',
-    borderWidth: 1,
-    borderColor: '#B08D57',
-    borderRadius: 4,
-    paddingHorizontal: 5,
-    paddingVertical: 3,
-    marginBottom: 4,
-    minHeight: 44,
-  },
-  toggleLabelGroup: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flex: 1,
-    minWidth: 0,
-  },
-  toggleTextGroup: {
-    flex: 1,
-    marginLeft: 4,
-    paddingRight: 6,
-  },
-  toggleText: {
-    fontFamily: fontMonospace,
-    color: '#E8DCC0',
-    fontSize: 7.5,
-    fontWeight: 'bold',
-    letterSpacing: 0.5,
-  },
-  toggleDescription: {
-    fontFamily: fontMonospace,
-    color: '#B08D57',
-    fontSize: 6.5,
-    marginTop: 1,
-    lineHeight: 9,
-  },
-  behaviourNote: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: 5,
-    backgroundColor: '#1E281F',
-    borderWidth: 1,
-    borderColor: '#3A4B3C',
-    padding: 6,
-    borderRadius: 4,
-    marginTop: 2,
-    marginBottom: 4,
-  },
-  behaviourNoteText: {
-    flex: 1,
-    fontFamily: fontMonospace,
-    color: '#B08D57',
-    fontSize: 6.5,
-    lineHeight: 9,
-  },
-  signOutButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#A64B2A',
-    borderWidth: 1,
-    borderColor: '#B08D57',
-    paddingVertical: 6,
-    borderRadius: 4,
-    marginTop: 3,
-    minHeight: 36,
-    gap: 4,
-  },
-  signOutText: {
-    fontFamily: fontMonospace,
-    color: '#F3ECD8',
-    fontWeight: 'bold',
-    fontSize: 8.5,
-    letterSpacing: 0.8,
-  },
-  backButton: {
-    flexDirection: 'row',
-    borderWidth: 1,
-    borderColor: '#B08D57',
-    paddingVertical: 5,
-    borderRadius: 4,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginTop: 3,
-    minHeight: 30,
-  },
-  backText: {
-    fontFamily: fontMonospace,
-    color: '#B08D57',
-    fontSize: 8,
-    fontWeight: 'bold',
-  },
-  backButtonStandalone: {
-    flexDirection: 'row',
-    borderWidth: 1,
-    borderColor: '#B08D57',
-    paddingVertical: 7,
-    paddingHorizontal: 18,
-    borderRadius: 4,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginTop: 16,
-    minHeight: 42,
-  },
-  navBarContainer: {
-    marginTop: 3,
-  },
-});
+        <Modal
+          visible={
+            onboardingVisible
+          }
+          animationType={
+            reduceMotionEnabled
+              ? 'none'
+              : 'fade'
+          }
+          presentationStyle="fullScreen"
+          onRequestClose={() =>
+            setOnboardingVisible(
+              false,
+            )
+          }
+        >
+          <View
+            style={
+              styles.onboardingModal
+            }
+          >
+            <OnboardingScreen
+              onComplete={() => {
+                setOnboardingVisible(
+                  false,
+                );
+
+                announce(
+                  'Onboarding review closed.',
+                );
+              }}
+            />
+
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Close onboarding review"
+              accessibilityHint="Returns to Profile Settings without changing your onboarding status."
+              onPress={() =>
+                setOnboardingVisible(
+                  false,
+                )
+              }
+              style={({
+                pressed,
+              }) => [
+                styles.onboardingCloseButton,
+
+                {
+                  top:
+                    Math.max(
+                      insets.top,
+                      12,
+                    ),
+
+                  right:
+                    Math.max(
+                      insets.right,
+                      12,
+                    ),
+                },
+
+                pressed &&
+                  styles.darkPressed,
+              ]}
+            >
+              <Ionicons
+                name="close"
+                size={22}
+                color={
+                  COLOURS.parchment100
+                }
+              />
+
+              <Text
+                style={
+                  styles.onboardingCloseText
+                }
+              >
+                CLOSE
+              </Text>
+            </Pressable>
+          </View>
+        </Modal>
+
+        {/* ================================================================== */}
+        {/* Delete account confirmation                                        */}
+        {/* ================================================================== */}
+
+        <Modal
+          visible={
+            deleteModalVisible
+          }
+          transparent
+          statusBarTranslucent
+          animationType={
+            reduceMotionEnabled
+              ? 'none'
+              : 'fade'
+          }
+          onRequestClose={() => {
+            if (
+              !isDeletingAccount
+            ) {
+              setDeleteModalVisible(
+                false,
+              );
+            }
+          }}
+        >
+          <KeyboardAvoidingView
+            style={
+              styles.deleteModalOverlay
+            }
+            behavior={
+              Platform.OS ===
+              'ios'
+                ? 'padding'
+                : undefined
+            }
+          >
+            <View
+              accessible
+              accessibilityViewIsModal
+              accessibilityLabel="Delete Treasi account confirmation"
+              onAccessibilityEscape={() => {
+                if (
+                  !isDeletingAccount
+                ) {
+                  setDeleteModalVisible(
+                    false,
+                  );
+                }
+              }}
+              style={
+                styles.deleteModalCard
+              }
+            >
+              <View
+                style={
+                  styles.deleteModalIcon
+                }
+              >
+                <Ionicons
+                  name="warning-outline"
+                  size={30}
+                  color={
+                    COLOURS.danger300
+                  }
+                />
+              </View>
+
+              <Text
+                accessibilityRole="header"
+                style={
+                  styles.deleteModalTitle
+                }
+              >
+                PERMANENT ACCOUNT DELETION
+              </Text>
+
+              <Text
+                maxFontSizeMultiplier={
+                  1.8
+                }
+                style={
+                  styles.deleteModalDescription
+                }
+              >
+                Account deletion must remove Firebase Authentication and personal Firestore account data together. Treasi will not delete only your login and leave the profile behind.
+              </Text>
+
+              {!onDeleteAccount ? (
+                <View
+                  accessible
+                  accessibilityRole="alert"
+                  style={
+                    styles.deleteUnavailableCard
+                  }
+                >
+                  <Ionicons
+                    name="lock-closed-outline"
+                    size={18}
+                    color={
+                      COLOURS.warning300
+                    }
+                  />
+
+                  <Text
+                    maxFontSizeMultiplier={
+                      1.7
+                    }
+                    style={
+                      styles.deleteUnavailableText
+                    }
+                  >
+                    SECURE DELETION IS NOT YET CONFIGURED. THE CURRENT FIRESTORE RULES BLOCK CLIENT DELETION OF USER PROFILE RECORDS, SO NO PARTIAL DELETION WILL BE ATTEMPTED.
+                  </Text>
+                </View>
+              ) : (
+                <>
+                  <Text
+                    style={
+                      styles.deleteConfirmationLabel
+                    }
+                  >
+                    TYPE DELETE TO CONFIRM
+                  </Text>
+
+                  <TextInput
+                    accessibilityLabel="Delete account confirmation"
+                    accessibilityHint="Type the word DELETE to enable permanent account deletion."
+                    autoCapitalize="characters"
+                    autoCorrect={
+                      false
+                    }
+                    editable={
+                      !isDeletingAccount
+                    }
+                    maxLength={6}
+                    placeholder="DELETE"
+                    placeholderTextColor={
+                      COLOURS.bronze700
+                    }
+                    selectionColor={
+                      COLOURS.danger300
+                    }
+                    value={
+                      deleteConfirmation
+                    }
+                    onChangeText={(
+                      value,
+                    ) =>
+                      setDeleteConfirmation(
+                        value.toUpperCase(),
+                      )
+                    }
+                    style={
+                      styles.deleteConfirmationInput
+                    }
+                  />
+                </>
+              )}
+
+              <View
+                style={
+                  styles.deleteModalActions
+                }
+              >
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Cancel account deletion"
+                  accessibilityState={{
+                    disabled:
+                      isDeletingAccount,
+                  }}
+                  disabled={
+                    isDeletingAccount
+                  }
+                  onPress={() => {
+                    setDeleteModalVisible(
+                      false,
+                    );
+
+                    setDeleteConfirmation(
+                      '',
+                    );
+                  }}
+                  style={({
+                    pressed,
+                  }) => [
+                    styles.deleteCancelButton,
+
+                    isDeletingAccount &&
+                      styles.disabledButton,
+
+                    pressed &&
+                      !isDeletingAccount &&
+                      styles.lightPressed,
+                  ]}
+                >
+                  <Text
+                    style={
+                      styles.deleteCancelText
+                    }
+                  >
+                    CANCEL
+                  </Text>
+                </Pressable>
+
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={
+                    onDeleteAccount
+                      ? 'Permanently delete account'
+                      : 'Secure account deletion unavailable'
+                  }
+                  accessibilityState={{
+                    disabled:
+                      !onDeleteAccount ||
+                      deleteConfirmation
+                        .trim()
+                        .toUpperCase() !==
+                        'DELETE' ||
+                      isDeletingAccount,
+
+                    busy:
+                      isDeletingAccount,
+                  }}
+                  disabled={
+                    !onDeleteAccount ||
+                    deleteConfirmation
+                      .trim()
+                      .toUpperCase() !==
+                      'DELETE' ||
+                    isDeletingAccount
+                  }
+                  onPress={() => {
+                    void handleConfirmDeleteAccount();
+                  }}
+                  style={({
+                    pressed,
+                  }) => [
+                    styles.deleteConfirmButton,
+
+                    (
+                      !onDeleteAccount ||
+                      deleteConfirmation
+                        .trim()
+                        .toUpperCase() !==
+                        'DELETE' ||
+                      isDeletingAccount
+                    ) &&
+                      styles.disabledButton,
+
+                    pressed &&
+                      Boolean(
+                        onDeleteAccount,
+                      ) &&
+                      !isDeletingAccount &&
+                      styles.dangerPressed,
+                  ]}
+                >
+                  {isDeletingAccount ? (
+                    <ActivityIndicator
+                      size="small"
+                      color={
+                        COLOURS.parchment100
+                      }
+                    />
+                  ) : (
+                    <Ionicons
+                      name="trash-outline"
+                      size={17}
+                      color={
+                        COLOURS.parchment100
+                      }
+                    />
+                  )}
+
+                  <Text
+                    style={
+                      styles.deleteConfirmText
+                    }
+                  >
+                    {onDeleteAccount
+                      ? 'DELETE ACCOUNT'
+                      : 'UNAVAILABLE'}
+                  </Text>
+                </Pressable>
+              </View>
+            </View>
+          </KeyboardAvoidingView>
+        </Modal>
+      </KeyboardAvoidingView>
+    );
+  };
+
+export default ProfileSettingsScreen;
+
+/* -------------------------------------------------------------------------- */
+/* Styles                                                                     */
+/* -------------------------------------------------------------------------- */
+
+const styles =
+  StyleSheet.create({
+    screen: {
+      flex: 1,
+      backgroundColor:
+        COLOURS.forest800,
+    },
+
+    centeredState: {
+      justifyContent:
+        'center',
+      alignItems:
+        'center',
+      paddingHorizontal: 24,
+    },
+
+    loadingText: {
+      marginTop: 10,
+      color:
+        COLOURS.parchment100,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 12,
+      lineHeight: 18,
+      fontWeight: '800',
+      letterSpacing: 0.8,
+      textAlign: 'center',
+    },
+
+    standaloneBackButton: {
+      minHeight: 48,
+      marginTop: 16,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent:
+        'center',
+      gap: 6,
+      paddingHorizontal: 18,
+      borderWidth: 1,
+      borderColor:
+        COLOURS.bronze400,
+      borderRadius: 5,
+    },
+
+    standaloneBackText: {
+      color:
+        COLOURS.parchment100,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 10,
+      fontWeight: '800',
+    },
+
+    splitWrapper: {
+      flex: 1,
+      minHeight: 0,
+      gap: 12,
+    },
+
+    panelPortrait: {
+      width: '100%',
+    },
+
+    headerIdentity: {
+      flex: 1,
+      minWidth: 0,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+    },
+
+    headerTextGroup: {
+      flex: 1,
+      minWidth: 0,
+    },
+
+    disabledButton: {
+      opacity: 0.45,
+    },
+
+    /* ---------------------------------------------------------------------- */
+    /* 60% Settings panel                                                    */
+    /* ---------------------------------------------------------------------- */
+
+    settingsPanel: {
+      minWidth: 0,
+      minHeight: 0,
+      padding: 14,
+      backgroundColor:
+        COLOURS.parchment200,
+      borderWidth: 2,
+      borderColor:
+        COLOURS.bronze600,
+      borderRadius: 7,
+    },
+
+    settingsPanelLandscape: {
+      flex: 0.6,
+    },
+
+    settingsHeader: {
+      minHeight: 52,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent:
+        'space-between',
+      gap: 10,
+      paddingBottom: 9,
+      borderBottomWidth: 1,
+      borderBottomColor:
+        COLOURS.bronze600,
+    },
+
+    settingsTitle: {
+      color:
+        COLOURS.ink900,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 16,
+      lineHeight: 22,
+      fontWeight: '800',
+      letterSpacing: 1.1,
+    },
+
+    settingsSubtitle: {
+      marginTop: 2,
+      color:
+        COLOURS.bronze700,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 8.5,
+      lineHeight: 13,
+      fontWeight: '700',
+      letterSpacing: 0.55,
+    },
+
+    settingsScroll: {
+      flex: 1,
+      minHeight: 0,
+    },
+
+    settingsScrollContent: {
+      paddingTop: 8,
+      paddingBottom: 18,
+    },
+
+    profileErrorCard: {
+      minHeight: 52,
+      marginTop: 8,
+      paddingHorizontal: 9,
+      paddingVertical: 6,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 7,
+      backgroundColor:
+        '#F1D3C9',
+      borderWidth: 1,
+      borderColor:
+        COLOURS.rust700,
+      borderRadius: 5,
+    },
+
+    profileErrorText: {
+      flex: 1,
+      minWidth: 0,
+      color:
+        COLOURS.rust800,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 9,
+      lineHeight: 14,
+      fontWeight: '700',
+    },
+
+    errorRetryButton: {
+      minWidth: 64,
+      minHeight: 48,
+      justifyContent:
+        'center',
+      alignItems:
+        'center',
+      borderWidth: 1,
+      borderColor:
+        COLOURS.rust700,
+      borderRadius: 4,
+    },
+
+    errorRetryText: {
+      color:
+        COLOURS.rust800,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 8.5,
+      lineHeight: 13,
+      fontWeight: '800',
+    },
+
+    sectionHeader: {
+      minHeight: 28,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+      marginBottom: 6,
+    },
+
+    sectionSpacing: {
+      marginTop: 15,
+    },
+
+    sectionTitle: {
+      color:
+        COLOURS.ink900,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 10.5,
+      lineHeight: 16,
+      fontWeight: '800',
+      letterSpacing: 0.7,
+    },
+
+    dangerSectionTitle: {
+      color:
+        COLOURS.rust800,
+    },
+
+    /* ---------------------------------------------------------------------- */
+    /* Toggle settings                                                       */
+    /* ---------------------------------------------------------------------- */
+
+    settingCard: {
+      minHeight: 68,
+      marginBottom: 7,
+      paddingHorizontal: 10,
+      paddingVertical: 8,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent:
+        'space-between',
+      gap: 9,
+      backgroundColor:
+        COLOURS.parchment100,
+      borderWidth: 1,
+      borderColor:
+        COLOURS.bronze600,
+      borderRadius: 5,
+    },
+
+    systemStatusCard: {
+      minHeight: 68,
+      marginBottom: 7,
+      paddingHorizontal: 10,
+      paddingVertical: 8,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent:
+        'space-between',
+      gap: 9,
+      backgroundColor:
+        COLOURS.parchment100,
+      borderWidth: 1,
+      borderColor:
+        COLOURS.bronze600,
+      borderRadius: 5,
+    },
+
+    settingIdentity: {
+      flex: 1,
+      minWidth: 0,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+    },
+
+    settingIcon: {
+      width: 38,
+      height: 38,
+      flexShrink: 0,
+      justifyContent:
+        'center',
+      alignItems:
+        'center',
+      backgroundColor:
+        '#E3D5B8',
+      borderRadius: 19,
+      borderWidth: 1,
+      borderColor:
+        COLOURS.bronze600,
+    },
+
+    settingTextGroup: {
+      flex: 1,
+      minWidth: 0,
+    },
+
+    settingLabel: {
+      color:
+        COLOURS.ink900,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 10,
+      lineHeight: 15,
+      fontWeight: '800',
+      letterSpacing: 0.4,
+    },
+
+    settingDescription: {
+      marginTop: 2,
+      color:
+        COLOURS.ink700,
+      fontSize: 9.5,
+      lineHeight: 14,
+    },
+
+    settingControl: {
+      width: 52,
+      minHeight: 48,
+      flexShrink: 0,
+      justifyContent:
+        'center',
+      alignItems:
+        'center',
+    },
+
+    systemBadge: {
+      minWidth: 52,
+      minHeight: 34,
+      justifyContent:
+        'center',
+      alignItems:
+        'center',
+      paddingHorizontal: 8,
+      borderRadius: 4,
+    },
+
+    systemBadgeOn: {
+      backgroundColor:
+        '#DCE8D8',
+      borderWidth: 1,
+      borderColor:
+        COLOURS.success700,
+    },
+
+    systemBadgeOff: {
+      backgroundColor:
+        '#DED4BF',
+      borderWidth: 1,
+      borderColor:
+        COLOURS.bronze600,
+    },
+
+    systemBadgeText: {
+      color:
+        COLOURS.ink900,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 9,
+      lineHeight: 13,
+      fontWeight: '800',
+    },
+
+    /* ---------------------------------------------------------------------- */
+    /* Privacy status                                                        */
+    /* ---------------------------------------------------------------------- */
+
+    statusStrip: {
+      minHeight: 62,
+      marginTop: 1,
+      padding: 8,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent:
+        'space-between',
+      gap: 8,
+      backgroundColor:
+        '#E4D6B9',
+      borderWidth: 1,
+      borderColor:
+        COLOURS.bronze600,
+      borderRadius: 5,
+    },
+
+    statusStripIdentity: {
+      flex: 1,
+      minWidth: 0,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 7,
+    },
+
+    statusStripTextGroup: {
+      flex: 1,
+      minWidth: 0,
+    },
+
+    statusStripTitle: {
+      color:
+        COLOURS.ink900,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 9,
+      lineHeight: 13,
+      fontWeight: '800',
+    },
+
+    statusStripValue: {
+      marginTop: 1,
+      color:
+        COLOURS.bronze700,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 8,
+      lineHeight: 12,
+      fontWeight: '700',
+    },
+
+    compactActionButton: {
+      minWidth: 76,
+      minHeight: 48,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent:
+        'center',
+      gap: 4,
+      paddingHorizontal: 8,
+      borderWidth: 1,
+      borderColor:
+        COLOURS.bronze600,
+      borderRadius: 4,
+    },
+
+    compactActionText: {
+      color:
+        COLOURS.ink900,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 8,
+      lineHeight: 12,
+      fontWeight: '800',
+    },
+
+    informationCard: {
+      marginTop: 7,
+      padding: 9,
+      flexDirection: 'row',
+      alignItems:
+        'flex-start',
+      gap: 7,
+      backgroundColor:
+        '#E3D5B8',
+      borderWidth: 1,
+      borderColor:
+        '#C2AD82',
+      borderRadius: 5,
+    },
+
+    informationText: {
+      flex: 1,
+      minWidth: 0,
+      color:
+        COLOURS.ink700,
+      fontSize: 9.5,
+      lineHeight: 14,
+    },
+
+    /* ---------------------------------------------------------------------- */
+    /* Action cards                                                          */
+    /* ---------------------------------------------------------------------- */
+
+    actionGrid: {
+      gap: 7,
+    },
+
+    actionCard: {
+      minHeight: 62,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 9,
+      paddingHorizontal: 10,
+      paddingVertical: 8,
+      backgroundColor:
+        COLOURS.parchment100,
+      borderWidth: 1,
+      borderColor:
+        COLOURS.bronze600,
+      borderRadius: 5,
+    },
+
+    actionCardTextGroup: {
+      flex: 1,
+      minWidth: 0,
+    },
+
+    actionCardTitle: {
+      color:
+        COLOURS.ink900,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 9.5,
+      lineHeight: 14,
+      fontWeight: '800',
+      letterSpacing: 0.35,
+    },
+
+    actionCardDescription: {
+      marginTop: 2,
+      color:
+        COLOURS.ink700,
+      fontSize: 9,
+      lineHeight: 14,
+    },
+
+    verifiedCard: {
+      borderColor:
+        COLOURS.success700,
+      backgroundColor:
+        '#E2E9D9',
+    },
+
+    verifiedText: {
+      color:
+        COLOURS.success700,
+    },
+
+    /* ---------------------------------------------------------------------- */
+    /* Reset                                                                 */
+    /* ---------------------------------------------------------------------- */
+
+    resetButton: {
+      minHeight: 68,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 9,
+      paddingHorizontal: 10,
+      paddingVertical: 8,
+      backgroundColor:
+        '#E2D2B1',
+      borderWidth: 1,
+      borderColor:
+        COLOURS.bronze600,
+      borderRadius: 5,
+    },
+
+    resetButtonTextGroup: {
+      flex: 1,
+      minWidth: 0,
+    },
+
+    resetButtonTitle: {
+      color:
+        COLOURS.ink900,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 9.5,
+      lineHeight: 14,
+      fontWeight: '800',
+    },
+
+    resetButtonDescription: {
+      marginTop: 2,
+      color:
+        COLOURS.ink700,
+      fontSize: 9,
+      lineHeight: 14,
+    },
+
+    /* ---------------------------------------------------------------------- */
+    /* Danger zone                                                           */
+    /* ---------------------------------------------------------------------- */
+
+    dangerZone: {
+      padding: 9,
+      backgroundColor:
+        '#E2CBBE',
+      borderWidth: 1,
+      borderColor:
+        COLOURS.rust700,
+      borderRadius: 5,
+      gap: 7,
+    },
+
+    signOutButton: {
+      minHeight: 50,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent:
+        'center',
+      gap: 7,
+      paddingHorizontal: 10,
+      paddingVertical: 8,
+      backgroundColor:
+        COLOURS.forest800,
+      borderWidth: 1,
+      borderColor:
+        COLOURS.forest950,
+      borderRadius: 5,
+    },
+
+    signOutText: {
+      color:
+        COLOURS.parchment100,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 10,
+      lineHeight: 15,
+      fontWeight: '800',
+      letterSpacing: 0.5,
+    },
+
+    deleteAccountButton: {
+      minHeight: 62,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 9,
+      paddingHorizontal: 10,
+      paddingVertical: 8,
+      backgroundColor:
+        '#F0D4CA',
+      borderWidth: 1,
+      borderColor:
+        COLOURS.rust700,
+      borderRadius: 5,
+    },
+
+    deleteButtonTextGroup: {
+      flex: 1,
+      minWidth: 0,
+    },
+
+    deleteAccountTitle: {
+      color:
+        COLOURS.rust800,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 9.5,
+      lineHeight: 14,
+      fontWeight: '800',
+    },
+
+    deleteAccountDescription: {
+      marginTop: 2,
+      color:
+        COLOURS.ink700,
+      fontSize: 9,
+      lineHeight: 14,
+    },
+
+    /* ---------------------------------------------------------------------- */
+    /* 40% profile panel                                                     */
+    /* ---------------------------------------------------------------------- */
+
+    profilePanel: {
+      minWidth: 0,
+      minHeight: 0,
+      padding: 12,
+      backgroundColor:
+        COLOURS.forest800,
+      borderWidth: 2,
+      borderColor:
+        COLOURS.bronze500,
+      borderRadius: 7,
+    },
+
+    profilePanelLandscape: {
+      flex: 0.4,
+    },
+
+    profileScroll: {
+      flex: 1,
+      minHeight: 0,
+      marginBottom: 8,
+    },
+
+    profileScrollContent: {
+      paddingBottom: 8,
+    },
+
+    profileHeader: {
+      minHeight: 50,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent:
+        'space-between',
+      gap: 8,
+      paddingBottom: 8,
+      borderBottomWidth: 1,
+      borderBottomColor:
+        COLOURS.bronze500,
+    },
+
+    profileHeaderIdentity: {
+      flex: 1,
+      minWidth: 0,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 7,
+    },
+
+    profileTitle: {
+      color:
+        COLOURS.parchment100,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 12,
+      lineHeight: 18,
+      fontWeight: '800',
+      letterSpacing: 0.75,
+    },
+
+    profileSubtitle: {
+      marginTop: 1,
+      color:
+        COLOURS.bronze400,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 7.5,
+      lineHeight: 11,
+      fontWeight: '700',
+      letterSpacing: 0.4,
+    },
+
+    backButton: {
+      width: 48,
+      height: 48,
+      flexShrink: 0,
+      justifyContent:
+        'center',
+      alignItems:
+        'center',
+      backgroundColor:
+        COLOURS.forest950,
+      borderWidth: 1,
+      borderColor:
+        COLOURS.bronze500,
+      borderRadius: 24,
+    },
+
+    /* ---------------------------------------------------------------------- */
+    /* Identity                                                              */
+    /* ---------------------------------------------------------------------- */
+
+    identityCard: {
+      marginTop: 10,
+      padding: 11,
+      backgroundColor:
+        COLOURS.parchment200,
+      borderWidth: 2,
+      borderColor:
+        COLOURS.bronze600,
+      borderRadius: 6,
+    },
+
+    identityTopRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 9,
+    },
+
+    avatar: {
+      width: 54,
+      height: 54,
+      flexShrink: 0,
+      justifyContent:
+        'center',
+      alignItems:
+        'center',
+      backgroundColor:
+        COLOURS.forest800,
+      borderWidth: 2,
+      borderColor:
+        COLOURS.bronze600,
+      borderRadius: 27,
+    },
+
+    identityMain: {
+      flex: 1,
+      minWidth: 0,
+    },
+
+    profileName: {
+      color:
+        COLOURS.ink900,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 13,
+      lineHeight: 19,
+      fontWeight: '800',
+      letterSpacing: 0.45,
+    },
+
+    profileHandle: {
+      marginTop: 1,
+      color:
+        COLOURS.bronze700,
+      fontFamily:
+        MONO_FONT,
+      fontSize: 9,
+      lineHeight: 13,
+    },
+
+    rankBadge: {
+      alignSelf:
+        'flex-start',
+      minHeight: 26,
+      marginTop: 5,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 4,
+      paddingHorizontal: 7,
+      paddingVertical: 4,
+      backgroundColor:
+        COLOURS.rust700,
+      borderRadius: 13,
+    },
+
+    rankBadgeText: {
+      color:
+        COLOURS.parchment100,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 7.5,
+      lineHeight: 11,
+      fontWeight: '800',
+      letterSpacing: 0.35,
+    },
+
+    identityInputLabel: {
+      marginBottom: 4,
+      color:
+        COLOURS.ink900,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 8.5,
+      lineHeight: 13,
+      fontWeight: '800',
+    },
+
+    identityInput: {
+      minHeight: 48,
+      paddingHorizontal: 9,
+      paddingVertical: 8,
+      color:
+        COLOURS.ink900,
+      backgroundColor:
+        COLOURS.parchment100,
+      borderWidth: 1.5,
+      borderColor:
+        COLOURS.bronze600,
+      borderRadius: 5,
+      fontFamily:
+        MONO_FONT,
+      fontSize: 12,
+      lineHeight: 18,
+    },
+
+    identityInputError: {
+      borderWidth: 2,
+      borderColor:
+        COLOURS.rust700,
+    },
+
+    identityInputHelp: {
+      marginTop: 3,
+      color:
+        COLOURS.bronze700,
+      fontSize: 8,
+      lineHeight: 12,
+    },
+
+    callsignErrorText: {
+      marginTop: 3,
+      color:
+        COLOURS.rust800,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 8,
+      lineHeight: 12,
+      fontWeight: '700',
+    },
+
+    identityEditButton: {
+      minHeight: 48,
+      marginTop: 9,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent:
+        'center',
+      gap: 6,
+      paddingHorizontal: 10,
+      borderWidth: 1,
+      borderColor:
+        COLOURS.ink900,
+      borderRadius: 5,
+    },
+
+    identityEditText: {
+      color:
+        COLOURS.ink900,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 8.5,
+      lineHeight: 13,
+      fontWeight: '800',
+      letterSpacing: 0.35,
+    },
+
+    identityEditActions: {
+      marginTop: 9,
+      flexDirection: 'row',
+      gap: 7,
+    },
+
+    identitySaveButton: {
+      flex: 1,
+      minHeight: 48,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent:
+        'center',
+      gap: 5,
+      backgroundColor:
+        COLOURS.rust700,
+      borderRadius: 5,
+    },
+
+    identitySaveText: {
+      color:
+        COLOURS.parchment100,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 8.5,
+      fontWeight: '800',
+    },
+
+    identityCancelButton: {
+      flex: 1,
+      minHeight: 48,
+      alignItems: 'center',
+      justifyContent:
+        'center',
+      borderWidth: 1,
+      borderColor:
+        COLOURS.bronze600,
+      borderRadius: 5,
+    },
+
+    identityCancelText: {
+      color:
+        COLOURS.ink900,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 8.5,
+      fontWeight: '800',
+    },
+
+    /* ---------------------------------------------------------------------- */
+    /* Points                                                                */
+    /* ---------------------------------------------------------------------- */
+
+    pointsCard: {
+      marginTop: 8,
+      paddingVertical: 10,
+      alignItems: 'center',
+      justifyContent:
+        'center',
+      backgroundColor:
+        COLOURS.forest950,
+      borderWidth: 1,
+      borderColor:
+        COLOURS.bronze500,
+      borderRadius: 5,
+    },
+
+    pointsValue: {
+      color:
+        COLOURS.success300,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 26,
+      lineHeight: 31,
+      fontWeight: '900',
+    },
+
+    pointsLabel: {
+      marginTop: 1,
+      color:
+        COLOURS.bronze400,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 8,
+      lineHeight: 12,
+      fontWeight: '800',
+      letterSpacing: 0.6,
+    },
+
+    /* ---------------------------------------------------------------------- */
+    /* Profile record                                                        */
+    /* ---------------------------------------------------------------------- */
+
+    profileSectionHeader: {
+      minHeight: 27,
+      marginTop: 13,
+      marginBottom: 6,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+    },
+
+    profileSectionTitle: {
+      color:
+        COLOURS.bronze400,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 9.5,
+      lineHeight: 14,
+      fontWeight: '800',
+      letterSpacing: 0.55,
+    },
+
+    recordCard: {
+      paddingHorizontal: 9,
+      paddingVertical: 3,
+      backgroundColor:
+        COLOURS.forest950,
+      borderWidth: 1,
+      borderColor:
+        COLOURS.forest700,
+      borderRadius: 5,
+    },
+
+    recordRow: {
+      minHeight: 34,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent:
+        'space-between',
+      gap: 8,
+      paddingVertical: 5,
+      borderBottomWidth: 1,
+      borderBottomColor:
+        COLOURS.forest700,
+    },
+
+    recordRowLast: {
+      borderBottomWidth: 0,
+    },
+
+    recordKey: {
+      flexShrink: 0,
+      color:
+        COLOURS.bronze400,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 8,
+      lineHeight: 12,
+      fontWeight: '800',
+      letterSpacing: 0.3,
+    },
+
+    recordValue: {
+      flex: 1,
+      minWidth: 0,
+      color:
+        COLOURS.parchment100,
+      fontFamily:
+        MONO_FONT,
+      fontSize: 8.5,
+      lineHeight: 13,
+      textAlign: 'right',
+    },
+
+    recordValueSuccess: {
+      color:
+        COLOURS.success300,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontWeight: '800',
+    },
+
+    recordValueWarning: {
+      color:
+        COLOURS.warning300,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontWeight: '800',
+    },
+
+    recordValueMuted: {
+      color:
+        COLOURS.bronze400,
+    },
+
+    /* ---------------------------------------------------------------------- */
+    /* Status cards                                                          */
+    /* ---------------------------------------------------------------------- */
+
+    statusGrid: {
+      flexDirection: 'row',
+      gap: 7,
+    },
+
+    profileStatusCard: {
+      flex: 1,
+      minHeight: 72,
+      justifyContent:
+        'center',
+      alignItems:
+        'center',
+      gap: 3,
+      padding: 7,
+      backgroundColor:
+        COLOURS.forest950,
+      borderWidth: 1,
+      borderColor:
+        COLOURS.forest700,
+      borderRadius: 5,
+    },
+
+    profileStatusLabel: {
+      color:
+        COLOURS.bronze400,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 7.5,
+      lineHeight: 11,
+      fontWeight: '800',
+    },
+
+    profileStatusValue: {
+      color:
+        COLOURS.parchment100,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 8.5,
+      lineHeight: 13,
+      fontWeight: '800',
+    },
+
+    profileNote: {
+      marginTop: 9,
+      padding: 8,
+      flexDirection: 'row',
+      alignItems:
+        'flex-start',
+      gap: 6,
+      backgroundColor:
+        COLOURS.forest950,
+      borderWidth: 1,
+      borderColor:
+        COLOURS.forest700,
+      borderRadius: 5,
+    },
+
+    profileNoteText: {
+      flex: 1,
+      minWidth: 0,
+      color:
+        COLOURS.bronze400,
+      fontSize: 8.5,
+      lineHeight: 13,
+    },
+
+    /* ---------------------------------------------------------------------- */
+    /* Onboarding modal                                                      */
+    /* ---------------------------------------------------------------------- */
+
+    onboardingModal: {
+      flex: 1,
+      backgroundColor:
+        COLOURS.forest950,
+    },
+
+    onboardingCloseButton: {
+      position: 'absolute',
+      zIndex: 100,
+      minWidth: 92,
+      minHeight: 48,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent:
+        'center',
+      gap: 5,
+      paddingHorizontal: 10,
+      backgroundColor:
+        COLOURS.forest950,
+      borderWidth: 1,
+      borderColor:
+        COLOURS.bronze400,
+      borderRadius: 5,
+    },
+
+    onboardingCloseText: {
+      color:
+        COLOURS.parchment100,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 8.5,
+      lineHeight: 13,
+      fontWeight: '800',
+    },
+
+    /* ---------------------------------------------------------------------- */
+    /* Delete modal                                                          */
+    /* ---------------------------------------------------------------------- */
+
+    deleteModalOverlay: {
+      flex: 1,
+      justifyContent:
+        'center',
+      alignItems:
+        'center',
+      padding: 20,
+      backgroundColor:
+        COLOURS.overlay,
+    },
+
+    deleteModalCard: {
+      width: '92%',
+      maxWidth: 580,
+      padding: 18,
+      backgroundColor:
+        COLOURS.forest800,
+      borderWidth: 2,
+      borderColor:
+        COLOURS.rust700,
+      borderRadius: 8,
+    },
+
+    deleteModalIcon: {
+      width: 58,
+      height: 58,
+      alignSelf: 'center',
+      justifyContent:
+        'center',
+      alignItems:
+        'center',
+      marginBottom: 10,
+      backgroundColor:
+        COLOURS.rust800,
+      borderRadius: 29,
+    },
+
+    deleteModalTitle: {
+      color:
+        COLOURS.danger300,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 14,
+      lineHeight: 20,
+      fontWeight: '800',
+      letterSpacing: 0.8,
+      textAlign: 'center',
+    },
+
+    deleteModalDescription: {
+      marginTop: 8,
+      color:
+        COLOURS.parchment100,
+      fontSize: 10.5,
+      lineHeight: 17,
+      textAlign: 'center',
+    },
+
+    deleteUnavailableCard: {
+      marginTop: 12,
+      padding: 10,
+      flexDirection: 'row',
+      alignItems:
+        'flex-start',
+      gap: 8,
+      backgroundColor:
+        COLOURS.forest950,
+      borderWidth: 1,
+      borderColor:
+        COLOURS.warning300,
+      borderRadius: 5,
+    },
+
+    deleteUnavailableText: {
+      flex: 1,
+      minWidth: 0,
+      color:
+        COLOURS.warning300,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 8.5,
+      lineHeight: 13,
+      fontWeight: '700',
+    },
+
+    deleteConfirmationLabel: {
+      marginTop: 14,
+      marginBottom: 5,
+      color:
+        COLOURS.danger300,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 9,
+      lineHeight: 13,
+      fontWeight: '800',
+      letterSpacing: 0.5,
+    },
+
+    deleteConfirmationInput: {
+      minHeight: 50,
+      paddingHorizontal: 10,
+      paddingVertical: 9,
+      color:
+        COLOURS.parchment100,
+      backgroundColor:
+        COLOURS.forest950,
+      borderWidth: 1.5,
+      borderColor:
+        COLOURS.rust700,
+      borderRadius: 5,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 13,
+      lineHeight: 19,
+      letterSpacing: 1,
+      textAlign: 'center',
+    },
+
+    deleteModalActions: {
+      marginTop: 14,
+      flexDirection: 'row',
+      gap: 8,
+    },
+
+    deleteCancelButton: {
+      flex: 1,
+      minHeight: 50,
+      justifyContent:
+        'center',
+      alignItems:
+        'center',
+      borderWidth: 1,
+      borderColor:
+        COLOURS.bronze400,
+      borderRadius: 5,
+    },
+
+    deleteCancelText: {
+      color:
+        COLOURS.parchment100,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 9,
+      fontWeight: '800',
+    },
+
+    deleteConfirmButton: {
+      flex: 1.2,
+      minHeight: 50,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent:
+        'center',
+      gap: 6,
+      backgroundColor:
+        COLOURS.rust700,
+      borderWidth: 1,
+      borderColor:
+        COLOURS.danger300,
+      borderRadius: 5,
+    },
+
+    deleteConfirmText: {
+      color:
+        COLOURS.parchment100,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 9,
+      lineHeight: 13,
+      fontWeight: '800',
+    },
+
+    /* ---------------------------------------------------------------------- */
+    /* Press states                                                          */
+    /* ---------------------------------------------------------------------- */
+
+    lightPressed: {
+      opacity: 0.7,
+    },
+
+    darkPressed: {
+      opacity: 0.76,
+    },
+
+    primaryPressed: {
+      opacity: 0.82,
+      backgroundColor:
+        COLOURS.rust600,
+    },
+
+    dangerPressed: {
+      opacity: 0.74,
+    },
+  });

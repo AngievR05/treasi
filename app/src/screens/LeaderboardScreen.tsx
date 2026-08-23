@@ -1,1578 +1,2778 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+} from 'react';
+
 import {
+  AccessibilityInfo,
   ActivityIndicator,
-  Alert,
-  Animated,
-  KeyboardAvoidingView,
-  Modal,
   Platform,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
-  TextInput,
-  TouchableOpacity,
   useWindowDimensions,
   View,
 } from 'react-native';
+
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import Svg, { Circle, Path, Polyline } from 'react-native-svg';
+
+import {
+  Ionicons,
+  MaterialCommunityIcons,
+} from '@expo/vector-icons';
+
 import {
   collection,
-  deleteDoc,
   doc,
-  GeoPoint,
   limit,
   onSnapshot,
   orderBy,
   query,
-  setDoc,
-  Timestamp,
-  updateDoc,
-  where,
 } from 'firebase/firestore';
-import { auth, db } from '../config/firebase';
-import { UserDocument, FriendshipDocument } from '../types/firestore';
-import { FieldNavBar, NavigationTab } from '../components/FieldNavBar';
 
-const StarIcon = ({ color = '#A64B2A', size = 12 }: { color?: string; size?: number }) => (
-  <Svg width={size} height={size} viewBox="0 0 24 24" fill={color}>
-    <Path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" />
-  </Svg>
-);
+import {
+  auth,
+  db,
+} from '../config/firebase';
 
-const UserPlusIcon = ({ color = '#E8DCC0', size = 16 }: { color?: string; size?: number }) => (
-  <Svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <Path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
-    <Circle cx="8.5" cy="7" r="4" />
-    <Path d="M20 8v6M23 11h-6" />
-  </Svg>
-);
+import {
+  FieldNavBar,
+  type NavigationTab,
+} from '../components/FieldNavBar';
 
-const UserCheckIcon = ({ color = '#4CAF50', size = 16 }: { color?: string; size?: number }) => (
-  <Svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <Path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
-    <Circle cx="8.5" cy="7" r="4" />
-    <Polyline points="17 11 19 13 23 9" />
-  </Svg>
-);
+import type {
+  UserDocument,
+} from '../types/firestore';
 
-const UserXIcon = ({ color = '#A64B2A', size = 16 }: { color?: string; size?: number }) => (
-  <Svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <Path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
-    <Circle cx="8.5" cy="7" r="4" />
-    <Path d="M18 8l5 5M23 8l-5 5" />
-  </Svg>
-);
-
-const SendIcon = ({ color = '#E8DCC0', size = 16 }: { color?: string; size?: number }) => (
-  <Svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <Path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z" />
-  </Svg>
-);
-
-const CloseIcon = ({ color = '#B08D57', size = 18 }: { color?: string; size?: number }) => (
-  <Svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <Path d="M18 6L6 18M6 6l12 12" />
-  </Svg>
-);
+/* -------------------------------------------------------------------------- */
+/* Types                                                                      */
+/* -------------------------------------------------------------------------- */
 
 interface ExplorerEntry {
   uid: string;
-  rank: string;
-  name: string;
-  points: string;
-  isUser: boolean;
-}
-
-interface FriendshipMeta {
-  docId: string;
-  status: 'pending' | 'accepted' | 'declined' | 'blocked';
-  isRequester: boolean;
-}
-
-interface NearbyExplorer {
-  uid: string;
-  name: string;
-  initial: string;
-  distanceKm: number | null;
-  distanceFormatted: string;
-  hasValidLocation: boolean;
-  friendMeta?: FriendshipMeta;
+  rank: number;
+  username: string;
+  points: number;
+  isCurrentUser: boolean;
 }
 
 interface Props {
   onBack?: () => void;
-  onNavigate?: (tab: string) => void;
-  userCoordinates?: { latitude: number; longitude: number } | null;
+
+  onNavigate?: (
+    tab: string,
+  ) => void;
 }
 
-const RADIUS_KM = 20;
-const MAX_LEADERBOARD_ENTRIES = 50;
-const MAX_EXPLORERS = 100;
+/* -------------------------------------------------------------------------- */
+/* Constants                                                                  */
+/* -------------------------------------------------------------------------- */
 
-const isValidCoordinate = (latitude: unknown, longitude: unknown): boolean =>
-  typeof latitude === 'number' &&
-  typeof longitude === 'number' &&
-  Number.isFinite(latitude) &&
-  Number.isFinite(longitude) &&
-  latitude >= -90 &&
-  latitude <= 90 &&
-  longitude >= -180 &&
-  longitude <= 180;
+const MAX_LEADERBOARD_ENTRIES =
+  50;
 
-const calculateHaversineDistanceKm = (
-  lat1: number,
-  lon1: number,
-  lat2: number,
-  lon2: number,
+const COLOURS = {
+  forest950: '#172018',
+  forest900: '#1C261D',
+  forest800: '#2C3B2E',
+  forest700: '#3D503F',
+
+  parchment100: '#F6EFD9',
+  parchment200: '#E8DCC0',
+
+  ink900: '#2A2420',
+  ink700: '#514A40',
+
+  bronze700: '#5F4B32',
+  bronze600: '#6B563A',
+  bronze500: '#B08D57',
+  bronze400: '#C3A06A',
+
+  rust800: '#71301C',
+  rust700: '#7F321B',
+  rust600: '#8C3A20',
+
+  success700: '#3E6546',
+  success300: '#BFE3C0',
+
+  warning300: '#E6C580',
+  danger300: '#FFB4A2',
+} as const;
+
+const MONO_FONT =
+  Platform.OS === 'ios'
+    ? 'Courier'
+    : 'monospace';
+
+const MONO_BOLD_FONT =
+  Platform.OS === 'ios'
+    ? 'Courier-Bold'
+    : 'monospace';
+
+/* -------------------------------------------------------------------------- */
+/* Helpers                                                                    */
+/* -------------------------------------------------------------------------- */
+
+// Keeps development diagnostics out of production console output.
+const logDevelopmentWarning = (
+  message: string,
+  error?: unknown,
+): void => {
+  if (__DEV__) {
+    console.warn(
+      message,
+      error ?? '',
+    );
+  }
+};
+
+// Safely converts an Explorer name into the field-interface format.
+const normaliseUsername = (
+  value: unknown,
+  fallback =
+    'EXPLORER',
+): string => {
+  if (
+    typeof value !==
+    'string'
+  ) {
+    return fallback;
+  }
+
+  const trimmed =
+    value.trim();
+
+  return trimmed
+    ? trimmed.toUpperCase()
+    : fallback;
+};
+
+// Protects the leaderboard from malformed point values.
+const normalisePoints = (
+  value: unknown,
 ): number => {
-  const R = 6371;
-  const dLat = ((lat2 - lat1) * Math.PI) / 180;
-  const dLon = ((lon2 - lon1) * Math.PI) / 180;
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos((lat1 * Math.PI) / 180) *
-      Math.cos((lat2 * Math.PI) / 180) *
-      Math.sin(dLon / 2) ** 2;
-  return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
+  if (
+    typeof value !==
+      'number' ||
+    !Number.isFinite(
+      value,
+    ) ||
+    value < 0
+  ) {
+    return 0;
+  }
+
+  return Math.floor(
+    value,
+  );
 };
 
-const getDeterministicFriendshipId = (uid1: string, uid2: string): string =>
-  [uid1, uid2].sort().join('_');
+// Formats points consistently across the field interface.
+const formatPoints = (
+  points: number,
+): string =>
+  points.toLocaleString();
 
-const formatDistance = (distanceKm: number | null): string => {
-  if (distanceKm === null || !Number.isFinite(distanceKm)) return 'NO SIGNAL';
-  if (distanceKm < 1) return `${Math.round(distanceKm * 1000)} m`;
-  return `${distanceKm.toFixed(1)} km`;
+// Uses the same rank thresholds as Dashboard.
+const getRankTitle = (
+  points: number,
+): string => {
+  if (
+    points >=
+    3000
+  ) {
+    return 'MASTER EXPLORER';
+  }
+
+  if (
+    points >=
+    1500
+  ) {
+    return 'TRAILBLAZER III';
+  }
+
+  if (
+    points >=
+    500
+  ) {
+    return 'PATHFINDER II';
+  }
+
+  return 'NOVICE SCOUT I';
 };
 
-const normaliseName = (value: unknown): string => {
-  const name = typeof value === 'string' ? value.trim() : '';
-  return name ? name.toUpperCase() : 'AGENT';
+// Provides readable podium labels without inventing additional ranks.
+const getPodiumLabel = (
+  rank: number,
+): string => {
+  switch (rank) {
+    case 1:
+      return 'FIRST';
+
+    case 2:
+      return 'SECOND';
+
+    case 3:
+      return 'THIRD';
+
+    default:
+      return `#${rank}`;
+  }
 };
 
-export const LeaderboardScreen: React.FC<Props> = ({
-  onNavigate,
-  userCoordinates = null,
-}) => {
-  const insets = useSafeAreaInsets();
-  const { width, height } = useWindowDimensions();
-  const isLandscape = width > height;
-  const currentTab: NavigationTab = 'LEADERBOARD';
-  const currentUser = auth?.currentUser;
-  const currentUserId = currentUser?.uid ?? '';
+/* -------------------------------------------------------------------------- */
+/* Leaderboard                                                               */
+/* -------------------------------------------------------------------------- */
 
-  const [manifest, setManifest] = useState<ExplorerEntry[]>([]);
-  const [allUsers, setAllUsers] = useState<
-    Array<{ uid: string; name: string; location: GeoPoint | null }>
-  >([]);
-  const [outgoingFriendships, setOutgoingFriendships] = useState<
-    Array<{ docId: string; targetUid: string; status: FriendshipMeta['status'] }>
-  >([]);
-  const [incomingFriendships, setIncomingFriendships] = useState<
-    Array<{ docId: string; targetUid: string; status: FriendshipMeta['status'] }>
-  >([]);
+export const LeaderboardScreen:
+  React.FC<Props> = ({
+    onBack,
+    onNavigate,
+  }) => {
+    const {
+      width,
+      height,
+    } =
+      useWindowDimensions();
 
-  const [loadingManifest, setLoadingManifest] = useState(true);
-  const [manifestError, setManifestError] = useState('');
-  const [loadingExplorers, setLoadingExplorers] = useState(true);
-  const [explorerError, setExplorerError] = useState('');
+    const insets =
+      useSafeAreaInsets();
 
-  const [telegramModalVisible, setTelegramModalVisible] = useState(false);
-  const [friendModalVisible, setFriendModalVisible] = useState(false);
-  const [telegramText, setTelegramText] = useState('');
-  const [searchAgentTag, setSearchAgentTag] = useState('');
-  const [searchError, setSearchError] = useState('');
+    const isLandscape =
+      width > height;
 
-  const [actionUid, setActionUid] = useState<string | null>(null);
-  const [isTransmitting, setIsTransmitting] = useState(false);
-  const [isSearching, setIsSearching] = useState(false);
-  const [manifestRetryKey, setManifestRetryKey] = useState(0);
-  const [explorerRetryKey, setExplorerRetryKey] = useState(0);
+    const currentTab:
+      NavigationTab =
+      'LEADERBOARD';
 
-  const friendshipsMap = useMemo<Record<string, FriendshipMeta>>(() => {
-    const map: Record<string, FriendshipMeta> = {};
+    const currentUser =
+      auth.currentUser;
 
-    for (const friendship of outgoingFriendships) {
-      map[friendship.targetUid] = {
-        docId: friendship.docId,
-        status: friendship.status,
-        isRequester: true,
-      };
-    }
+    const currentUserId =
+      currentUser?.uid ??
+      '';
 
-    for (const friendship of incomingFriendships) {
-      const existing = map[friendship.targetUid];
-      if (!existing || existing.status !== 'accepted') {
-        map[friendship.targetUid] = {
-          docId: friendship.docId,
-          status: friendship.status,
-          isRequester: false,
-        };
-      }
-    }
+    /* ---------------------------------------------------------------------- */
+    /* Firestore state                                                       */
+    /* ---------------------------------------------------------------------- */
 
-    return map;
-  }, [incomingFriendships, outgoingFriendships]);
+    const [
+      manifest,
+      setManifest,
+    ] =
+      useState<
+        ExplorerEntry[]
+      >([]);
 
-  useEffect(() => {
-    if (!db) {
-      setManifestError('Database connection unavailable.');
-      setLoadingManifest(false);
-      return;
-    }
-
-    setLoadingManifest(true);
-    setManifestError('');
-
-    const leaderboardQuery = query(
-      collection(db, 'users'),
-      orderBy('totalPoints', 'desc'),
-      limit(MAX_LEADERBOARD_ENTRIES),
-    );
-
-    const unsubscribe = onSnapshot(
-      leaderboardQuery,
-      (snapshot) => {
-        const entries: ExplorerEntry[] = snapshot.docs.map((docSnap, index) => {
-          const data = docSnap.data() as UserDocument;
-          const isUser = docSnap.id === currentUserId;
-          const username = normaliseName(data.username);
-          const totalPoints =
-            typeof data.totalPoints === 'number' && Number.isFinite(data.totalPoints)
-              ? data.totalPoints
-              : 0;
-
-          return {
-            uid: docSnap.id,
-            rank: String(index + 1).padStart(2, '0'),
-            name: isUser ? `YOU - ${username}` : username,
-            points: totalPoints.toLocaleString(),
-            isUser,
-          };
-        });
-
-        setManifest(entries);
-        setLoadingManifest(false);
-      },
-      () => {
-        setManifestError('Unable to sync the explorer manifest. Please try again.');
-        setLoadingManifest(false);
-      },
-    );
-
-    return unsubscribe;
-  }, [currentUserId, manifestRetryKey]);
-
-  useEffect(() => {
-    if (!db || !currentUserId) {
-      setOutgoingFriendships([]);
-      setIncomingFriendships([]);
-      return;
-    }
-
-    const outgoingQuery = query(
-      collection(db, 'friendships'),
-      where('requesterId', '==', currentUserId),
-    );
-
-    const incomingQuery = query(
-      collection(db, 'friendships'),
-      where('receiverId', '==', currentUserId),
-    );
-
-    const unsubOutgoing = onSnapshot(
-      outgoingQuery,
-      (snapshot) => {
-        setOutgoingFriendships(
-          snapshot.docs
-            .map((docSnap) => {
-              const data = docSnap.data() as Partial<FriendshipDocument>;
-              if (typeof data.receiverId !== 'string' || typeof data.status !== 'string') {
-                return null;
-              }
-
-              return {
-                docId: docSnap.id,
-                targetUid: data.receiverId,
-                status: data.status as FriendshipMeta['status'],
-              };
-            })
-            .filter(
-              (
-                item,
-              ): item is {
-                docId: string;
-                targetUid: string;
-                status: FriendshipMeta['status'];
-              } => item !== null,
-            ),
-        );
-      },
-      () => {
-        setOutgoingFriendships([]);
-      },
-    );
-
-    const unsubIncoming = onSnapshot(
-      incomingQuery,
-      (snapshot) => {
-        setIncomingFriendships(
-          snapshot.docs
-            .map((docSnap) => {
-              const data = docSnap.data() as Partial<FriendshipDocument>;
-              if (typeof data.requesterId !== 'string' || typeof data.status !== 'string') {
-                return null;
-              }
-
-              return {
-                docId: docSnap.id,
-                targetUid: data.requesterId,
-                status: data.status as FriendshipMeta['status'],
-              };
-            })
-            .filter(
-              (
-                item,
-              ): item is {
-                docId: string;
-                targetUid: string;
-                status: FriendshipMeta['status'];
-              } => item !== null,
-            ),
-        );
-      },
-      () => {
-        setIncomingFriendships([]);
-      },
-    );
-
-    return () => {
-      unsubOutgoing();
-      unsubIncoming();
-    };
-  }, [currentUserId]);
-
-  useEffect(() => {
-    if (!db || !currentUserId) {
-      setAllUsers([]);
-      setLoadingExplorers(false);
-      return;
-    }
-
-    setLoadingExplorers(true);
-    setExplorerError('');
-
-    const usersQuery = query(collection(db, 'users'), limit(MAX_EXPLORERS));
-
-    const unsubscribe = onSnapshot(
-      usersQuery,
-      (snapshot) => {
-        const users = snapshot.docs
-          .filter((docSnap) => docSnap.id !== currentUserId)
-          .map((docSnap) => {
-            const data = docSnap.data() as UserDocument & {
-              location?: GeoPoint | { latitude: number; longitude: number } | null;
-            };
-            const rawLocation = data.location;
-            const rawLatitude =
-              rawLocation && typeof rawLocation === 'object' && 'latitude' in rawLocation
-                ? Number(rawLocation.latitude)
-                : NaN;
-            const rawLongitude =
-              rawLocation && typeof rawLocation === 'object' && 'longitude' in rawLocation
-                ? Number(rawLocation.longitude)
-                : NaN;
-
-            const location: GeoPoint | null =
-              isValidCoordinate(rawLatitude, rawLongitude)
-                ? new GeoPoint(rawLatitude, rawLongitude)
-                : null;
-
-            return {
-              uid: docSnap.id,
-              name: normaliseName(data.username),
-              location,
-            };
-          });
-
-        setAllUsers(users);
-        setLoadingExplorers(false);
-      },
-      () => {
-        setExplorerError('Unable to scan nearby explorer telemetry.');
-        setLoadingExplorers(false);
-      },
-    );
-
-    return unsubscribe;
-  }, [currentUserId, explorerRetryKey]);
-
-  const nearbyExplorers = useMemo<NearbyExplorer[]>(() => {
-    const canCalculateDistance =
-      !!userCoordinates &&
-      isValidCoordinate(userCoordinates.latitude, userCoordinates.longitude);
-
-    const parsed: NearbyExplorer[] = [];
-
-    for (const user of allUsers) {
-      let distanceKm: number | null = null;
-      let hasValidLocation = false;
-
-      if (canCalculateDistance && user.location && isValidCoordinate(user.location.latitude, user.location.longitude)) {
-        distanceKm = calculateHaversineDistanceKm(
-          userCoordinates!.latitude,
-          userCoordinates!.longitude,
-          user.location.latitude,
-          user.location.longitude,
-        );
-        hasValidLocation = true;
-      }
-
-      // Only show explorers whose distance can actually be verified.
-      if (hasValidLocation && distanceKm !== null && distanceKm <= RADIUS_KM) {
-        parsed.push({
-          uid: user.uid,
-          name: user.name,
-          initial: user.name.charAt(0) || 'A',
-          distanceKm,
-          distanceFormatted: formatDistance(distanceKm),
-          hasValidLocation,
-          friendMeta: friendshipsMap[user.uid],
-        });
-      }
-    }
-
-    parsed.sort((a, b) => {
-      if (a.hasValidLocation !== b.hasValidLocation) {
-        return a.hasValidLocation ? -1 : 1;
-      }
-      return (a.distanceKm ?? Number.POSITIVE_INFINITY) - (b.distanceKm ?? Number.POSITIVE_INFINITY);
-    });
-
-    return parsed;
-  }, [allUsers, friendshipsMap, userCoordinates]);
-
-  const filteredExplorers = useMemo(() => {
-    const search = searchAgentTag.trim().toLowerCase();
-    if (!search) return nearbyExplorers;
-
-    return nearbyExplorers.filter((explorer) =>
-      explorer.name.toLowerCase().includes(search),
-    );
-  }, [nearbyExplorers, searchAgentTag]);
-
-  const handleSendFriendRequest = async (targetUid: string) => {
-    if (!db || !currentUserId || !targetUid || targetUid === currentUserId) {
-      if (targetUid === currentUserId) {
-        Alert.alert('CANNOT LINK SELF', 'You cannot create a friendship request with your own account.');
-      }
-      return;
-    }
-
-    if (actionUid) return;
-
-    const existingMeta = friendshipsMap[targetUid];
-
-    if (existingMeta) {
-      if (existingMeta.status === 'accepted') {
-        Alert.alert('LINK ACTIVE', 'You are already linked with this explorer.');
-        return;
-      }
-
-      if (existingMeta.status === 'pending') {
-        Alert.alert('REQUEST ACTIVE', 'A pending link request already exists with this explorer.');
-        return;
-      }
-
-      if (existingMeta.status === 'blocked') {
-        Alert.alert('LINK BLOCKED', 'This explorer cannot currently be linked.');
-        return;
-      }
-    }
-
-    try {
-      setActionUid(targetUid);
-
-      const friendshipId = getDeterministicFriendshipId(currentUserId, targetUid);
-
-      await setDoc(
-        doc(db, 'friendships', friendshipId),
-        {
-          friendshipId,
-          requesterId: currentUserId,
-          receiverId: targetUid,
-          status: 'pending',
-          createdAt: Timestamp.now(),
-          updatedAt: Timestamp.now(),
-        } as FriendshipDocument,
-        { merge: false },
+    const [
+      currentUserProfile,
+      setCurrentUserProfile,
+    ] =
+      useState<UserDocument | null>(
+        null,
       );
-    } catch {
-      Alert.alert('TRANSMISSION ERROR', 'Failed to issue the friend link request.');
-    } finally {
-      setActionUid(null);
-    }
-  };
 
-  const handleAcceptFriendRequest = async (friendship: FriendshipMeta) => {
-    if (!db || !currentUserId || actionUid) return;
+    const [
+      loadingManifest,
+      setLoadingManifest,
+    ] =
+      useState(true);
 
-    try {
-      setActionUid(friendship.docId);
+    const [
+      loadingProfile,
+      setLoadingProfile,
+    ] =
+      useState(true);
 
-      await updateDoc(doc(db, 'friendships', friendship.docId), {
-        status: 'accepted',
-        updatedAt: Timestamp.now(),
-      });
-    } catch {
-      Alert.alert('LINK ERROR', 'Unable to accept the explorer link request.');
-    } finally {
-      setActionUid(null);
-    }
-  };
+    const [
+      manifestError,
+      setManifestError,
+    ] =
+      useState<
+        string | null
+      >(null);
 
-  const handleRemoveFriendship = (friendship: FriendshipMeta, agentName: string) => {
-    if (!db || !currentUserId) return;
+    const [
+      profileError,
+      setProfileError,
+    ] =
+      useState<
+        string | null
+      >(null);
 
-    Alert.alert(
-      friendship.status === 'pending' && friendship.isRequester
-        ? 'CANCEL REQUEST'
-        : 'TERMINATE LINK',
-      friendship.status === 'pending' && friendship.isRequester
-        ? `Cancel the pending link request to ${agentName}?`
-        : `Disconnect telemetry link with ${agentName}?`,
-      [
-        { text: 'CANCEL', style: 'cancel' },
-        {
-          text: friendship.status === 'pending' && friendship.isRequester ? 'CANCEL REQUEST' : 'UNLINK',
-          style: 'destructive',
-          onPress: async () => {
-            if (actionUid) return;
+    const [
+      retryKey,
+      setRetryKey,
+    ] =
+      useState(0);
 
-            try {
-              setActionUid(friendship.docId);
-              await deleteDoc(doc(db, 'friendships', friendship.docId));
-            } catch {
-              Alert.alert('LINK ERROR', 'Unable to update the friendship record.');
-            } finally {
-              setActionUid(null);
-            }
+    /* ---------------------------------------------------------------------- */
+    /* Firestore subscriptions                                               */
+    /* ---------------------------------------------------------------------- */
+
+    useEffect(() => {
+      if (
+        !currentUserId
+      ) {
+        setManifest(
+          [],
+        );
+
+        setCurrentUserProfile(
+          null,
+        );
+
+        setLoadingManifest(
+          false,
+        );
+
+        setLoadingProfile(
+          false,
+        );
+
+        setManifestError(
+          'EXPLORER SESSION REQUIRED',
+        );
+
+        setProfileError(
+          'PROFILE UNAVAILABLE',
+        );
+
+        return;
+      }
+
+      setLoadingManifest(
+        true,
+      );
+
+      setLoadingProfile(
+        true,
+      );
+
+      setManifestError(
+        null,
+      );
+
+      setProfileError(
+        null,
+      );
+
+      /* -------------------------------------------------------------------- */
+      /* Top explorers                                                        */
+      /* -------------------------------------------------------------------- */
+
+      const leaderboardQuery =
+        query(
+          collection(
+            db,
+            'users',
+          ),
+
+          orderBy(
+            'totalPoints',
+            'desc',
+          ),
+
+          limit(
+            MAX_LEADERBOARD_ENTRIES,
+          ),
+        );
+
+      const unsubscribeLeaderboard =
+        onSnapshot(
+          leaderboardQuery,
+
+          (
+            snapshot,
+          ) => {
+            const entries:
+              ExplorerEntry[] =
+              snapshot.docs.map(
+                (
+                  documentSnapshot,
+                  index,
+                ) => {
+                  const data =
+                    documentSnapshot.data() as
+                      UserDocument;
+
+                  return {
+                    uid:
+                      documentSnapshot.id,
+
+                    rank:
+                      index + 1,
+
+                    username:
+                      normaliseUsername(
+                        data.username,
+                      ),
+
+                    points:
+                      normalisePoints(
+                        data.totalPoints,
+                      ),
+
+                    isCurrentUser:
+                      documentSnapshot.id ===
+                      currentUserId,
+                  };
+                },
+              );
+
+            setManifest(
+              entries,
+            );
+
+            setManifestError(
+              null,
+            );
+
+            setLoadingManifest(
+              false,
+            );
           },
+
+          (
+            error,
+          ) => {
+            logDevelopmentWarning(
+              '[Treasi Leaderboard] Manifest subscription failed:',
+              error,
+            );
+
+            /*
+             * Existing data remains visible if the live listener temporarily
+             * fails instead of replacing the screen with mock information.
+             */
+            setManifestError(
+              'EXPLORER MANIFEST SYNC OFFLINE',
+            );
+
+            setLoadingManifest(
+              false,
+            );
+          },
+        );
+
+      /* -------------------------------------------------------------------- */
+      /* Current Explorer profile                                             */
+      /* -------------------------------------------------------------------- */
+
+      const userReference =
+        doc(
+          db,
+          'users',
+          currentUserId,
+        );
+
+      const unsubscribeProfile =
+        onSnapshot(
+          userReference,
+
+          (
+            snapshot,
+          ) => {
+            if (
+              snapshot.exists()
+            ) {
+              setCurrentUserProfile(
+                snapshot.data() as
+                  UserDocument,
+              );
+
+              setProfileError(
+                null,
+              );
+            } else {
+              setCurrentUserProfile(
+                null,
+              );
+
+              setProfileError(
+                'EXPLORER PROFILE NOT FOUND',
+              );
+            }
+
+            setLoadingProfile(
+              false,
+            );
+          },
+
+          (
+            error,
+          ) => {
+            logDevelopmentWarning(
+              '[Treasi Leaderboard] Profile subscription failed:',
+              error,
+            );
+
+            setProfileError(
+              'EXPLORER PROFILE SYNC OFFLINE',
+            );
+
+            setLoadingProfile(
+              false,
+            );
+          },
+        );
+
+      return () => {
+        unsubscribeLeaderboard();
+        unsubscribeProfile();
+      };
+    }, [
+      currentUserId,
+      retryKey,
+    ]);
+
+    /* ---------------------------------------------------------------------- */
+    /* Derived leaderboard data                                              */
+    /* ---------------------------------------------------------------------- */
+
+    const topThree =
+      useMemo(
+        () =>
+          manifest.slice(
+            0,
+            3,
+          ),
+        [
+          manifest,
+        ],
+      );
+
+    const currentManifestEntry =
+      useMemo(
+        () =>
+          manifest.find(
+            (
+              entry,
+            ) =>
+              entry.uid ===
+              currentUserId,
+          ) ??
+          null,
+        [
+          currentUserId,
+          manifest,
+        ],
+      );
+
+    const currentPoints =
+      normalisePoints(
+        currentUserProfile
+          ?.totalPoints ??
+          currentManifestEntry
+            ?.points ??
+          0,
+      );
+
+    const currentUsername =
+      normaliseUsername(
+        currentUserProfile
+          ?.username ??
+          currentManifestEntry
+            ?.username ??
+          currentUser
+            ?.displayName ??
+          currentUser
+            ?.email
+            ?.split('@')[0],
+        'EXPLORER',
+      );
+
+    const currentRankText =
+      useMemo(
+        () => {
+          if (
+            loadingManifest
+          ) {
+            return 'CHECKING';
+          }
+
+          if (
+            currentManifestEntry
+          ) {
+            return `#${currentManifestEntry.rank}`;
+          }
+
+          if (
+            manifest.length >=
+            MAX_LEADERBOARD_ENTRIES
+          ) {
+            return `OUTSIDE TOP ${MAX_LEADERBOARD_ENTRIES}`;
+          }
+
+          return 'NOT RANKED';
         },
-      ],
-    );
-  };
-
-  const handleSearchAndLinkAgent = async () => {
-    if (!db || !currentUserId || isSearching) return;
-
-    const searchTag = searchAgentTag.trim().toLowerCase();
-
-    if (!searchTag) {
-      setSearchError('ENTER AN AGENT CALLSIGN');
-      return;
-    }
-
-    setSearchError('');
-    setIsSearching(true);
-
-    try {
-      const matchingExplorer = allUsers.find(
-        (user) => user.name.toLowerCase() === searchTag,
+        [
+          currentManifestEntry,
+          loadingManifest,
+          manifest.length,
+        ],
       );
 
-      if (!matchingExplorer) {
-        setSearchError('AGENT CALLSIGN NOT FOUND');
-        return;
-      }
-
-      if (matchingExplorer.uid === currentUserId) {
-        setSearchError('CANNOT LINK SELF CALLSIGN');
-        return;
-      }
-
-      await handleSendFriendRequest(matchingExplorer.uid);
-      setFriendModalVisible(false);
-      setSearchAgentTag('');
-    } catch {
-      setSearchError('TRANSMISSION FAILED');
-    } finally {
-      setIsSearching(false);
-    }
-  };
-
-  /*
-   * Treasi currently implements TELEGRAM as a global dispatch/broadcast,
-   * not as a one-to-one chat system. The existing messages schema contains
-   * sender/text/timestamp fields but no recipient field, so this screen keeps
-   * the feature as a reliable sector-wide dispatch rather than inventing a
-   * second private-chat data model.
-   */
-  const handleDispatchTelegram = async () => {
-    if (!db || !currentUserId || !telegramText.trim() || isTransmitting) {
-      if (!telegramText.trim()) {
-        Alert.alert('EMPTY TELEGRAM', 'Enter a message before transmitting the signal.');
-      }
-      return;
-    }
-
-    setIsTransmitting(true);
-
-    try {
-      const senderName = normaliseName(
-        currentUser?.displayName?.trim() ||
-          currentUser?.email?.trim() ||
-          'FIELD EXPLORER',
+    const syncErrorText =
+      useMemo(
+        () =>
+          [
+            manifestError,
+            profileError,
+          ]
+            .filter(
+              (
+                value,
+              ): value is string =>
+                Boolean(
+                  value,
+                ),
+            )
+            .join(
+              ' · ',
+            ),
+        [
+          manifestError,
+          profileError,
+        ],
       );
-      const message = telegramText.trim().slice(0, 500);
 
-      if (!message) {
-        setIsTransmitting(false);
-        return;
-      }
+    /* ---------------------------------------------------------------------- */
+    /* Navigation                                                            */
+    /* ---------------------------------------------------------------------- */
 
-      await setDoc(
-        doc(collection(db, 'messages')),
-        {
-          senderId: currentUserId,
-          senderName,
-          text: message,
-          createdAt: Timestamp.now(),
-          type: 'GLOBAL_DISPATCH',
+    const navigateToSocial =
+      useCallback(
+        (): void => {
+          onNavigate?.(
+            'SOCIAL',
+          );
         },
+        [
+          onNavigate,
+        ],
       );
 
-      await setDoc(
-        doc(collection(db, 'activity_feed')),
-        {
-          userId: currentUserId,
-          username: senderName,
-          type: 'TELEGRAM_DISPATCH',
-          message: `DISPATCHED TELEGRAM: "${message.length > 30 ? `${message.substring(0, 30)}...` : message}"`,
-          targetId: 'global',
-          createdAt: Timestamp.now(),
+    const handleReturnToMap =
+      useCallback(
+        (): void => {
+          if (onBack) {
+            onBack();
+            return;
+          }
+
+          onNavigate?.(
+            'MAP',
+          );
         },
+        [
+          onBack,
+          onNavigate,
+        ],
       );
 
-      setTelegramText('');
-      setTelegramModalVisible(false);
-      Alert.alert('SIGNAL TRANSMITTED', 'Telegram broadcast dispatched to the active sector.');
-    } catch {
-      Alert.alert(
-        'TRANSMISSION FAILED',
-        'The Telegram could not be dispatched. Check your connection and try again.',
-      );
-    } finally {
-      setIsTransmitting(false);
-    }
-  };
+    /* ---------------------------------------------------------------------- */
+    /* Retry                                                                 */
+    /* ---------------------------------------------------------------------- */
 
-  return (
-    <View
-      style={[
-        styles.splitWrapper,
-        {
-          paddingLeft: Math.max(insets.left, 12),
-          paddingRight: Math.max(insets.right, 12),
-          paddingTop: Math.max(insets.top, 8),
-          paddingBottom: Math.max(insets.bottom, 8),
+    const handleRetry =
+      useCallback(
+        (): void => {
+          setManifestError(
+            null,
+          );
+
+          setProfileError(
+            null,
+          );
+
+          setLoadingManifest(
+            true,
+          );
+
+          setLoadingProfile(
+            true,
+          );
+
+          setRetryKey(
+            (
+              current,
+            ) =>
+              current + 1,
+          );
+
+          AccessibilityInfo
+            .announceForAccessibility(
+              'Retrying Explorer manifest synchronisation.',
+            );
         },
-      ]}
-    >
-      <View style={styles.leftViewport}>
-        <View style={styles.ledgerHeader}>
-          <StarIcon color="#A64B2A" size={14} />
-          <Text style={styles.header}>FIELD MANIFEST</Text>
-          <StarIcon color="#A64B2A" size={14} />
-        </View>
+        [],
+      );
 
-        <Text style={styles.subHeader}>EXCAVATION POINTS LEDGER · SHASTA SECTOR</Text>
+    /* ---------------------------------------------------------------------- */
+    /* Render                                                                */
+    /* ---------------------------------------------------------------------- */
 
-        <View style={styles.tableHeader}>
-          <Text style={[styles.colHeader, { flex: 0.15 }]}>NO.</Text>
-          <Text style={[styles.colHeader, { flex: 0.55 }]}>EXPLORER</Text>
-          <Text style={[styles.colHeader, { flex: 0.3, textAlign: 'right' }]}>POINTS</Text>
-        </View>
+    return (
+      <View
+        style={[
+          styles.screen,
+          {
+            paddingLeft:
+              Math.max(
+                insets.left,
+                12,
+              ),
 
-        {loadingManifest ? (
-          <View style={styles.loadingBox}>
-            <ActivityIndicator size="small" color="#2A2420" />
-            <Text style={styles.loadingText}>SYNCING MANIFEST DATA...</Text>
-          </View>
-        ) : manifestError ? (
-          <View style={styles.loadingBox}>
-            <Text style={styles.errorText}>{manifestError}</Text>
-            <TouchableOpacity
-              style={styles.inlineRetryButton}
-              onPress={() => {
-                setManifestError('');
-                setLoadingManifest(true);
-                setManifestRetryKey((value) => value + 1);
-              }}
-              accessibilityRole="button"
-              accessibilityLabel="Retry leaderboard sync"
-            >
-              <Text style={styles.inlineRetryText}>RETRY</Text>
-            </TouchableOpacity>
-          </View>
-        ) : manifest.length === 0 ? (
-          <View style={styles.loadingBox}>
-            <Text style={styles.emptyText}>NO EXPLORERS IN THE MANIFEST</Text>
-          </View>
-        ) : (
-          <ScrollView
-            showsVerticalScrollIndicator={false}
-            contentContainerStyle={styles.ledgerList}
-            accessibilityLabel="Explorer leaderboard"
+            paddingRight:
+              Math.max(
+                insets.right,
+                12,
+              ),
+
+            paddingTop:
+              Math.max(
+                insets.top,
+                10,
+              ),
+
+            paddingBottom:
+              Math.max(
+                insets.bottom,
+                10,
+              ),
+          },
+        ]}
+      >
+        <View
+          style={[
+            styles.layout,
+
+            {
+              flexDirection:
+                isLandscape
+                  ? 'row'
+                  : 'column',
+            },
+          ]}
+        >
+          {/* ================================================================ */}
+          {/* 60% — EXPLORER MANIFEST                                         */}
+          {/* ================================================================ */}
+
+          <View
+            style={[
+              styles.manifestPanel,
+
+              isLandscape
+                ? styles.manifestPanelLandscape
+                : styles.panelPortrait,
+            ]}
           >
-            {manifest.map((item, index) => (
+            {/* -------------------------------------------------------------- */}
+            {/* Header                                                         */}
+            {/* -------------------------------------------------------------- */}
+
+            <View
+              style={
+                styles.manifestHeader
+              }
+            >
               <View
-                key={item.uid}
-                style={[styles.rowContainer, item.isUser && styles.rowHighlight]}
-                accessible
-                accessibilityLabel={`Rank ${Number(item.rank)}. ${item.name}. ${item.points} points.`}
+                style={
+                  styles.manifestTitleRow
+                }
               >
-                <Text
-                  style={[
-                    styles.rowText,
-                    item.isUser && styles.rowHighlightText,
-                    { flex: 0.15 },
-                  ]}
-                >
-                  {item.rank}
-                </Text>
+                <MaterialCommunityIcons
+                  accessible={
+                    false
+                  }
+                  importantForAccessibility="no"
+                  name="star-four-points"
+                  size={16}
+                  color={
+                    COLOURS.rust700
+                  }
+                />
 
                 <Text
-                  style={[
-                    styles.rowText,
-                    item.isUser && styles.rowHighlightText,
-                    { flex: 0.55 },
-                  ]}
-                  numberOfLines={1}
+                  accessibilityRole="header"
+                  maxFontSizeMultiplier={
+                    1.6
+                  }
+                  style={
+                    styles.manifestTitle
+                  }
                 >
-                  {item.name}
+                  FIELD MANIFEST
                 </Text>
 
-                <View style={styles.dotLeaderContainer}>
-                  <Text style={styles.dotLeader} numberOfLines={1}>
-                    ...................................
+                <MaterialCommunityIcons
+                  accessible={
+                    false
+                  }
+                  importantForAccessibility="no"
+                  name="star-four-points"
+                  size={16}
+                  color={
+                    COLOURS.rust700
+                  }
+                />
+              </View>
+
+              <Text
+                maxFontSizeMultiplier={
+                  1.5
+                }
+                style={
+                  styles.manifestSubtitle
+                }
+              >
+                EXPLORER POINTS LEDGER · TOP{' '}
+                {
+                  MAX_LEADERBOARD_ENTRIES
+                }
+              </Text>
+            </View>
+
+            {/* -------------------------------------------------------------- */}
+            {/* Sync warning                                                   */}
+            {/* -------------------------------------------------------------- */}
+
+            {manifestError ? (
+              <View
+                accessible
+                accessibilityRole="alert"
+                accessibilityLiveRegion="polite"
+                style={
+                  styles.syncWarning
+                }
+              >
+                <Ionicons
+                  accessible={
+                    false
+                  }
+                  importantForAccessibility="no"
+                  name="cloud-offline-outline"
+                  size={17}
+                  color={
+                    COLOURS.parchment100
+                  }
+                />
+
+                <Text
+                  maxFontSizeMultiplier={
+                    1.6
+                  }
+                  style={
+                    styles.syncWarningText
+                  }
+                >
+                  {
+                    manifestError
+                  }
+                </Text>
+
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Retry leaderboard synchronisation"
+                  hitSlop={4}
+                  onPress={
+                    handleRetry
+                  }
+                  style={({
+                    pressed,
+                  }) => [
+                    styles.smallRetryButton,
+
+                    pressed &&
+                      styles.darkButtonPressed,
+                  ]}
+                >
+                  <Text
+                    style={
+                      styles.smallRetryText
+                    }
+                  >
+                    RETRY
                   </Text>
-                </View>
+                </Pressable>
+              </View>
+            ) : null}
+
+            {/* -------------------------------------------------------------- */}
+            {/* Table header                                                   */}
+            {/* -------------------------------------------------------------- */}
+
+            <View
+              accessible={
+                false
+              }
+              importantForAccessibility="no-hide-descendants"
+              style={
+                styles.tableHeader
+              }
+            >
+              <Text
+                style={[
+                  styles.columnHeader,
+                  styles.rankColumn,
+                ]}
+              >
+                NO.
+              </Text>
+
+              <Text
+                style={[
+                  styles.columnHeader,
+                  styles.nameColumn,
+                ]}
+              >
+                EXPLORER
+              </Text>
+
+              <Text
+                style={[
+                  styles.columnHeader,
+                  styles.pointsColumn,
+                ]}
+              >
+                POINTS
+              </Text>
+            </View>
+
+            {/* -------------------------------------------------------------- */}
+            {/* Manifest                                                       */}
+            {/* -------------------------------------------------------------- */}
+
+            {loadingManifest &&
+            manifest.length ===
+              0 ? (
+              <View
+                accessible
+                accessibilityRole="progressbar"
+                accessibilityLabel="Loading Explorer leaderboard"
+                style={
+                  styles.loadingBox
+                }
+              >
+                <ActivityIndicator
+                  size="small"
+                  color={
+                    COLOURS.rust700
+                  }
+                />
 
                 <Text
-                  style={[
-                    styles.rowText,
-                    item.isUser && styles.rowHighlightText,
-                    { flex: 0.3, textAlign: 'right' },
-                  ]}
+                  style={
+                    styles.loadingText
+                  }
                 >
-                  {item.points}
+                  SYNCHRONISING MANIFEST…
                 </Text>
               </View>
-            ))}
-          </ScrollView>
-        )}
-      </View>
+            ) : manifest.length ===
+              0 ? (
+              <View
+                accessible
+                accessibilityLabel="No Explorers are currently available in the leaderboard."
+                style={
+                  styles.loadingBox
+                }
+              >
+                <MaterialCommunityIcons
+                  accessible={
+                    false
+                  }
+                  importantForAccessibility="no"
+                  name="account-search-outline"
+                  size={28}
+                  color={
+                    COLOURS.bronze700
+                  }
+                />
 
-      <View style={styles.rightViewport}>
-        <View style={styles.rightHeaderRow}>
-          <View style={{ flex: 1 }}>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-              <StarIcon color="#B08D57" size={10} />
-              <Text style={styles.panelTitle}>NEARBY AGENTS</Text>
-            </View>
-            <Text style={styles.subText}>Active Units Within 20km Radius</Text>
-          </View>
-
-          <TouchableOpacity
-            style={styles.iconAddButton}
-            onPress={() => {
-              setSearchError('');
-              setSearchAgentTag('');
-              setFriendModalVisible(true);
-            }}
-            accessibilityLabel="Link new explorer callsign"
-            accessibilityHint="Opens the explorer linking form"
-            accessibilityRole="button"
-          >
-            <UserPlusIcon color="#B08D57" size={16} />
-          </TouchableOpacity>
-        </View>
-
-        {loadingExplorers ? (
-          <View style={styles.loadingBox}>
-            <ActivityIndicator size="small" color="#E8DCC0" />
-            <Text style={styles.loadingTextDark}>SCANNING EXPLORER TELEMETRY...</Text>
-          </View>
-        ) : explorerError ? (
-          <View style={styles.loadingBox}>
-            <Text style={styles.errorTextDark}>{explorerError}</Text>
-            <TouchableOpacity
-              style={styles.darkRetryButton}
-              onPress={() => {
-                setExplorerError('');
-                setLoadingExplorers(true);
-                setExplorerRetryKey((value) => value + 1);
-              }}
-              accessibilityRole="button"
-              accessibilityLabel="Retry nearby explorer scan"
-            >
-              <Text style={styles.darkRetryText}>RECONNECT</Text>
-            </TouchableOpacity>
-          </View>
-        ) : !userCoordinates ? (
-          <View style={styles.loadingBox}>
-            <Text style={styles.emptyText}>YOUR LOCATION IS UNAVAILABLE</Text>
-            <Text style={styles.loadingTextDark}>
-              Nearby range cannot be verified without a valid GPS position.
-            </Text>
-          </View>
-        ) : filteredExplorers.length === 0 ? (
-          <View style={styles.loadingBox}>
-            <Text style={styles.emptyText}>
-              {searchAgentTag.trim()
-                ? 'NO MATCHING AGENTS IN 20KM RADIUS'
-                : 'NO AGENTS DETECTED IN 20KM RADIUS'}
-            </Text>
-          </View>
-        ) : (
-          <ScrollView
-            style={styles.cardsContainer}
-            showsVerticalScrollIndicator={false}
-            accessibilityLabel="Nearby explorers"
-          >
-            {filteredExplorers.map((item, idx) => {
-              const friendMeta = item.friendMeta;
-              const isPending = friendMeta?.status === 'pending';
-              const isAccepted = friendMeta?.status === 'accepted';
-              const isIncomingRequest = isPending && !friendMeta?.isRequester;
-              const isActing = actionUid === item.uid || actionUid === friendMeta?.docId;
-
-              return (
-                <View
-                  key={item.uid}
-                  style={styles.explorerCard}
-                  accessible
-                  accessibilityLabel={`${item.name}. Range ${item.distanceFormatted}. ${
-                    isAccepted
-                      ? 'Friends'
-                      : isIncomingRequest
-                        ? 'Friend request received'
-                        : isPending
-                          ? 'Friend request pending'
-                          : 'Not linked'
-                  }`}
+                <Text
+                  style={
+                    styles.emptyText
+                  }
                 >
-                  <View style={styles.cardLeft}>
-                    <View style={styles.avatarCircle}>
-                      <Text style={styles.avatarText}>{item.initial}</Text>
-                    </View>
+                  NO EXPLORERS IN THE MANIFEST
+                </Text>
 
-                    <View style={{ flex: 1 }}>
-                      <Text style={styles.explorerName}>{item.name}</Text>
+                {manifestError ? (
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Retry leaderboard synchronisation"
+                    onPress={
+                      handleRetry
+                    }
+                    style={({
+                      pressed,
+                    }) => [
+                      styles.retryButton,
+
+                      pressed &&
+                        styles.primaryButtonPressed,
+                    ]}
+                  >
+                    <Text
+                      style={
+                        styles.retryButtonText
+                      }
+                    >
+                      RETRY MANIFEST
+                    </Text>
+                  </Pressable>
+                ) : null}
+              </View>
+            ) : (
+              <ScrollView
+                accessibilityLabel="Explorer leaderboard"
+                style={
+                  styles.leaderboardScroll
+                }
+                contentContainerStyle={
+                  styles.ledgerList
+                }
+                showsVerticalScrollIndicator={
+                  false
+                }
+              >
+                {manifest.map(
+                  (
+                    entry,
+                  ) => (
+                    <View
+                      key={
+                        entry.uid
+                      }
+                      accessible
+                      accessibilityLabel={`Rank ${entry.rank}. ${
+                        entry.isCurrentUser
+                          ? 'You, '
+                          : ''
+                      }${entry.username}. ${formatPoints(
+                        entry.points,
+                      )} points.`}
+                      style={[
+                        styles.rowContainer,
+
+                        entry.isCurrentUser &&
+                          styles.currentUserRow,
+                      ]}
+                    >
+                      <View
+                        accessible={
+                          false
+                        }
+                        importantForAccessibility="no-hide-descendants"
+                        style={
+                          styles.rankColumn
+                        }
+                      >
+                        <View
+                          style={[
+                            styles.rankBadge,
+
+                            entry.rank ===
+                              1 &&
+                              styles.rankBadgeFirst,
+
+                            entry.rank ===
+                              2 &&
+                              styles.rankBadgeSecond,
+
+                            entry.rank ===
+                              3 &&
+                              styles.rankBadgeThird,
+
+                            entry.isCurrentUser &&
+                              styles.currentUserRankBadge,
+                          ]}
+                        >
+                          <Text
+                            style={[
+                              styles.rankText,
+
+                              entry.isCurrentUser &&
+                                styles.currentUserRankText,
+                            ]}
+                          >
+                            {String(
+                              entry.rank,
+                            ).padStart(
+                              2,
+                              '0',
+                            )}
+                          </Text>
+                        </View>
+                      </View>
+
+                      <View
+                        accessible={
+                          false
+                        }
+                        importantForAccessibility="no-hide-descendants"
+                        style={
+                          styles.nameColumn
+                        }
+                      >
+                        <Text
+                          numberOfLines={
+                            1
+                          }
+                          ellipsizeMode="tail"
+                          style={[
+                            styles.explorerName,
+
+                            entry.isCurrentUser &&
+                              styles.currentUserText,
+                          ]}
+                        >
+                          {entry.isCurrentUser
+                            ? `YOU · ${entry.username}`
+                            : entry.username}
+                        </Text>
+
+                        <Text
+                          style={
+                            styles.explorerRankTitle
+                          }
+                        >
+                          {getRankTitle(
+                            entry.points,
+                          )}
+                        </Text>
+                      </View>
+
                       <Text
+                        accessible={
+                          false
+                        }
+                        importantForAccessibility="no"
                         style={[
-                          styles.explorerMeta,
-                          !item.hasValidLocation && styles.metaUnlinked,
+                          styles.pointsValue,
+                          styles.pointsColumn,
+
+                          entry.isCurrentUser &&
+                            styles.currentUserText,
                         ]}
                       >
-                        RANGE: {item.distanceFormatted}
+                        {formatPoints(
+                          entry.points,
+                        )}
+                      </Text>
+                    </View>
+                  ),
+                )}
+              </ScrollView>
+            )}
+
+            {/* -------------------------------------------------------------- */}
+            {/* Ledger note                                                    */}
+            {/* -------------------------------------------------------------- */}
+
+            <View
+              style={
+                styles.manifestFooter
+              }
+            >
+              <Text
+                maxFontSizeMultiplier={
+                  1.5
+                }
+                style={
+                  styles.manifestFooterText
+                }
+              >
+                RANKINGS USE CURRENT FIRESTORE TOTAL POINTS
+              </Text>
+
+              <Text
+                maxFontSizeMultiplier={
+                  1.5
+                }
+                style={
+                  styles.manifestFooterCount
+                }
+              >
+                {
+                  manifest.length
+                }
+                /
+                {
+                  MAX_LEADERBOARD_ENTRIES
+                }
+              </Text>
+            </View>
+          </View>
+
+          {/* ================================================================ */}
+          {/* 40% — COMMAND CONSOLE                                           */}
+          {/* ================================================================ */}
+
+          <View
+            style={[
+              styles.commandPanel,
+
+              isLandscape
+                ? styles.commandPanelLandscape
+                : styles.panelPortrait,
+            ]}
+          >
+            <ScrollView
+              style={
+                styles.commandScroll
+              }
+              contentContainerStyle={
+                styles.commandScrollContent
+              }
+              showsVerticalScrollIndicator={
+                false
+              }
+            >
+              {/* ------------------------------------------------------------ */}
+              {/* Current Explorer                                             */}
+              {/* ------------------------------------------------------------ */}
+
+              <View
+                style={
+                  styles.sectionHeaderRow
+                }
+              >
+                <Ionicons
+                  accessible={
+                    false
+                  }
+                  importantForAccessibility="no"
+                  name="person-circle-outline"
+                  size={17}
+                  color={
+                    COLOURS.bronze400
+                  }
+                />
+
+                <Text
+                  accessibilityRole="header"
+                  style={
+                    styles.sectionTitle
+                  }
+                >
+                  YOUR FIELD RECORD
+                </Text>
+              </View>
+
+              {loadingProfile ? (
+                <View
+                  accessible
+                  accessibilityRole="progressbar"
+                  accessibilityLabel="Loading your Explorer field record"
+                  style={
+                    styles.profileLoadingCard
+                  }
+                >
+                  <ActivityIndicator
+                    size="small"
+                    color={
+                      COLOURS.bronze400
+                    }
+                  />
+
+                  <Text
+                    style={
+                      styles.profileLoadingText
+                    }
+                  >
+                    CHECKING RECORD…
+                  </Text>
+                </View>
+              ) : (
+                <View
+                  accessible
+                  accessibilityLabel={`${currentUsername}. ${formatPoints(
+                    currentPoints,
+                  )} points. ${getRankTitle(
+                    currentPoints,
+                  )}. Leaderboard position ${currentRankText}.`}
+                  style={
+                    styles.currentRecordCard
+                  }
+                >
+                  <View
+                    accessible={
+                      false
+                    }
+                    importantForAccessibility="no-hide-descendants"
+                    style={
+                      styles.currentRecordTopRow
+                    }
+                  >
+                    <View
+                      style={
+                        styles.currentRecordIdentity
+                      }
+                    >
+                      <Text
+                        numberOfLines={
+                          1
+                        }
+                        style={
+                          styles.currentUsername
+                        }
+                      >
+                        {
+                          currentUsername
+                        }
+                      </Text>
+
+                      <Text
+                        style={
+                          styles.currentRankTitle
+                        }
+                      >
+                        {getRankTitle(
+                          currentPoints,
+                        )}
+                      </Text>
+                    </View>
+
+                    <View
+                      style={
+                        styles.currentPositionBadge
+                      }
+                    >
+                      <Text
+                        style={
+                          styles.currentPositionLabel
+                        }
+                      >
+                        POSITION
+                      </Text>
+
+                      <Text
+                        numberOfLines={
+                          2
+                        }
+                        style={
+                          styles.currentPositionValue
+                        }
+                      >
+                        {
+                          currentRankText
+                        }
                       </Text>
                     </View>
                   </View>
 
-                  <View style={styles.cardRight}>
-                    <View
-                      style={[
-                        styles.onlineDot,
-                        !item.hasValidLocation && { backgroundColor: '#8A7B66' },
-                      ]}
-                    />
+                  <View
+                    accessible={
+                      false
+                    }
+                    importantForAccessibility="no-hide-descendants"
+                    style={
+                      styles.currentPointsRow
+                    }
+                  >
+                    <Text
+                      style={
+                        styles.currentPointsValue
+                      }
+                    >
+                      {formatPoints(
+                        currentPoints,
+                      )}
+                    </Text>
 
-                    {!friendMeta && (
-                      <TouchableOpacity
-                        style={[styles.friendActionButton, isActing && { opacity: 0.5 }]}
-                        onPress={() => handleSendFriendRequest(item.uid)}
-                        disabled={isActing}
-                        accessibilityLabel={`Send link request to ${item.name}`}
-                        accessibilityRole="button"
-                      >
-                        {isActing ? (
-                          <ActivityIndicator size="small" color="#2C3B2E" />
-                        ) : (
-                          <UserPlusIcon color="#2C3B2E" size={14} />
-                        )}
-                      </TouchableOpacity>
-                    )}
-
-                    {isIncomingRequest && (
-                      <View style={{ flexDirection: 'row', gap: 4 }}>
-                        <TouchableOpacity
-                          style={[styles.friendActionButton, { backgroundColor: '#4CAF50' }]}
-                          onPress={() => handleAcceptFriendRequest(friendMeta)}
-                          disabled={isActing}
-                          accessibilityLabel={`Accept friend request from ${item.name}`}
-                          accessibilityRole="button"
-                        >
-                          {isActing ? (
-                            <ActivityIndicator size="small" color="#FFFFFF" />
-                          ) : (
-                            <UserCheckIcon color="#FFFFFF" size={12} />
-                          )}
-                        </TouchableOpacity>
-
-                        <TouchableOpacity
-                          style={[styles.friendActionButton, { backgroundColor: '#A64B2A' }]}
-                          onPress={() => handleRemoveFriendship(friendMeta, item.name)}
-                          disabled={isActing}
-                          accessibilityLabel={`Decline friend request from ${item.name}`}
-                          accessibilityRole="button"
-                        >
-                          <UserXIcon color="#FFFFFF" size={12} />
-                        </TouchableOpacity>
-                      </View>
-                    )}
-
-                    {isPending && friendMeta?.isRequester && (
-                      <TouchableOpacity
-                        style={[
-                          styles.friendActionButton,
-                          { backgroundColor: '#D9B98A' },
-                          isActing && { opacity: 0.5 },
-                        ]}
-                        onPress={() => handleRemoveFriendship(friendMeta, item.name)}
-                        disabled={isActing}
-                        accessibilityLabel={`Cancel pending friend request to ${item.name}`}
-                        accessibilityRole="button"
-                      >
-                        {isActing ? (
-                          <ActivityIndicator size="small" color="#2A2420" />
-                        ) : (
-                          <Text style={styles.pendingText}>PENDING</Text>
-                        )}
-                      </TouchableOpacity>
-                    )}
-
-                    {isAccepted && (
-                      <TouchableOpacity
-                        style={[
-                          styles.friendActionButton,
-                          { backgroundColor: '#CBBBA0' },
-                          isActing && { opacity: 0.5 },
-                        ]}
-                        onPress={() => handleRemoveFriendship(friendMeta, item.name)}
-                        disabled={isActing}
-                        accessibilityLabel={`Remove friendship with ${item.name}`}
-                        accessibilityRole="button"
-                      >
-                        {isActing ? (
-                          <ActivityIndicator size="small" color="#2C3B2E" />
-                        ) : (
-                          <UserCheckIcon color="#2C3B2E" size={14} />
-                        )}
-                      </TouchableOpacity>
-                    )}
-
-                    {friendMeta?.status === 'declined' && (
-                      <Text style={styles.statusText}>DECLINED</Text>
-                    )}
-
-                    {friendMeta?.status === 'blocked' && (
-                      <Text style={styles.statusText}>BLOCKED</Text>
-                    )}
+                    <Text
+                      style={
+                        styles.currentPointsLabel
+                      }
+                    >
+                      PTS
+                    </Text>
                   </View>
+
+                  {profileError ? (
+                    <Text
+                      accessibilityRole="alert"
+                      style={
+                        styles.profileErrorText
+                      }
+                    >
+                      {
+                        profileError
+                      }
+                    </Text>
+                  ) : null}
                 </View>
-              );
-            })}
-          </ScrollView>
-        )}
+              )}
 
-        <View style={{ marginBottom: 6 }}>
-          <TouchableOpacity
-            activeOpacity={0.88}
-            style={styles.dispatchButton}
-            onPress={() => {
-              setTelegramText('');
-              setTelegramModalVisible(true);
-            }}
-            accessibilityLabel="Dispatch Telegram signal"
-            accessibilityHint="Opens the broadcast message composer"
-            accessibilityRole="button"
-          >
-            <Text style={styles.dispatchText}>DISPATCH TELEGRAM</Text>
-          </TouchableOpacity>
+              {/* ------------------------------------------------------------ */}
+              {/* Podium                                                       */}
+              {/* ------------------------------------------------------------ */}
+
+              <View
+                style={[
+                  styles.sectionHeaderRow,
+                  styles.sectionSpacing,
+                ]}
+              >
+                <MaterialCommunityIcons
+                  accessible={
+                    false
+                  }
+                  importantForAccessibility="no"
+                  name="podium"
+                  size={17}
+                  color={
+                    COLOURS.bronze400
+                  }
+                />
+
+                <Text
+                  accessibilityRole="header"
+                  style={
+                    styles.sectionTitle
+                  }
+                >
+                  LEADING EXPLORERS
+                </Text>
+              </View>
+
+              <View
+                style={
+                  styles.podiumList
+                }
+              >
+                {topThree.length >
+                0 ? (
+                  topThree.map(
+                    (
+                      entry,
+                    ) => (
+                      <View
+                        key={
+                          entry.uid
+                        }
+                        accessible
+                        accessibilityLabel={`${getPodiumLabel(
+                          entry.rank,
+                        )} place. ${entry.username}. ${formatPoints(
+                          entry.points,
+                        )} points.`}
+                        style={[
+                          styles.podiumCard,
+
+                          entry.rank ===
+                            1 &&
+                            styles.podiumCardFirst,
+
+                          entry.isCurrentUser &&
+                            styles.podiumCardCurrent,
+                        ]}
+                      >
+                        <View
+                          accessible={
+                            false
+                          }
+                          importantForAccessibility="no-hide-descendants"
+                          style={[
+                            styles.podiumRankCircle,
+
+                            entry.rank ===
+                              1 &&
+                              styles.podiumRankCircleFirst,
+                          ]}
+                        >
+                          <Text
+                            style={
+                              styles.podiumRankText
+                            }
+                          >
+                            {
+                              entry.rank
+                            }
+                          </Text>
+                        </View>
+
+                        <View
+                          accessible={
+                            false
+                          }
+                          importantForAccessibility="no-hide-descendants"
+                          style={
+                            styles.podiumIdentity
+                          }
+                        >
+                          <Text
+                            numberOfLines={
+                              1
+                            }
+                            style={
+                              styles.podiumName
+                            }
+                          >
+                            {
+                              entry.username
+                            }
+                          </Text>
+
+                          <Text
+                            style={
+                              styles.podiumLabel
+                            }
+                          >
+                            {getPodiumLabel(
+                              entry.rank,
+                            )}
+                          </Text>
+                        </View>
+
+                        <Text
+                          accessible={
+                            false
+                          }
+                          importantForAccessibility="no"
+                          style={
+                            styles.podiumPoints
+                          }
+                        >
+                          {formatPoints(
+                            entry.points,
+                          )}
+                        </Text>
+                      </View>
+                    ),
+                  )
+                ) : (
+                  <View
+                    style={
+                      styles.emptyPodiumCard
+                    }
+                  >
+                    <Text
+                      style={
+                        styles.emptyPodiumText
+                      }
+                    >
+                      LEADERS UNAVAILABLE
+                    </Text>
+                  </View>
+                )}
+              </View>
+
+              {/* ------------------------------------------------------------ */}
+              {/* Social actions                                               */}
+              {/* ------------------------------------------------------------ */}
+
+              <View
+                style={[
+                  styles.sectionHeaderRow,
+                  styles.sectionSpacing,
+                ]}
+              >
+                <Ionicons
+                  accessible={
+                    false
+                  }
+                  importantForAccessibility="no"
+                  name="people-outline"
+                  size={17}
+                  color={
+                    COLOURS.bronze400
+                  }
+                />
+
+                <Text
+                  accessibilityRole="header"
+                  style={
+                    styles.sectionTitle
+                  }
+                >
+                  EXPLORER NETWORK
+                </Text>
+              </View>
+
+              <View
+                style={
+                  styles.socialActions
+                }
+              >
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Add friend"
+                  accessibilityHint="Opens the Social screen where you can search for and add Explorers."
+                  accessibilityState={{
+                    disabled:
+                      !onNavigate,
+                  }}
+                  disabled={
+                    !onNavigate
+                  }
+                  onPress={
+                    navigateToSocial
+                  }
+                  style={({
+                    pressed,
+                  }) => [
+                    styles.socialButton,
+
+                    !onNavigate &&
+                      styles.disabledButton,
+
+                    pressed &&
+                      onNavigate &&
+                      styles.darkButtonPressed,
+                  ]}
+                >
+                  <Ionicons
+                    accessible={
+                      false
+                    }
+                    importantForAccessibility="no"
+                    name="person-add-outline"
+                    size={18}
+                    color={
+                      COLOURS.parchment100
+                    }
+                  />
+
+                  <Text
+                    style={
+                      styles.socialButtonText
+                    }
+                  >
+                    ADD FRIEND
+                  </Text>
+                </Pressable>
+
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Dispatch Telegram"
+                  accessibilityHint="Opens the Social screen where you can send a Telegram to another Explorer."
+                  accessibilityState={{
+                    disabled:
+                      !onNavigate,
+                  }}
+                  disabled={
+                    !onNavigate
+                  }
+                  onPress={
+                    navigateToSocial
+                  }
+                  style={({
+                    pressed,
+                  }) => [
+                    styles.socialButton,
+                    styles.telegramButton,
+
+                    !onNavigate &&
+                      styles.disabledButton,
+
+                    pressed &&
+                      onNavigate &&
+                      styles.primaryButtonPressed,
+                  ]}
+                >
+                  <Ionicons
+                    accessible={
+                      false
+                    }
+                    importantForAccessibility="no"
+                    name="paper-plane-outline"
+                    size={18}
+                    color={
+                      COLOURS.parchment100
+                    }
+                  />
+
+                  <Text
+                    style={
+                      styles.socialButtonText
+                    }
+                  >
+                    DISPATCH TELEGRAM
+                  </Text>
+                </Pressable>
+              </View>
+
+              {/* ------------------------------------------------------------ */}
+              {/* Return to map                                                */}
+              {/* ------------------------------------------------------------ */}
+
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Return to field map"
+                accessibilityHint="Returns to the Treasi Dashboard."
+                onPress={
+                  handleReturnToMap
+                }
+                style={({
+                  pressed,
+                }) => [
+                  styles.returnButton,
+
+                  pressed &&
+                    styles.lightButtonPressed,
+                ]}
+              >
+                <Ionicons
+                  accessible={
+                    false
+                  }
+                  importantForAccessibility="no"
+                  name="map-outline"
+                  size={17}
+                  color={
+                    COLOURS.bronze400
+                  }
+                />
+
+                <Text
+                  style={
+                    styles.returnButtonText
+                  }
+                >
+                  RETURN TO FIELD MAP
+                </Text>
+              </Pressable>
+
+              {syncErrorText &&
+              !manifestError ? (
+                <View
+                  accessible
+                  accessibilityRole="alert"
+                  style={
+                    styles.commandWarning
+                  }
+                >
+                  <Text
+                    style={
+                      styles.commandWarningText
+                    }
+                  >
+                    {
+                      syncErrorText
+                    }
+                  </Text>
+
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Retry Explorer data synchronisation"
+                    onPress={
+                      handleRetry
+                    }
+                    style={({
+                      pressed,
+                    }) => [
+                      styles.commandRetryButton,
+
+                      pressed &&
+                        styles.darkButtonPressed,
+                    ]}
+                  >
+                    <Text
+                      style={
+                        styles.commandRetryText
+                      }
+                    >
+                      RETRY
+                    </Text>
+                  </Pressable>
+                </View>
+              ) : null}
+            </ScrollView>
+
+            {/* -------------------------------------------------------------- */}
+            {/* Navigation                                                     */}
+            {/* -------------------------------------------------------------- */}
+
+            <FieldNavBar
+              currentTab={
+                currentTab
+              }
+              onNavigate={
+                onNavigate
+              }
+            />
+          </View>
         </View>
-
-        <FieldNavBar currentTab={currentTab} onNavigate={onNavigate} />
       </View>
+    );
+  };
 
-      <Modal
-        visible={telegramModalVisible}
-        transparent
-        animationType="fade"
-        presentationStyle="overFullScreen"
-        statusBarTranslucent
-        onRequestClose={() => {
-          if (!isTransmitting) setTelegramModalVisible(false);
-        }}
-      >
-        <KeyboardAvoidingView
-          style={styles.modalOverlay}
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-        >
-          <Pressable
-            style={StyleSheet.absoluteFill}
-            onPress={() => {
-              if (!isTransmitting) setTelegramModalVisible(false);
-            }}
-            accessibilityRole="button"
-            accessibilityLabel="Close Telegram dialog"
-          />
-          <View
-            style={[styles.modalCard, !isLandscape && styles.modalCardPortrait]}
-            onStartShouldSetResponder={() => true}
-          >
-            <View style={styles.modalHeader}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.modalTitle}>BROADCAST TELEGRAM</Text>
-                <Text style={styles.modalSub}>
-                  Sector-wide dispatch. This feature is a broadcast signal, not a private chat.
-                </Text>
-              </View>
+export default LeaderboardScreen;
 
-              <TouchableOpacity
-                onPress={() => {
-                  if (!isTransmitting) setTelegramModalVisible(false);
-                }}
-                disabled={isTransmitting}
-                accessibilityLabel="Close Telegram dialog"
-                accessibilityRole="button"
-                style={styles.closeButton}
-              >
-                <CloseIcon color="#B08D57" size={18} />
-              </TouchableOpacity>
-            </View>
+/* -------------------------------------------------------------------------- */
+/* Styles                                                                     */
+/* -------------------------------------------------------------------------- */
 
-            <TextInput
-              style={styles.telegramInput}
-              placeholder="Type dispatch message..."
-              placeholderTextColor="#8A7B66"
-              multiline
-              value={telegramText}
-              maxLength={500}
-              onChangeText={setTelegramText}
-              accessibilityLabel="Telegram message"
-              accessibilityHint="Enter the broadcast message you want to dispatch"
-            />
+const styles =
+  StyleSheet.create({
+    screen: {
+      flex: 1,
+      backgroundColor:
+        COLOURS.forest800,
+    },
 
-            <Text style={styles.charCount}>{telegramText.length}/500</Text>
+    layout: {
+      flex: 1,
+      minHeight: 0,
+      gap: 12,
+    },
 
-            <TouchableOpacity
-              style={[styles.sendButton, isTransmitting && { opacity: 0.6 }]}
-              onPress={handleDispatchTelegram}
-              disabled={isTransmitting}
-              accessibilityLabel={isTransmitting ? 'Transmitting Telegram' : 'Transmit Telegram'}
-              accessibilityRole="button"
-            >
-              {isTransmitting ? (
-                <>
-                  <ActivityIndicator size="small" color="#F3ECD8" />
-                  <Text style={styles.sendButtonText}>TRANSMITTING...</Text>
-                </>
-              ) : (
-                <>
-                  <SendIcon color="#F3ECD8" size={16} />
-                  <Text style={styles.sendButtonText}>TRANSMIT SIGNAL</Text>
-                </>
-              )}
-            </TouchableOpacity>
-          </View>
-        </KeyboardAvoidingView>
-      </Modal>
+    panelPortrait: {
+      width: '100%',
+    },
 
-      <Modal
-        visible={friendModalVisible}
-        transparent
-        animationType="fade"
-        presentationStyle="overFullScreen"
-        statusBarTranslucent
-        onRequestClose={() => {
-          if (!isSearching && !actionUid) setFriendModalVisible(false);
-        }}
-      >
-        <KeyboardAvoidingView
-          style={styles.modalOverlay}
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-        >
-          <Pressable
-            style={StyleSheet.absoluteFill}
-            onPress={() => {
-              if (!isSearching && !actionUid) setFriendModalVisible(false);
-            }}
-            accessibilityRole="button"
-            accessibilityLabel="Close explorer linking dialog"
-          />
-          <View
-            style={[styles.modalCard, !isLandscape && styles.modalCardPortrait]}
-            onStartShouldSetResponder={() => true}
-          >
-            <View style={styles.modalHeader}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.modalTitle}>LINK NEW EXPLORER</Text>
-                <Text style={styles.modalSub}>
-                  Enter an exact explorer callsign to issue a link request.
-                </Text>
-              </View>
+    /* ---------------------------------------------------------------------- */
+    /* 60% manifest panel                                                    */
+    /* ---------------------------------------------------------------------- */
 
-              <TouchableOpacity
-                onPress={() => {
-                  if (!isSearching && !actionUid) setFriendModalVisible(false);
-                }}
-                disabled={isSearching || !!actionUid}
-                accessibilityLabel="Close explorer linking dialog"
-                accessibilityRole="button"
-                style={styles.closeButton}
-              >
-                <CloseIcon color="#B08D57" size={18} />
-              </TouchableOpacity>
-            </View>
+    manifestPanel: {
+      minWidth: 0,
+      minHeight: 0,
+      backgroundColor:
+        COLOURS.parchment200,
+      borderWidth: 2,
+      borderColor:
+        COLOURS.bronze600,
+      borderRadius: 7,
+      padding: 14,
+    },
 
-            {searchError ? (
-              <Text
-                style={styles.errorText}
-                accessibilityLiveRegion="polite"
-                accessibilityRole="alert"
-              >
-                {searchError}
-              </Text>
-            ) : null}
+    manifestPanelLandscape: {
+      flex: 0.6,
+    },
 
-            <TextInput
-              style={styles.tagInput}
-              placeholder="AGENT_CALLSIGN"
-              placeholderTextColor="#8A7B66"
-              autoCapitalize="none"
-              autoCorrect={false}
-              value={searchAgentTag}
-              onChangeText={(txt) => {
-                setSearchAgentTag(txt);
-                setSearchError('');
-              }}
-              accessibilityLabel="Explorer callsign"
-              accessibilityHint="Enter the exact username of the explorer you want to link"
-            />
+    manifestHeader: {
+      paddingBottom: 10,
+      borderBottomWidth: 1,
+      borderBottomColor:
+        COLOURS.bronze600,
+    },
 
-            <TouchableOpacity
-              style={[styles.sendButton, isSearching && { opacity: 0.6 }]}
-              onPress={handleSearchAndLinkAgent}
-              disabled={isSearching}
-              accessibilityLabel={isSearching ? 'Searching for explorer' : 'Send link request'}
-              accessibilityRole="button"
-            >
-              {isSearching ? (
-                <>
-                  <ActivityIndicator size="small" color="#F3ECD8" />
-                  <Text style={styles.sendButtonText}>SEARCHING...</Text>
-                </>
-              ) : (
-                <>
-                  <UserPlusIcon color="#F3ECD8" size={16} />
-                  <Text style={styles.sendButtonText}>SEND LINK REQUEST</Text>
-                </>
-              )}
-            </TouchableOpacity>
-          </View>
-        </KeyboardAvoidingView>
-      </Modal>
-    </View>
-  );
-};
+    manifestTitleRow: {
+      flexDirection:
+        'row',
+      alignItems:
+        'center',
+      justifyContent:
+        'center',
+      gap: 8,
+    },
 
-const styles = StyleSheet.create({
-  splitWrapper: {
-    flex: 1,
-    flexDirection: 'row',
-    backgroundColor: '#1C281E',
-  },
-  leftViewport: {
-    flex: 0.6,
-    minWidth: 0,
-    backgroundColor: '#E8DCC0',
-    padding: 16,
-    borderTopLeftRadius: 12,
-    borderBottomLeftRadius: 12,
-    justifyContent: 'flex-start',
-  },
-  ledgerHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-  },
-  header: {
-    color: '#2A2420',
-    fontWeight: 'bold',
-    fontSize: 18,
-    letterSpacing: 2,
-  },
-  subHeader: {
-    color: '#8A7B66',
-    fontSize: 9,
-    fontWeight: '700',
-    textAlign: 'center',
-    letterSpacing: 1.5,
-    marginTop: 2,
-    marginBottom: 10,
-  },
-  tableHeader: {
-    flexDirection: 'row',
-    borderBottomWidth: 1.5,
-    borderColor: '#2A2420',
-    paddingBottom: 6,
-    marginBottom: 6,
-  },
-  colHeader: {
-    color: '#2A2420',
-    fontSize: 10,
-    fontWeight: 'bold',
-    letterSpacing: 1,
-  },
-  ledgerList: {
-    paddingBottom: 10,
-  },
-  loadingBox: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    gap: 8,
-    paddingHorizontal: 16,
-  },
-  loadingText: {
-    color: '#2A2420',
-    fontSize: 10,
-    fontWeight: 'bold',
-    letterSpacing: 1,
-    textAlign: 'center',
-  },
-  loadingTextDark: {
-    color: '#B08D57',
-    fontSize: 9,
-    fontWeight: 'bold',
-    letterSpacing: 0.5,
-    textAlign: 'center',
-  },
-  errorTextDark: {
-    color: '#E8DCC0',
-    fontSize: 9,
-    fontWeight: 'bold',
-    textAlign: 'center',
-    marginBottom: 6,
-  },
-  emptyText: {
-    color: '#B08D57',
-    fontSize: 9,
-    fontWeight: 'bold',
-    letterSpacing: 1,
-    textAlign: 'center',
-  },
-  inlineRetryButton: {
-    backgroundColor: '#A64B2A',
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    minHeight: 40,
-    borderRadius: 4,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  inlineRetryText: {
-    color: '#F3ECD8',
-    fontSize: 9,
-    fontWeight: 'bold',
-    letterSpacing: 1,
-  },
-  darkRetryButton: {
-    backgroundColor: '#A64B2A',
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    minHeight: 40,
-    borderRadius: 4,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginTop: 8,
-  },
-  darkRetryText: {
-    color: '#F3ECD8',
-    fontSize: 9,
-    fontWeight: 'bold',
-    letterSpacing: 1,
-  },
-  rowContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 7,
-    paddingHorizontal: 6,
-    borderRadius: 4,
-    marginBottom: 2,
-  },
-  rowHighlight: {
-    backgroundColor: '#D9B98A',
-  },
-  rowText: {
-    color: '#2A2420',
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  rowHighlightText: {
-    color: '#A64B2A',
-    fontWeight: 'bold',
-  },
-  dotLeaderContainer: {
-    flex: 0.2,
-    overflow: 'hidden',
-    alignItems: 'center',
-  },
-  dotLeader: {
-    color: '#B5A88F',
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-    fontSize: 10,
-  },
-  rightViewport: {
-    flex: 0.4,
-    minWidth: 0,
-    backgroundColor: '#2C3B2E',
-    padding: 14,
-    borderLeftWidth: 2,
-    borderColor: '#B08D57',
-    borderTopRightRadius: 12,
-    borderBottomRightRadius: 12,
-    justifyContent: 'space-between',
-  },
-  rightHeaderRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    marginBottom: 8,
-  },
-  panelTitle: {
-    color: '#E8DCC0',
-    fontWeight: 'bold',
-    fontSize: 13,
-    letterSpacing: 1,
-  },
-  subText: {
-    color: '#B08D57',
-    fontSize: 9,
-    marginTop: 2,
-  },
-  iconAddButton: {
-    borderWidth: 1,
-    borderColor: '#B08D57',
-    padding: 6,
-    borderRadius: 4,
-    minWidth: 40,
-    minHeight: 40,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#202C22',
-  },
-  cardsContainer: {
-    flex: 1,
-    marginVertical: 4,
-  },
-  explorerCard: {
-    backgroundColor: '#E8DCC0',
-    borderRadius: 6,
-    padding: 8,
-    marginBottom: 6,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    minHeight: 52,
-  },
-  cardLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    flex: 1,
-    minWidth: 0,
-  },
-  avatarCircle: {
-    width: 30,
-    height: 30,
-    borderRadius: 15,
-    backgroundColor: '#2C3B3E',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  avatarText: {
-    color: '#E8DCC0',
-    fontWeight: 'bold',
-    fontSize: 11,
-  },
-  explorerName: {
-    color: '#2A2420',
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-    fontWeight: 'bold',
-    fontSize: 11,
-  },
-  explorerMeta: {
-    color: '#6E6152',
-    fontSize: 8,
-    marginTop: 1,
-  },
-  metaUnlinked: {
-    color: '#A64B2A',
-    fontWeight: 'bold',
-  },
-  cardRight: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    marginLeft: 4,
-  },
-  onlineDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: '#4CAF50',
-  },
-  friendActionButton: {
-    backgroundColor: '#CBBBA0',
-    paddingVertical: 4,
-    paddingHorizontal: 8,
-    minWidth: 38,
-    minHeight: 38,
-    borderRadius: 4,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  pendingText: {
-    color: '#2A2420',
-    fontSize: 8,
-    fontWeight: 'bold',
-  },
-  statusText: {
-    color: '#B08D57',
-    fontSize: 8,
-    fontWeight: 'bold',
-  },
-  dispatchButton: {
-    backgroundColor: '#A64B2A',
-    borderWidth: 1,
-    borderColor: '#B08D57',
-    borderStyle: 'dashed',
-    paddingVertical: 8,
-    borderRadius: 4,
-    alignItems: 'center',
-    minHeight: 44,
-    justifyContent: 'center',
-  },
-  dispatchText: {
-    color: '#F3ECD8',
-    fontWeight: 'bold',
-    fontSize: 11,
-    letterSpacing: 1.5,
-  },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(10, 16, 11, 0.82)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 20,
-  },
-  modalCard: {
-    width: '90%',
-    maxWidth: 600,
-    backgroundColor: '#E8DCC0',
-    borderRadius: 8,
-    borderWidth: 2,
-    borderColor: '#B08D57',
-    padding: 16,
-    maxHeight: '90%',
-  },
-  modalCardPortrait: {
-    width: '90%',
-  },
-  modalHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    gap: 12,
-  },
-  modalTitle: {
-    color: '#2A2420',
-    fontWeight: 'bold',
-    fontSize: 14,
-    letterSpacing: 1,
-  },
-  modalSub: {
-    color: '#6E6152',
-    fontSize: 10,
-    marginTop: 4,
-    marginBottom: 12,
-    lineHeight: 15,
-  },
-  closeButton: {
-    minWidth: 40,
-    minHeight: 40,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  errorText: {
-    color: '#A64B2A',
-    fontSize: 9,
-    fontWeight: 'bold',
-    marginBottom: 6,
-    letterSpacing: 1,
-  },
-  telegramInput: {
-    backgroundColor: '#F3ECD8',
-    borderWidth: 1,
-    borderColor: '#B08D57',
-    borderRadius: 4,
-    padding: 10,
-    color: '#2A2420',
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-    minHeight: 90,
-    textAlignVertical: 'top',
-    fontSize: 12,
-    marginBottom: 4,
-  },
-  charCount: {
-    color: '#8A7B66',
-    fontSize: 8,
-    textAlign: 'right',
-    marginBottom: 10,
-  },
-  tagInput: {
-    backgroundColor: '#F3ECD8',
-    borderWidth: 1,
-    borderColor: '#B08D57',
-    borderRadius: 4,
-    padding: 10,
-    color: '#2A2420',
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-    fontSize: 12,
-    marginBottom: 12,
-    minHeight: 44,
-  },
-  sendButton: {
-    backgroundColor: '#2C3B2E',
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-    paddingVertical: 10,
-    borderRadius: 4,
-    minHeight: 44,
-  },
-  sendButtonText: {
-    color: '#F3ECD8',
-    fontWeight: 'bold',
-    fontSize: 11,
-    letterSpacing: 1,
-  },
-});
+    manifestTitle: {
+      color:
+        COLOURS.ink900,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 18,
+      lineHeight: 24,
+      fontWeight:
+        '800',
+      letterSpacing: 1.8,
+      textAlign:
+        'center',
+    },
+
+    manifestSubtitle: {
+      color:
+        COLOURS.bronze700,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 9.5,
+      lineHeight: 14,
+      fontWeight:
+        '700',
+      letterSpacing: 1,
+      textAlign:
+        'center',
+      marginTop: 4,
+    },
+
+    /* ---------------------------------------------------------------------- */
+    /* Sync warning                                                          */
+    /* ---------------------------------------------------------------------- */
+
+    syncWarning: {
+      minHeight: 52,
+      marginTop: 10,
+      paddingHorizontal: 10,
+      paddingVertical: 7,
+      flexDirection:
+        'row',
+      alignItems:
+        'center',
+      gap: 8,
+      backgroundColor:
+        COLOURS.rust700,
+      borderRadius: 5,
+      borderWidth: 1,
+      borderColor:
+        COLOURS.danger300,
+    },
+
+    syncWarningText: {
+      flex: 1,
+      minWidth: 0,
+      color:
+        COLOURS.parchment100,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 9.5,
+      lineHeight: 14,
+      fontWeight:
+        '700',
+    },
+
+    smallRetryButton: {
+      minWidth: 70,
+      minHeight: 48,
+      alignItems:
+        'center',
+      justifyContent:
+        'center',
+      paddingHorizontal: 10,
+      borderWidth: 1,
+      borderColor:
+        COLOURS.parchment100,
+      borderRadius: 4,
+    },
+
+    smallRetryText: {
+      color:
+        COLOURS.parchment100,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 9,
+      lineHeight: 13,
+      fontWeight:
+        '800',
+      letterSpacing: 0.6,
+    },
+
+    /* ---------------------------------------------------------------------- */
+    /* Table                                                                 */
+    /* ---------------------------------------------------------------------- */
+
+    tableHeader: {
+      minHeight: 38,
+      flexDirection:
+        'row',
+      alignItems:
+        'center',
+      paddingHorizontal: 7,
+      borderBottomWidth: 1.5,
+      borderBottomColor:
+        COLOURS.ink900,
+    },
+
+    columnHeader: {
+      color:
+        COLOURS.ink900,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 9.5,
+      lineHeight: 14,
+      fontWeight:
+        '800',
+      letterSpacing: 0.7,
+    },
+
+    rankColumn: {
+      width: 62,
+      flexShrink: 0,
+    },
+
+    nameColumn: {
+      flex: 1,
+      minWidth: 0,
+    },
+
+    pointsColumn: {
+      width: 100,
+      flexShrink: 0,
+      textAlign:
+        'right',
+    },
+
+    leaderboardScroll: {
+      flex: 1,
+      minHeight: 0,
+    },
+
+    ledgerList: {
+      paddingTop: 5,
+      paddingBottom: 8,
+    },
+
+    rowContainer: {
+      minHeight: 50,
+      flexDirection:
+        'row',
+      alignItems:
+        'center',
+      paddingHorizontal: 7,
+      paddingVertical: 5,
+      marginBottom: 3,
+      borderRadius: 5,
+      borderWidth: 1,
+      borderColor:
+        'transparent',
+    },
+
+    currentUserRow: {
+      backgroundColor:
+        '#D8C39B',
+      borderColor:
+        COLOURS.rust700,
+    },
+
+    rankBadge: {
+      width: 38,
+      height: 38,
+      borderRadius: 19,
+      alignItems:
+        'center',
+      justifyContent:
+        'center',
+      backgroundColor:
+        COLOURS.parchment100,
+      borderWidth: 1,
+      borderColor:
+        COLOURS.bronze600,
+    },
+
+    rankBadgeFirst: {
+      borderWidth: 2,
+      borderColor:
+        COLOURS.rust700,
+    },
+
+    rankBadgeSecond: {
+      borderColor:
+        COLOURS.bronze700,
+    },
+
+    rankBadgeThird: {
+      borderColor:
+        COLOURS.ink700,
+    },
+
+    currentUserRankBadge: {
+      backgroundColor:
+        COLOURS.rust700,
+      borderColor:
+        COLOURS.rust800,
+    },
+
+    rankText: {
+      color:
+        COLOURS.ink900,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 10.5,
+      lineHeight: 15,
+      fontWeight:
+        '800',
+    },
+
+    currentUserRankText: {
+      color:
+        COLOURS.parchment100,
+    },
+
+    explorerName: {
+      color:
+        COLOURS.ink900,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 11.5,
+      lineHeight: 16,
+      fontWeight:
+        '800',
+      letterSpacing: 0.35,
+    },
+
+    explorerRankTitle: {
+      marginTop: 2,
+      color:
+        COLOURS.bronze700,
+      fontFamily:
+        MONO_FONT,
+      fontSize: 8.5,
+      lineHeight: 12,
+      fontWeight:
+        '700',
+      letterSpacing: 0.35,
+    },
+
+    pointsValue: {
+      color:
+        COLOURS.ink900,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 12,
+      lineHeight: 17,
+      fontWeight:
+        '800',
+    },
+
+    currentUserText: {
+      color:
+        COLOURS.rust800,
+    },
+
+    /* ---------------------------------------------------------------------- */
+    /* Manifest states                                                       */
+    /* ---------------------------------------------------------------------- */
+
+    loadingBox: {
+      flex: 1,
+      minHeight: 180,
+      justifyContent:
+        'center',
+      alignItems:
+        'center',
+      gap: 10,
+      paddingHorizontal: 20,
+    },
+
+    loadingText: {
+      color:
+        COLOURS.ink900,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 10,
+      lineHeight: 15,
+      fontWeight:
+        '800',
+      letterSpacing: 0.75,
+      textAlign:
+        'center',
+    },
+
+    emptyText: {
+      color:
+        COLOURS.bronze700,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 10,
+      lineHeight: 15,
+      fontWeight:
+        '800',
+      letterSpacing: 0.7,
+      textAlign:
+        'center',
+    },
+
+    retryButton: {
+      minHeight: 48,
+      minWidth: 160,
+      justifyContent:
+        'center',
+      alignItems:
+        'center',
+      paddingHorizontal: 16,
+      paddingVertical: 9,
+      marginTop: 5,
+      backgroundColor:
+        COLOURS.rust700,
+      borderRadius: 5,
+      borderWidth: 1,
+      borderColor:
+        COLOURS.rust800,
+    },
+
+    retryButtonText: {
+      color:
+        COLOURS.parchment100,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 10,
+      lineHeight: 15,
+      fontWeight:
+        '800',
+      letterSpacing: 0.7,
+    },
+
+    /* ---------------------------------------------------------------------- */
+    /* Manifest footer                                                       */
+    /* ---------------------------------------------------------------------- */
+
+    manifestFooter: {
+      minHeight: 30,
+      flexDirection:
+        'row',
+      justifyContent:
+        'space-between',
+      alignItems:
+        'center',
+      gap: 10,
+      paddingTop: 7,
+      borderTopWidth: 1,
+      borderTopColor:
+        COLOURS.bronze600,
+    },
+
+    manifestFooterText: {
+      flex: 1,
+      color:
+        COLOURS.bronze700,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 8,
+      lineHeight: 12,
+      fontWeight:
+        '700',
+      letterSpacing: 0.4,
+    },
+
+    manifestFooterCount: {
+      color:
+        COLOURS.rust700,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 9,
+      lineHeight: 13,
+      fontWeight:
+        '800',
+    },
+
+    /* ---------------------------------------------------------------------- */
+    /* 40% command panel                                                     */
+    /* ---------------------------------------------------------------------- */
+
+    commandPanel: {
+      minWidth: 0,
+      minHeight: 0,
+      padding: 12,
+      backgroundColor:
+        COLOURS.forest800,
+      borderWidth: 2,
+      borderColor:
+        COLOURS.bronze500,
+      borderRadius: 7,
+    },
+
+    commandPanelLandscape: {
+      flex: 0.4,
+    },
+
+    commandScroll: {
+      flex: 1,
+      minHeight: 0,
+      marginBottom: 8,
+    },
+
+    commandScrollContent: {
+      paddingBottom: 4,
+    },
+
+    sectionHeaderRow: {
+      minHeight: 27,
+      flexDirection:
+        'row',
+      alignItems:
+        'center',
+      gap: 6,
+      marginBottom: 7,
+    },
+
+    sectionSpacing: {
+      marginTop: 14,
+    },
+
+    sectionTitle: {
+      flexShrink: 1,
+      color:
+        COLOURS.bronze400,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 10.5,
+      lineHeight: 16,
+      fontWeight:
+        '800',
+      letterSpacing: 0.75,
+    },
+
+    /* ---------------------------------------------------------------------- */
+    /* Current record                                                        */
+    /* ---------------------------------------------------------------------- */
+
+    profileLoadingCard: {
+      minHeight: 120,
+      alignItems:
+        'center',
+      justifyContent:
+        'center',
+      gap: 8,
+      padding: 12,
+      backgroundColor:
+        COLOURS.forest950,
+      borderWidth: 1,
+      borderColor:
+        COLOURS.bronze500,
+      borderRadius: 5,
+    },
+
+    profileLoadingText: {
+      color:
+        COLOURS.parchment200,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 9.5,
+      lineHeight: 14,
+      fontWeight:
+        '700',
+      letterSpacing: 0.5,
+    },
+
+    currentRecordCard: {
+      padding: 11,
+      backgroundColor:
+        COLOURS.parchment200,
+      borderWidth: 2,
+      borderColor:
+        COLOURS.bronze600,
+      borderRadius: 5,
+    },
+
+    currentRecordTopRow: {
+      flexDirection:
+        'row',
+      alignItems:
+        'flex-start',
+      justifyContent:
+        'space-between',
+      gap: 10,
+    },
+
+    currentRecordIdentity: {
+      flex: 1,
+      minWidth: 0,
+    },
+
+    currentUsername: {
+      color:
+        COLOURS.ink900,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 13,
+      lineHeight: 18,
+      fontWeight:
+        '800',
+      letterSpacing: 0.45,
+    },
+
+    currentRankTitle: {
+      marginTop: 2,
+      color:
+        COLOURS.bronze700,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 8.5,
+      lineHeight: 13,
+      fontWeight:
+        '700',
+      letterSpacing: 0.4,
+    },
+
+    currentPositionBadge: {
+      maxWidth: 125,
+      minHeight: 48,
+      paddingHorizontal: 8,
+      paddingVertical: 6,
+      justifyContent:
+        'center',
+      alignItems:
+        'center',
+      backgroundColor:
+        COLOURS.forest800,
+      borderRadius: 4,
+    },
+
+    currentPositionLabel: {
+      color:
+        COLOURS.bronze400,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 7.5,
+      lineHeight: 11,
+      fontWeight:
+        '700',
+      letterSpacing: 0.45,
+    },
+
+    currentPositionValue: {
+      color:
+        COLOURS.parchment100,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 9,
+      lineHeight: 13,
+      fontWeight:
+        '800',
+      textAlign:
+        'center',
+    },
+
+    currentPointsRow: {
+      flexDirection:
+        'row',
+      alignItems:
+        'baseline',
+      justifyContent:
+        'center',
+      marginTop: 8,
+    },
+
+    currentPointsValue: {
+      color:
+        COLOURS.rust700,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 28,
+      lineHeight: 33,
+      fontWeight:
+        '900',
+    },
+
+    currentPointsLabel: {
+      color:
+        COLOURS.rust700,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 11,
+      lineHeight: 16,
+      fontWeight:
+        '800',
+      marginLeft: 5,
+    },
+
+    profileErrorText: {
+      marginTop: 7,
+      color:
+        COLOURS.rust800,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 8.5,
+      lineHeight: 13,
+      fontWeight:
+        '700',
+      textAlign:
+        'center',
+    },
+
+    /* ---------------------------------------------------------------------- */
+    /* Podium                                                                */
+    /* ---------------------------------------------------------------------- */
+
+    podiumList: {
+      gap: 6,
+    },
+
+    podiumCard: {
+      minHeight: 52,
+      flexDirection:
+        'row',
+      alignItems:
+        'center',
+      gap: 8,
+      paddingHorizontal: 8,
+      paddingVertical: 6,
+      backgroundColor:
+        COLOURS.forest950,
+      borderWidth: 1,
+      borderColor:
+        COLOURS.forest700,
+      borderRadius: 5,
+    },
+
+    podiumCardFirst: {
+      borderColor:
+        COLOURS.bronze400,
+    },
+
+    podiumCardCurrent: {
+      borderColor:
+        COLOURS.rust600,
+    },
+
+    podiumRankCircle: {
+      width: 34,
+      height: 34,
+      borderRadius: 17,
+      alignItems:
+        'center',
+      justifyContent:
+        'center',
+      flexShrink: 0,
+      backgroundColor:
+        COLOURS.forest800,
+      borderWidth: 1,
+      borderColor:
+        COLOURS.bronze500,
+    },
+
+    podiumRankCircleFirst: {
+      borderWidth: 2,
+      borderColor:
+        COLOURS.bronze400,
+    },
+
+    podiumRankText: {
+      color:
+        COLOURS.parchment100,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 11,
+      lineHeight: 16,
+      fontWeight:
+        '800',
+    },
+
+    podiumIdentity: {
+      flex: 1,
+      minWidth: 0,
+    },
+
+    podiumName: {
+      color:
+        COLOURS.parchment100,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 10,
+      lineHeight: 15,
+      fontWeight:
+        '800',
+    },
+
+    podiumLabel: {
+      color:
+        COLOURS.bronze400,
+      fontFamily:
+        MONO_FONT,
+      fontSize: 8,
+      lineHeight: 12,
+      fontWeight:
+        '700',
+    },
+
+    podiumPoints: {
+      color:
+        COLOURS.success300,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 11,
+      lineHeight: 16,
+      fontWeight:
+        '800',
+    },
+
+    emptyPodiumCard: {
+      minHeight: 52,
+      alignItems:
+        'center',
+      justifyContent:
+        'center',
+      padding: 8,
+      borderWidth: 1,
+      borderStyle:
+        'dashed',
+      borderColor:
+        COLOURS.bronze500,
+      borderRadius: 5,
+    },
+
+    emptyPodiumText: {
+      color:
+        COLOURS.bronze400,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 9,
+      lineHeight: 14,
+      fontWeight:
+        '700',
+      letterSpacing: 0.5,
+    },
+
+    /* ---------------------------------------------------------------------- */
+    /* Social actions                                                        */
+    /* ---------------------------------------------------------------------- */
+
+    socialActions: {
+      flexDirection:
+        'row',
+      gap: 7,
+    },
+
+    socialButton: {
+      flex: 1,
+      minHeight: 50,
+      flexDirection:
+        'row',
+      alignItems:
+        'center',
+      justifyContent:
+        'center',
+      gap: 6,
+      paddingHorizontal: 8,
+      paddingVertical: 8,
+      backgroundColor:
+        COLOURS.forest950,
+      borderWidth: 1,
+      borderColor:
+        COLOURS.bronze400,
+      borderRadius: 5,
+    },
+
+    telegramButton: {
+      backgroundColor:
+        COLOURS.rust700,
+      borderColor:
+        COLOURS.rust800,
+    },
+
+    socialButtonText: {
+      flexShrink: 1,
+      color:
+        COLOURS.parchment100,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 9,
+      lineHeight: 13,
+      fontWeight:
+        '800',
+      letterSpacing: 0.45,
+      textAlign:
+        'center',
+    },
+
+    disabledButton: {
+      opacity: 0.45,
+    },
+
+    /* ---------------------------------------------------------------------- */
+    /* Return button                                                         */
+    /* ---------------------------------------------------------------------- */
+
+    returnButton: {
+      minHeight: 48,
+      marginTop: 10,
+      flexDirection:
+        'row',
+      alignItems:
+        'center',
+      justifyContent:
+        'center',
+      gap: 7,
+      paddingHorizontal: 10,
+      paddingVertical: 8,
+      backgroundColor:
+        COLOURS.forest900,
+      borderWidth: 1,
+      borderColor:
+        COLOURS.bronze500,
+      borderRadius: 5,
+    },
+
+    returnButtonText: {
+      color:
+        COLOURS.bronze400,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 9.5,
+      lineHeight: 14,
+      fontWeight:
+        '800',
+      letterSpacing: 0.55,
+      textAlign:
+        'center',
+    },
+
+    /* ---------------------------------------------------------------------- */
+    /* Command error                                                         */
+    /* ---------------------------------------------------------------------- */
+
+    commandWarning: {
+      marginTop: 10,
+      padding: 9,
+      backgroundColor:
+        COLOURS.rust700,
+      borderWidth: 1,
+      borderColor:
+        COLOURS.danger300,
+      borderRadius: 5,
+    },
+
+    commandWarningText: {
+      color:
+        COLOURS.parchment100,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 8.5,
+      lineHeight: 13,
+      fontWeight:
+        '700',
+      textAlign:
+        'center',
+      marginBottom: 7,
+    },
+
+    commandRetryButton: {
+      minHeight: 48,
+      alignItems:
+        'center',
+      justifyContent:
+        'center',
+      borderWidth: 1,
+      borderColor:
+        COLOURS.parchment100,
+      borderRadius: 4,
+    },
+
+    commandRetryText: {
+      color:
+        COLOURS.parchment100,
+      fontFamily:
+        MONO_BOLD_FONT,
+      fontSize: 9,
+      lineHeight: 13,
+      fontWeight:
+        '800',
+    },
+
+    /* ---------------------------------------------------------------------- */
+    /* Interaction states                                                    */
+    /* ---------------------------------------------------------------------- */
+
+    darkButtonPressed: {
+      opacity: 0.78,
+      transform: [
+        {
+          scale: 0.985,
+        },
+      ],
+    },
+
+    primaryButtonPressed: {
+      backgroundColor:
+        COLOURS.rust600,
+      transform: [
+        {
+          scale: 0.985,
+        },
+      ],
+    },
+
+    lightButtonPressed: {
+      backgroundColor:
+        COLOURS.forest700,
+    },
+  });
