@@ -1,410 +1,372 @@
 # Treasi
 
-> **Hide. Explore. Stay connected.**
+<p align="center">
+  <img src="./assets/Wireframes/Cover.png" alt="Treasi cover artwork" width="100%" />
+</p>
 
-Treasi is a landscape-locked, sensor-driven asynchronous scavenger hunt built with React Native and Firebase. The application transforms physical spaces into an interactive field of hidden digital treasures, allowing explorers to create caches, navigate towards them using live GPS and compass telemetry, and excavate them when they reach the target area.
+<p align="center">
+  <strong>Hide. Explore. Stay connected.</strong>
+</p>
 
-The project was developed for **Interactive Development 300 (DV300), Semester 2, Theme 3**.
+<p align="center">
+  A landscape-first, sensor-driven scavenger-hunt application built with React Native, Expo SDK 54 and Firebase.
+</p>
+
+<p align="center">
+  <a href="https://drive.google.com/drive/folders/1_r2pFbygXuqpii-kw80xBZH0yWf4nzcy?usp=sharing"><strong>Watch the Treasi demo video</strong></a>
+</p>
 
 ---
 
 ## Table of Contents
 
 - [Project Overview](#project-overview)
-- [The Problem](#the-problem)
-- [The Concept](#the-concept)
-- [Project Inspiration](#project-inspiration)
-- [Target Users](#target-users)
-- [Core Features](#core-features)
+- [Project Brief](#project-brief)
+- [Problem and Concept](#problem-and-concept)
+- [Core Experience](#core-experience)
+- [Wireframes](#wireframes)
+- [Key Features](#key-features)
 - [User Flow](#user-flow)
 - [Technology Stack](#technology-stack)
 - [Application Architecture](#application-architecture)
 - [Firebase Data Model](#firebase-data-model)
+- [CRUD Operations](#crud-operations)
+- [Location, Compass and Sensor Behaviour](#location-compass-and-sensor-behaviour)
+- [60/40 Landscape Interface](#6040-landscape-interface)
+- [Accessibility](#accessibility)
+- [Design System](#design-system)
 - [Project Structure](#project-structure)
 - [Prerequisites](#prerequisites)
+- [Environment Configuration](#environment-configuration)
 - [Installation](#installation)
-- [Firebase Setup](#firebase-setup)
-- [Running the Application](#running-the-application)
+- [Running Treasi](#running-treasi)
 - [How to Use Treasi](#how-to-use-treasi)
-- [CRUD Operations](#crud-operations)
-- [Sensor and Location Features](#sensor-and-location-features)
-- [Landscape Interface](#landscape-interface)
-- [Accessibility and Usability](#accessibility-and-usability)
-- [Design System](#design-system)
-- [Responsive and Platform Behaviour](#responsive-and-platform-behaviour)
-- [Development Workflow](#development-workflow)
-- [Testing Checklist](#testing-checklist)
+- [Firebase Setup](#firebase-setup)
+- [Platform Behaviour](#platform-behaviour)
 - [Known Limitations](#known-limitations)
 - [Future Improvements](#future-improvements)
-- [Demonstration Video](#demonstration-video)
-- [Project Contribution](#project-contribution)
+- [Demo Video](#demo-video)
+- [Project Information](#project-information)
 - [Acknowledgements](#acknowledgements)
-- [License](#license)
+- [Licence](#licence)
 
 ---
 
 ## Project Overview
 
-Treasi is designed around three constraints:
+**Treasi** is an asynchronous, location-based scavenger-hunt application that turns a mobile device into a digital field instrument.
 
-1. **Goal Theme:** Stay Connected
-2. **Device Interaction:** Device Sensors
-3. **Constraint:** Landscape Support
+Explorers can hide digital treasure caches at real-world coordinates, discover caches created by other users, navigate towards a selected target using live location and compass information, and unlock the hidden payload when they physically reach the cache area.
 
-Rather than treating landscape orientation as a limitation, Treasi uses it as a central part of the experience. The phone becomes a digital field instrument inspired by analogue surveying equipment, vintage maps, military dashboards and national park ranger equipment.
+The application combines:
 
-The application encourages users to leave passive social-media interactions behind and engage with their physical surroundings. Users can hide digital treasures at real-world coordinates and other explorers can discover them later.
+- Firebase Authentication
+- Cloud Firestore
+- Foreground GPS location
+- Native compass heading
+- Accelerometer input
+- Haptic feedback
+- Native and web map implementations
+- Real-time activity data
+- Social and leaderboard features
+- A landscape-first 60/40 interface
 
-Each treasure can contain:
-
-- A title
-- A clue or hint
-- A hidden payload/message
-- A physical GPS location
-- A creator
-- An archive state
-- Optional image metadata
-
-The hunting experience combines a live map, GPS distance calculations, compass heading and an accelerometer-based excavation interaction.
+Treasi is designed for **Expo SDK 54** and targets **iPhone, Android and Expo Web**.
 
 ---
 
-## The Problem
+## Project Brief
 
-Modern social platforms make digital communication extremely convenient, but they can also encourage passive screen use and reduce interaction with the physical environment.
+Treasi was developed for:
 
-Treasi addresses this by creating an asynchronous social experience that exists in physical space.
+**Interactive Development 300 (DV300) — Semester 2, Theme 3**
 
-Instead of sending a normal message such as:
+The project is based on three central constraints:
 
-> "Meet me after class."
+| Requirement | Treasi response |
+| --- | --- |
+| **Goal theme** | Stay Connected |
+| **Device interaction** | Device sensors |
+| **Interface constraint** | Landscape support |
 
-an explorer can hide a digital treasure at a real location. Another explorer can discover it while walking between lectures, studios or other destinations.
-
-This creates a social interaction that is:
-
-- Physical rather than purely digital
-- Asynchronous rather than dependent on everyone being online simultaneously
-- Location-based rather than feed-based
-- Playful rather than transactional
-- Designed around exploration and discovery
+Landscape orientation is treated as a design opportunity rather than a restriction. The phone becomes a wide field console inspired by analogue navigation instruments, archival field equipment and mechanical dashboards.
 
 ---
 
-## The Concept
+## Problem and Concept
 
-The central interaction is the **field treasure**.
+Modern communication platforms make staying in contact easy, but much of that interaction remains passive and screen-centred. Treasi explores a different type of digital connection by connecting messages, rewards and social interactions to physical places.
 
-### Hider
+Instead of only sending a conventional message, an explorer can hide a digital cache at a real-world location. Another explorer can encounter that cache while moving through a campus, neighbourhood or shared public environment.
 
-A user can stand at a physical location and create a treasure cache by recording:
+The resulting interaction is:
 
-- The cache title
-- A clue
-- A hidden payload
-- The current or manually entered coordinates
+- **Physical** — discovery requires movement through real space.
+- **Asynchronous** — explorers do not need to be online together.
+- **Location-based** — caches belong to coordinates rather than a conventional feed.
+- **Playful** — navigation, clues and excavation create a game loop.
+- **Social** — discoveries, rankings, friendships and messages connect explorers.
 
-The treasure is then stored remotely in Firebase Firestore.
+The core loop is:
 
-### Hunter
-
-Another user can view active nearby caches, select a target and enter the hunting interface.
-
-The application uses GPS to calculate the user's distance from the target. A compass interface provides directional guidance.
-
-When the explorer reaches the target area, the application can use the device accelerometer to detect a deliberate shake and trigger the excavation interaction.
-
-### Discovery
-
-After successful excavation:
-
-1. The treasure is marked as discovered for that explorer.
-2. A discovery record is created.
-3. The activity feed is updated.
-4. The explorer receives points.
-5. The hidden payload is revealed.
-
-This creates a complete loop:
-
-**Hide → Navigate → Locate → Excavate → Discover → Connect**
+> **Hide → Navigate → Locate → Excavate → Discover → Connect**
 
 ---
 
-## Project Inspiration
+## Core Experience
 
-Treasi's visual identity combines:
+### Hide
 
-- 1960s national park ranger equipment
-- Military mechanical dashboards
-- Vintage field guides
-- Surveying instruments
-- Weathered paper maps
-- Brass hardware
-- Typewriter and analogue instrumentation
+An explorer creates a treasure cache containing a title, clue, hidden payload and geographic position. The cache is stored in Cloud Firestore and becomes visible to other explorers while active.
 
-The visual language intentionally avoids a contemporary SaaS aesthetic. Depth, texture, borders, mechanical controls and analogue terminology are used to make the application feel like a physical field instrument.
+### Navigate
 
----
+The Dashboard displays the field map and active treasures. Selecting a cache creates a Hunt target.
 
-## Target Users
+### Hunt
 
-### Primary Persona: The Curious Creative Explorer
+The Hunt screen follows the Explorer's foreground position and calculates the real geographic distance and bearing to the target.
 
-**Age:** 18–26
+On native devices, Treasi uses native heading information for the compass. The interface also reports location readiness and accuracy so it does not pretend a position is sufficiently precise when it is not.
 
-**Typical user:** Creative arts, design, media or technology student.
+### Excavate
 
-**Environment:** University campus, studio environment or urban area.
+A discovery can only be submitted when Treasi has a fresh live position and the Explorer is within the configured target radius.
 
-**Motivations:**
+The on-screen excavation control is always available when the target has been verified. Accelerometer-based shake excavation is an optional secondary interaction on supported devices.
 
-- Wants meaningful social interaction
-- Enjoys visually distinctive experiences
-- Likes games and alternative forms of interaction
-- Enjoys exploration
-- Appreciates tactile or physical interaction
-- Has limited time for traditional social gatherings
+### Discover
 
-**Problem:**
+After a successful discovery:
 
-Academic schedules and digital communication can make social interaction feel fragmented. Treasi turns ordinary movement through a campus or city into an opportunity for discovery.
+1. A discovery record is created.
+2. The Explorer receives points.
+3. A field activity event is created.
+4. The hidden payload is revealed.
+5. Haptic feedback is used when enabled and supported.
 
 ---
 
-## Core Features
+## Wireframes
+
+The final project keeps the visual language established during Treasi's wireframing phase. The reference images are stored in `assets/Wireframes/` and are included below so the design progression is visible directly from the repository.
+
+### Splash Screen
+
+<p align="center">
+  <img src="./assets/Wireframes/Splash%20Screen.png" alt="Treasi splash screen wireframe" width="85%" />
+</p>
 
 ### Authentication
 
-Treasi uses Firebase Authentication for account registration and login.
+<p align="center">
+  <img src="./assets/Wireframes/Auth%20Screen.png" alt="Treasi authentication screen wireframe" width="85%" />
+</p>
 
-Users can:
+### Dashboard
 
-- Create an account
-- Sign in with email and password
-- Remain authenticated between application sessions
-- Sign out
-- Update their profile information
+<p align="center">
+  <img src="./assets/Wireframes/Dashboard%20Screen.png" alt="Treasi dashboard wireframe" width="85%" />
+</p>
 
-Authentication state is monitored through Firebase Auth.
+### Hunt
 
----
+<p align="center">
+  <img src="./assets/Wireframes/Hunt%20Screen.png" alt="Treasi Hunt screen wireframe" width="85%" />
+</p>
 
-### Onboarding
+### Inventory
 
-The application includes a three-stage onboarding sequence:
-
-1. **Align Instrument**
-   - Introduces the landscape orientation requirement.
-   - Explains the field-instrument concept.
-
-2. **Track Targets**
-   - Introduces GPS and compass telemetry.
-   - Requests foreground location permission.
-
-3. **Excavate Rewards**
-   - Explains the physical interaction required to discover a cache.
-   - Introduces the kinetic shake interaction.
-
-The onboarding state is persisted locally with AsyncStorage and synchronised with the user's Firebase profile.
-
----
-
-### Landscape-Locked Interface
-
-Treasi is designed as a landscape-first application.
-
-The interface uses a split-screen structure:
-
-- **Left 60%:** operational map/instrument area
-- **Right 40%:** control console, telemetry and actions
-
-This structure is used throughout the main application experience to reinforce the field-instrument concept.
-
----
-
-### Field Dashboard
-
-The dashboard provides an overview of the active field.
-
-It includes:
-
-- User location
-- Nearby treasure markers
-- Treasure selection
-- Distance information
-- Activity/field signals
-- Navigation to hunting
-- Access to cache management
-- Access to social/leaderboard functionality
-- Main field action for creating a treasure
-
-Active treasure records are synchronised from Firestore in real time.
-
----
-
-### Treasure Creation
-
-Users can create a new field cache.
-
-A treasure contains:
-
-title
-hint
-payloadText
-creatorId
-creatorName
-location
-isArchived
-createdAt
-
-The location is stored as a Firestore `GeoPoint`.
-
-After creation, an activity event is added to the field activity feed.
-
----
-
-### Treasure Hunting
-
-The hunting screen retrieves a selected treasure and begins location tracking.
-
-The interface provides:
-
-- Target information
-- Clue/hint
-- Live GPS distance
-- GPS accuracy/status
-- Compass direction
-- Sensor status
-- Excavation state
-- Hidden payload
-
-The hunter must physically reach the target area before excavation can occur.
-
----
-
-### Compass Navigation
-
-The hunting screen uses the device's magnetometer to calculate heading information.
-
-The compass is presented as a custom vintage instrument rather than a standard digital compass.
-
-The implementation uses sensor updates and animation to create a responsive compass needle.
-
----
-
-### Kinetic Excavation
-
-The application uses the device accelerometer to detect a physical shaking gesture.
-
-The intended interaction is:
-
-1. Navigate towards the target.
-2. Enter the target radius.
-3. Activate the excavation interaction.
-4. Shake the device.
-5. The accelerometer detects the movement.
-6. The discovery is recorded.
-7. The hidden payload is revealed.
-
-A haptic feedback response is used after successful excavation.
-
----
-
-### Inventory and Cache Management
-
-The Inventory screen provides access to nearby field caches and the user's own planted caches.
-
-Cache records support:
-
-- **Create**
-- **Read**
-- **Update**
-- **Delete**
-- **Archive**
-
-Only the creator of a cache can modify, archive or permanently delete that cache.
-
-Archiving is implemented as a soft-delete mechanism by changing:
-
-```text
-isArchived = true
-```
-
-Permanent deletion removes the Firestore treasure document.
-
----
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <img src="./assets/Wireframes/Inventory.png" alt="Treasi Inventory wireframe" width="100%" />
+      <br />
+      <strong>Inventory</strong>
+    </td>
+    <td align="center" width="50%">
+      <img src="./assets/Wireframes/Inventory-1.png" alt="Treasi Inventory alternate wireframe" width="100%" />
+      <br />
+      <strong>Inventory alternate state</strong>
+    </td>
+  </tr>
+</table>
 
 ### Leaderboard
 
-The Leaderboard screen displays explorers ranked by their accumulated points.
+<p align="center">
+  <img src="./assets/Wireframes/Leaderboard.png" alt="Treasi Leaderboard wireframe" width="85%" />
+</p>
 
-The leaderboard:
+### Profile
 
-- Reads users from Firestore
-- Orders them by total points
-- Displays the top 50 entries
-- Highlights the current user
-- Provides nearby explorer information
-
----
-
-### Friendships
-
-Treasi includes a friendship system that allows explorers to create peer connections.
-
-Supported friendship states include:
-
-- `pending`
-- `accepted`
-- `declined`
-- `blocked`
-
-Friendship records are stored in the Firestore `friendships` collection.
+<p align="center">
+  <img src="./assets/Wireframes/Profile.png" alt="Treasi Profile wireframe" width="85%" />
+</p>
 
 ---
 
-### Field Messages
+## Key Features
 
-Explorers can send short field messages/telegrams.
+### Authentication
 
-Messages are stored remotely in the Firestore `messages` collection.
+Treasi uses Firebase Authentication with email and password credentials.
 
-The social interface uses the application's field-operation terminology to maintain the overall theme.
+Users can:
 
----
+- Register an Explorer account.
+- Sign in with email and password.
+- Restore an authenticated Firebase session after restarting the application.
+- Request a password-reset email.
+- Request email verification.
+- Sign out safely.
+
+Login verifies that the authenticated Explorer has a corresponding Firestore profile. Existing profiles are read without resetting saved preferences or points.
+
+### Onboarding
+
+The onboarding flow introduces the core field interactions:
+
+1. **Align Instrument** — explains the landscape-first experience.
+2. **Track Targets** — introduces location and navigation behaviour.
+3. **Excavate Rewards** — explains target discovery and physical interaction.
+
+Onboarding completion is stored locally with AsyncStorage and synchronised with the signed-in Explorer profile when available.
+
+The Profile and Settings screen also allows the onboarding guide to be reviewed later without resetting completion state.
+
+### Dashboard and Field Map
+
+The Dashboard acts as the main operational view and includes:
+
+- Active treasure markers.
+- Explorer location when available.
+- Nearby-cache filtering when a real position is available.
+- Treasure selection.
+- Real-time field activity.
+- Navigation to Hunt, Inventory, Ranks and Profile.
+- Location recovery controls.
+- Cache creation access.
+
+Native devices use `react-native-maps`. Web uses a dedicated `FieldMap.web.tsx` implementation with Leaflet and OpenStreetMap tiles.
+
+### Treasure Creation and Inventory
+
+The Inventory screen manages active caches and the Explorer's own planted caches.
+
+Treasure records support:
+
+- Creation.
+- Reading and synchronisation.
+- Editing by the creator.
+- Archiving by the creator.
+- Permanent deletion where the deployed Firestore rules permit it.
+
+A treasure can contain:
+
+```text
+treasureId
+creatorId
+creatorName
+title
+hint
+payloadText
+imageUrl
+location
+isArchived
+createdAt
+updatedAt
+```
+
+`location` is stored as a Firestore `GeoPoint`.
+
+### Hunt
+
+The Hunt experience includes:
+
+- Live foreground GPS tracking.
+- Cached-position display while waiting for a live fix.
+- Fresh-location validation before excavation.
+- Horizontal accuracy checks.
+- Five-metre discovery radius.
+- Native compass heading on supported iOS/Android devices.
+- True-north heading where available, with magnetic-north fallback.
+- Numerical bearing fallback.
+- Android simulated-location rejection for discovery verification.
+- iOS/Android precise-location checks where exposed by the platform.
+- Optional accelerometer-based shake excavation.
+- Tap-to-excavate accessibility fallback.
+- Optional haptic success feedback.
+- Hidden payload reveal.
+- Atomic Firestore discovery and point updates.
+
+### Leaderboard
+
+The Leaderboard provides a ranked Explorer view based on `totalPoints` and highlights the active Explorer where applicable.
+
+Treasi's current rank progression is:
+
+| Points | Rank |
+| ---: | --- |
+| 0–499 | Novice Scout I |
+| 500–1,499 | Pathfinder II |
+| 1,500–2,999 | Trailblazer III |
+| 3,000+ | Master Explorer |
+
+### Social
+
+Treasi includes social functionality for asynchronous Explorer interaction, including friendship records and field messages.
+
+Friendship states include:
+
+```text
+pending
+accepted
+declined
+blocked
+```
 
 ### Activity Feed
 
-The dashboard includes a real-time field activity feed.
-
-Events include:
-
-- Treasure hidden
-- Treasure found
-- Friend accepted
-
-Activity records are stored in:
+Field events are stored in `activity_feed` and can include events such as:
 
 ```text
-activity_feed
+TREASURE_HIDDEN
+TREASURE_FOUND
+TREASURE_ARCHIVED
+TELEGRAM_DISPATCH
+FRIEND_REQUEST
+FRIEND_ACCEPTED
+PROFILE_UPDATED
 ```
-
----
 
 ### Profile and Settings
 
-The profile/settings area provides controls for:
+The Profile and Settings screen uses the reversed 60/40 arrangement requested for account management:
 
-- Agent/callsign information
-- Haptic feedback
-- Sensor sensitivity
-- Battery optimisation preference
-- Night field mode
-- Telemetry preference
-- Onboarding/authentication flow preference
-- Sign out
+- **Left 60%** — settings and account controls.
+- **Right 40%** — Explorer identity and account information.
 
-These settings are persisted to the user's Firestore document.
+Controls include:
+
+- Haptic feedback.
+- Shake sensitivity.
+- Location-sharing preference.
+- Battery-saving preference.
+- Night-field preference.
+- System Reduce Motion status.
+- Clear stored shared location.
+- Review onboarding.
+- Open system permissions/settings.
+- Refresh Firebase profile state.
+- Email verification.
+- Password reset.
+- Callsign editing.
+- Restore default preferences.
+- Sign out.
+- Guarded account-deletion interface.
+
+Secure permanent account deletion requires trusted server-side cleanup before it can safely remove Firebase Authentication and associated account data together.
 
 ---
 
@@ -413,79 +375,75 @@ These settings are persisted to the user's Firestore document.
 ```mermaid
 flowchart TD
     A[Launch Treasi] --> B[Splash Screen]
-    B --> C{Authenticated?}
-
+    B --> C{Onboarding complete?}
     C -->|No| D[Onboarding]
-    C -->|Yes| E{Onboarding Complete?}
+    C -->|Yes| E{Authenticated?}
+    D --> F[Login / Sign Up]
+    E -->|No| F
+    E -->|Yes| G[Dashboard]
+    F --> G
 
-    D --> F[Request Location Permission]
-    F --> G[Login / Sign Up]
+    G --> H[Select Active Treasure]
+    H --> I[Hunt]
+    I --> J[Live GPS + Bearing]
+    J --> K{Inside Verified Dig Radius?}
+    K -->|No| J
+    K -->|Yes| L[Tap or Optional Shake Excavation]
+    L --> M[Discovery Transaction]
+    M --> N[+100 Points]
+    N --> O[Reveal Payload]
 
-    E -->|No| D
-    E -->|Yes| H[Field Dashboard]
+    G --> P[Inventory]
+    P --> Q[Create Treasure]
+    P --> R[Edit / Archive Own Treasure]
 
-    G --> H
-
-    H --> I[View Nearby Treasures]
-    H --> J[Create Treasure]
-    H --> K[Leaderboard]
-    H --> L[Profile / Settings]
-
-    I --> M[Select Treasure]
-    M --> N[Hunt Screen]
-    N --> O[GPS + Compass Navigation]
-    O --> P{Within Target Radius?}
-
-    P -->|No| O
-    P -->|Yes| Q[Excavate]
-    Q --> R[Accelerometer Interaction]
-    R --> S[Discovery Recorded]
-    S --> T[Reveal Payload]
-    T --> H
-
-    J --> U[Create / Edit Cache]
-    U --> V[Save to Firestore]
-    V --> H
+    G --> S[Leaderboard]
+    G --> T[Social]
+    G --> U[Profile / Settings]
 ```
 
 ---
 
 ## Technology Stack
 
-### Frontend
+### Application
 
 | Technology | Purpose |
-|---|---|
-| React Native | Cross-platform mobile application framework |
-| TypeScript | Type-safe application development |
-| Expo | Development and native device integration |
-| React Navigation | Application navigation |
-| React Native Reanimated | Animation and motion |
-| React Native SVG | Custom vector UI elements |
-| React Native Maps | Native map rendering |
-| Expo Location | GPS and location services |
-| Expo Sensors | Magnetometer and accelerometer access |
-| Expo Haptics | Haptic feedback |
-| AsyncStorage | Local onboarding/authentication state |
-| Expo Font | Custom typography |
+| --- | --- |
+| React 19 | Component model |
+| React Native 0.81 | Cross-platform native UI |
+| TypeScript 5.9 | Type-safe application development |
+| Expo SDK 54 | Native development platform and runtime |
+| React Native Web | Browser support |
+| React Native Maps | Native field-map rendering |
+| React Native SVG | Custom instrument graphics |
+| Expo Location | Foreground location and native heading APIs |
+| Expo Sensors | Accelerometer interaction |
+| Expo Haptics | Native haptic feedback |
+| Expo Screen Orientation | Landscape orientation control |
+| AsyncStorage | Local onboarding state |
+| Expo Image Picker | Image-selection capability |
+| Expo Vector Icons | Cross-platform iconography |
 
-### Backend / Cloud
+### Backend
 
 | Technology | Purpose |
-|---|---|
-| Firebase Authentication | User registration and authentication |
-| Cloud Firestore | Remote application database |
-| Firebase Storage | Storage service configured for the application |
-| Firebase JS SDK | Client-side Firebase integration |
+| --- | --- |
+| Firebase Authentication | Explorer registration and authentication |
+| Cloud Firestore | Remote application database and real-time listeners |
+| Firebase Storage | Remote media storage configuration |
+| Firebase JS SDK | Cross-platform Firebase client integration |
 
 ### Development
 
 | Technology | Purpose |
-|---|---|
-| Node.js | JavaScript runtime for the development environment |
+| --- | --- |
+| Node.js | JavaScript development runtime |
 | npm | Dependency and script management |
 | Git | Version control |
-| GitHub | Repository hosting and collaboration |
+| Expo CLI | Development server and platform launch commands |
+
+> React Navigation packages are installed in the project, but the current primary screen flow is coordinated from `App.tsx` using the Treasi screen-state navigation layer and `FieldNavBar`.
 
 ---
 
@@ -495,29 +453,30 @@ Treasi follows a client + Backend-as-a-Service architecture.
 
 ```mermaid
 flowchart LR
-    A[React Native Client] --> B[Authentication]
+    A[Expo / React Native Client] --> B[Firebase Authentication]
     A --> C[Cloud Firestore]
     A --> D[Firebase Storage]
-
     A --> E[Expo Location]
     A --> F[Expo Sensors]
     A --> G[Expo Haptics]
 
-    E --> H[GPS Position]
-    F --> I[Compass + Accelerometer]
+    E --> H[Foreground GPS]
+    E --> I[Native Heading]
+    F --> J[Accelerometer]
 
     H --> A
     I --> A
+    J --> A
 
-    C --> J[Users]
-    C --> K[Treasures]
-    C --> L[Discoveries]
-    C --> M[Activity Feed]
-    C --> N[Friendships]
-    C --> O[Messages]
+    C --> K[Users]
+    C --> L[Treasures]
+    C --> M[Discoveries]
+    C --> N[Activity Feed]
+    C --> O[Friendships]
+    C --> P[Messages]
 ```
 
-There is no separate Node/Express API server in the current implementation. Firebase acts as the backend service.
+There is no separate Express or Node API server in the current implementation. Firebase provides authentication, storage and database services directly to the client, protected by Firebase security rules.
 
 ---
 
@@ -525,9 +484,7 @@ There is no separate Node/Express API server in the current implementation. Fire
 
 ### `users`
 
-Stores authenticated explorer profiles and persistent settings.
-
-Key fields include:
+Stores an authenticated Explorer profile and persistent preferences.
 
 ```text
 uid
@@ -541,15 +498,16 @@ motionSensitivityEnabled
 batteryOptimizerEnabled
 nightModeEnabled
 skipOnboardingAuthFlow
+location?                  // optional shared GeoPoint
 createdAt
 updatedAt
 ```
 
----
+`skipOnboardingAuthFlow` remains in the current schema for compatibility with older project code, but it is not presented as a user-facing bypass in the production settings interface.
 
 ### `treasures`
 
-Stores physical field caches.
+Stores field caches.
 
 ```text
 treasureId
@@ -558,15 +516,12 @@ creatorName
 title
 hint
 payloadText
-imageUrl
-location
+imageUrl?
+location                   // Firestore GeoPoint
 isArchived
 createdAt
+updatedAt?
 ```
-
-`location` is stored as a Firestore `GeoPoint`.
-
----
 
 ### `discoveries`
 
@@ -579,27 +534,33 @@ hunterId
 unlockedAt
 ```
 
-The discovery record prevents the same explorer from receiving duplicate discovery credit for the same treasure.
-
----
-
-### `messages`
-
-Stores field messages between explorers.
+The current discovery identifier follows:
 
 ```text
-messageId
-senderId
-senderName
-text
+{hunterId}_{treasureId}
+```
+
+This lets the application prevent duplicate credit for the same Explorer and treasure.
+
+### `activity_feed`
+
+Stores real-time field events.
+
+```text
+activityId?
+userId
+username
+type
+message
+targetId
 createdAt
 ```
 
----
-
 ### `friendships`
 
-Stores explorer relationships and requests.
+Stores Explorer relationships and requests.
+
+Typical fields include:
 
 ```text
 friendshipId
@@ -610,46 +571,225 @@ createdAt
 updatedAt
 ```
 
-Supported statuses:
+### `messages`
 
-```text
-pending
-accepted
-declined
-blocked
-```
+Stores short social/field messages used by the Social experience.
 
 ---
 
-### `activity_feed`
+## CRUD Operations
 
-Stores field events shown on the dashboard.
+Treasi demonstrates remote CRUD behaviour through Cloud Firestore.
 
-```text
-activityId
-userId
-username
-type
-message
-targetId
-createdAt
-```
+| Operation | Examples in Treasi |
+| --- | --- |
+| **Create** | Register user profile, create treasure, create discovery, send message, create friendship request, write activity event |
+| **Read** | Stream treasures, read user profile, load leaderboard, read discoveries, read activity, social data |
+| **Update** | Edit treasure data, archive cache, change profile preferences, edit callsign, accept friendship state |
+| **Delete** | Delete permitted treasure/social records according to ownership and deployed Firestore rules |
 
-Supported activity types currently represented by the application include:
+Archive behaviour is a soft-delete pattern:
 
 ```text
-TREASURE_HIDDEN
-TREASURE_FOUND
-FRIEND_ACCEPTED
+isArchived = true
 ```
+
+An archived treasure is hidden from active hunting and can no longer award a new discovery.
+
+---
+
+## Location, Compass and Sensor Behaviour
+
+### Foreground GPS
+
+Treasi uses `expo-location` for foreground location only.
+
+The application can:
+
+- Check existing foreground permission without immediately showing a system prompt.
+- Request permission after an explicit user action where required.
+- Check whether device location services are enabled.
+- Use a recent cached position for temporary orientation.
+- Watch live foreground positions.
+- Request a fresh high-accuracy fix.
+- Report horizontal accuracy.
+- Pause foreground location subscriptions when Hunt is inactive/backgrounded.
+
+A cached position can help orient the interface, but it **cannot** unlock a treasure.
+
+### Discovery Verification
+
+The Hunt interface requires:
+
+- An authenticated Explorer.
+- A real treasure target.
+- A valid treasure location.
+- A fresh live position.
+- Acceptable horizontal accuracy.
+- A position inside the configured five-metre target radius.
+- A treasure not created by the active Explorer.
+- A treasure that is not archived.
+- No previous discovery record for the same Explorer and treasure.
+
+On Android, a location reported as simulated/mocked is rejected for excavation verification.
+
+### Compass
+
+On native iOS and Android, Treasi uses Expo Location heading data rather than manually converting raw magnetometer axes.
+
+The Hunt compass:
+
+- Uses true heading when available.
+- Falls back to magnetic heading.
+- Rotates the instrument card relative to the device heading.
+- Points the target needle towards the geographic bearing of the treasure.
+- Shows numerical bearing as a fallback.
+- Reports calibration quality when the platform supplies it.
+
+Web does not pretend to provide reliable native compass hardware; it retains numerical location/bearing guidance instead.
+
+### Accelerometer
+
+The accelerometer supports optional shake excavation on devices that provide motion sensor access.
+
+Treasi measures acceleration away from the normal gravity baseline to reduce accidental activations from ordinary movement.
+
+The primary tap-to-excavate control remains available so the Hunt is not dependent on a shake gesture.
+
+### Haptics
+
+Successful excavation can trigger native haptic feedback when:
+
+- The device supports haptics.
+- The current platform is native.
+- Haptic feedback is enabled in the Explorer profile.
+
+---
+
+## 60/40 Landscape Interface
+
+The application uses a consistent landscape split inspired by physical field equipment.
+
+```text
+┌──────────────────────────────────────────────────────────────┐
+│                                                              │
+│              PRIMARY 60%              SECONDARY 40%          │
+│                                                              │
+│       map / instrument / settings       controls / data      │
+│       primary operational context       supporting actions   │
+│                                                              │
+└──────────────────────────────────────────────────────────────┘
+```
+
+The exact content changes by screen:
+
+| Screen | 60% area | 40% area |
+| --- | --- | --- |
+| Dashboard | Map / field context | Activity and controls |
+| Hunt | Navigation instrument | Clue and excavation console |
+| Inventory | Main cache-management content | Supporting controls/details |
+| Leaderboard | Rankings | Supporting Explorer/community information |
+| Social | Main social content | Supporting field controls |
+| Profile | **Settings** | **Explorer profile information** |
+
+The Profile screen deliberately reverses the usual information priority so settings occupy the larger left section.
+
+---
+
+## Accessibility
+
+Accessibility is treated as part of the production UI rather than a separate visual mode.
+
+### Touch Targets
+
+Important controls are designed around a minimum target of approximately **48 × 48 dp**.
+
+### Screen Readers
+
+The application uses accessibility roles, labels, hints, states and live-region announcements for important actions and changing telemetry.
+
+Decorative visual elements are removed from the accessibility tree where appropriate.
+
+### Reduce Motion
+
+Treasi reads the operating system's Reduce Motion setting and removes or reduces non-essential screen/compass transitions where appropriate.
+
+### Alternatives to Motion Gestures
+
+Shake excavation is optional. A standard on-screen control provides the same core action.
+
+### Colour and Status
+
+Important states are not communicated using colour alone. Labels, icons, borders and status text reinforce changes such as:
+
+- Live GPS readiness.
+- Poor accuracy.
+- Permission errors.
+- Archived caches.
+- Active navigation tabs.
+- Successful excavation.
+
+### Responsive Text and Layout
+
+Screens use flex-based layout, dynamic dimensions and font scaling limits to remain usable across different landscape aspect ratios.
+
+---
+
+## Design System
+
+Treasi uses a vintage field-instrument identity inspired by:
+
+- National park ranger equipment.
+- Surveying instruments.
+- Mechanical dashboards.
+- Archival field notes.
+- Weathered maps.
+- Brass fittings.
+- Typewriter interfaces.
+
+### Core Palette
+
+| Token | Example | Purpose |
+| --- | --- | --- |
+| Forest | `#2C3B2E` | Main field chassis/background |
+| Deep Forest | `#172018` / `#1C261D` | High-contrast instrument areas |
+| Parchment | `#E8DCC0` / `#F6EFD9` | Light cards and paper surfaces |
+| Rust / Sienna | `#7F321B` / `#8A3D24` | Primary actions and alerts |
+| Brass | `#B08D57` / `#C3A06A` | Borders, hardware and secondary emphasis |
+| Ink | `#2A2420` | Primary text on parchment |
+
+### Typography
+
+The implemented interface uses a monospaced/Courier-style field-instrument treatment across platforms, with platform fallbacks where a custom font is not available.
+
+### Visual Principles
+
+- Strong horizontal composition.
+- Parchment versus dark-instrument contrast.
+- Mechanical borders and rails.
+- Analogue-style telemetry.
+- Restrained animation.
+- Clear operational state labels.
+- Field terminology instead of generic dashboard language.
 
 ---
 
 ## Project Structure
 
 ```text
-Treasi/
+app/
+├── .expo/
 ├── assets/
+│   ├── Wireframes/
+│   │   ├── Auth Screen.png
+│   │   ├── Cover.png
+│   │   ├── Dashboard Screen.png
+│   │   ├── Hunt Screen.png
+│   │   ├── Inventory-1.png
+│   │   ├── Inventory.png
+│   │   ├── Leaderboard.png
+│   │   ├── Profile.png
+│   │   └── Splash Screen.png
 │   ├── adaptive-icon.png
 │   ├── favicon.png
 │   ├── icon.png
@@ -659,12 +799,17 @@ Treasi/
 ├── src/
 │   ├── components/
 │   │   ├── FieldMap.native.tsx
+│   │   ├── FieldMap.types.ts
 │   │   ├── FieldMap.web.tsx
 │   │   ├── FieldNavBar.tsx
 │   │   └── LandscapeSplitLayout.tsx
 │   │
 │   ├── config/
-│   │   └── firebase.ts
+│   │   ├── firebase.d.ts
+│   │   ├── firebase.native.ts
+│   │   ├── firebase.options.ts
+│   │   ├── firebase.ts
+│   │   └── firebase.web.ts
 │   │
 │   ├── hooks/
 │   │   ├── useAuth.ts
@@ -683,9 +828,11 @@ Treasi/
 │   │   ├── LeaderboardScreen.tsx
 │   │   ├── OnboardingScreen.tsx
 │   │   ├── ProfileSettingsScreen.tsx
+│   │   ├── SocialScreen.tsx
 │   │   └── SplashScreen.tsx
 │   │
 │   └── types/
+│       ├── firebase-auth-react-native.d.ts
 │       ├── firestore.ts
 │       ├── navigation.ts
 │       └── svg.d.ts
@@ -700,20 +847,44 @@ Treasi/
 └── tsconfig.json
 ```
 
+> `node_modules/`, `.expo/` and local environment secrets should not be committed to the repository.
+
 ---
 
 ## Prerequisites
 
-Before installing Treasi, make sure the development environment has:
+Before running Treasi, install or configure:
 
-- Node.js installed
-- npm installed
-- A supported Android or iOS development environment
-- Expo tooling
-- A Firebase project
-- A physical device or emulator/simulator for testing
+- **Node.js** and npm.
+- A Firebase project.
+- Expo-compatible development tooling.
+- A modern browser for the web version.
+- Android Studio/emulator or a physical Android device for Android testing.
+- An iOS simulator on macOS or a signed development build for physical iPhone testing.
 
-For the sensor-based functionality, a **physical device is strongly recommended**. GPS, magnetometer, accelerometer and haptic behaviour cannot be fully represented by a standard web browser.
+A **physical device is strongly recommended** for testing Hunt because GPS, compass, accelerometer and haptic behaviour cannot be fully reproduced by a desktop browser.
+
+---
+
+## Environment Configuration
+
+Treasi loads Firebase client configuration through Expo public environment variables.
+
+Create a `.env` file in the project root:
+
+```env
+EXPO_PUBLIC_FIREBASE_API_KEY=your_api_key
+EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN=your_auth_domain
+EXPO_PUBLIC_FIREBASE_PROJECT_ID=your_project_id
+EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET=your_storage_bucket
+EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=your_sender_id
+EXPO_PUBLIC_FIREBASE_APP_ID=your_app_id
+EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID=your_measurement_id
+```
+
+Do not commit environment-specific `.env` files containing project configuration that should remain local to the development environment.
+
+Firebase client configuration does not replace security rules. Firestore and Storage access must still be protected by deployed Firebase rules.
 
 ---
 
@@ -723,10 +894,10 @@ For the sensor-based functionality, a **physical device is strongly recommended*
 
 ```bash
 git clone <YOUR-GITHUB-REPOSITORY-URL>
-cd Treasi
+cd treasi/app
 ```
 
-Replace `<YOUR-GITHUB-REPOSITORY-URL>` with the URL of the final GitHub repository.
+Replace `<YOUR-GITHUB-REPOSITORY-URL>` with the final repository URL before submission.
 
 ### 2. Install dependencies
 
@@ -734,29 +905,151 @@ Replace `<YOUR-GITHUB-REPOSITORY-URL>` with the URL of the final GitHub reposito
 npm install
 ```
 
-### 3. Configure Firebase
+### 3. Align Expo dependencies
 
-Create or use a Firebase project and configure the application as described in the [Firebase Setup](#firebase-setup) section.
-
-### 4. Start Expo
+For Expo SDK 54, Expo's installer should be used when correcting native package versions:
 
 ```bash
-npm start
+npx expo install --fix
 ```
 
-Expo will display the available development options.
+### 4. Check the project
+
+```bash
+npx expo-doctor
+```
+
+### 5. Configure Firebase
+
+Create the `.env` file described above and make sure Authentication, Firestore and any required Storage configuration are available.
+
+---
+
+## Running Treasi
+
+### Standard Expo development server
+
+```bash
+npx expo start --clear
+```
+
+### Web
+
+```bash
+npm run web
+```
+
+or:
+
+```bash
+npx expo start --web
+```
+
+The development URL is normally available through localhost.
+
+### Android
+
+```bash
+npm run android
+```
+
+or start Expo and press `a`:
+
+```bash
+npx expo start --clear
+```
+
+For a physical device on a network that blocks normal LAN discovery, a tunnel can be used:
+
+```bash
+npx expo start --tunnel --clear
+```
+
+### iOS
+
+```bash
+npm run ios
+```
+
+On current physical iPhones, an **Expo development build** is preferable for an SDK 54 project when the installed Expo Go version does not support the project's SDK.
+
+A development-client workflow can be started with:
+
+```bash
+npx expo start --dev-client --tunnel --clear
+```
+
+A signed iOS development build requires the appropriate Apple development credentials.
+
+---
+
+## How to Use Treasi
+
+### First Launch
+
+1. Open Treasi in landscape orientation.
+2. Complete the Splash diagnostics.
+3. Complete the onboarding guide.
+4. Create an Explorer account or sign in.
+5. Enter the Dashboard.
+6. Enable foreground location when you are ready to use location-based features.
+
+### Create a Treasure
+
+1. Open **Bag / Inventory**.
+2. Choose the cache-creation action.
+3. Use a valid current location or approved coordinates.
+4. Enter the cache title.
+5. Enter a clue.
+6. Enter the hidden payload.
+7. Save the cache.
+8. Treasi writes the treasure to Firestore.
+9. A field activity event is created where supported by the current workflow.
+
+### Hunt a Treasure
+
+1. Select an active treasure from the Dashboard or Inventory.
+2. Enter **Hunt**.
+3. Allow foreground location if it has not already been granted.
+4. Follow the distance and target bearing.
+5. If the compass is available, orient using the live field instrument.
+6. Move towards the cache until the Hunt reports a verified dig site.
+7. Tap the excavation control, or use the optional shake interaction if enabled.
+8. Treasi verifies the latest position again before submitting.
+9. The discovery is recorded atomically in Firestore.
+10. The hidden payload is revealed and points are awarded.
+
+### Manage a Treasure
+
+For a treasure you created, the Inventory can expose the permitted management actions, such as:
+
+- Edit metadata.
+- Archive the cache.
+- Restore supported editable information.
+- Delete the record where the deployed rules and current feature permit it.
+
+### Profile and Settings
+
+Open **Profile** from the FieldNavBar to manage:
+
+- Explorer callsign.
+- Feedback and motion preferences.
+- Location sharing.
+- Display/power preferences.
+- Onboarding review.
+- System permissions.
+- Email security actions.
+- Sign out.
 
 ---
 
 ## Firebase Setup
 
-Treasi uses Firebase as its backend service.
+### 1. Create a Firebase Project
 
-### Step 1: Create a Firebase Project
+Create the Treasi Firebase project in the Firebase Console.
 
-Create a Firebase project through the Firebase Console.
-
-### Step 2: Enable Authentication
+### 2. Enable Authentication
 
 Enable:
 
@@ -766,480 +1059,199 @@ Authentication
     └── Email/Password
 ```
 
-This is required for account registration and login.
+### 3. Create Cloud Firestore
 
-### Step 3: Create Firestore
-
-Create a Cloud Firestore database.
-
-Treasi uses the following collections:
+Treasi currently uses collections including:
 
 ```text
 users
 treasures
 discoveries
-messages
-friendships
 activity_feed
+friendships
+messages
 ```
 
-The application creates many records dynamically when users interact with the system.
+Other supporting collections may be present depending on the final Social/Inventory implementation.
 
-### Step 4: Configure Storage
+### 4. Configure Firebase Storage
 
-Firebase Storage is included in the application's Firebase configuration for remote asset storage.
+Firebase Storage is configured in the project for remote media support. Image upload/use should follow the final Storage rules and project requirements.
 
-### Step 5: Add Firebase Configuration
+### 5. Deploy Firestore Rules
 
-The Firebase client configuration is located at:
+The application relies on Firestore rules to prevent unauthorised writes.
 
-```text
-src/config/firebase.ts
-```
+Rules should enforce, at minimum:
 
-For a production submission, the Firebase configuration should be managed using the project's preferred environment/configuration strategy rather than exposing sensitive project configuration unnecessarily.
+- Authenticated access where required.
+- Ownership checks for creator-controlled treasure operations.
+- Protection of another Explorer's private/account-controlled data.
+- Valid discovery ownership.
+- Valid friendship participants.
+- Valid message/activity writers.
 
-### Step 6: Configure Firestore Rules
-
-The database should be protected with rules appropriate to the application.
-
-At minimum, rules should ensure that:
-
-- Authenticated users can access application data only where appropriate.
-- Users cannot modify another user's profile without permission.
-- Users cannot modify or delete treasures belonging to another creator.
-- Discovery records cannot be manipulated to award duplicate discoveries.
-- Friendship operations are limited to the relevant users.
-- Message access is restricted appropriately.
-
-The exact production rules are dependent on the final Firebase deployment configuration.
+Client-side checks improve the interface but are **not a replacement for Firebase rules**.
 
 ---
 
-## Running the Application
+## Platform Behaviour
+
+### iPhone / iOS
+
+- Landscape-first UI.
+- Foreground location permission.
+- Precise/reduced location awareness where exposed by Expo Location.
+- Native heading support.
+- Accelerometer support where available and permitted.
+- Haptic feedback where supported.
+- Safe-area-aware layouts.
 
 ### Android
 
-```bash
-npm run android
-```
-
-This launches the Expo Android development workflow.
-
-### iOS
-
-```bash
-npm run ios
-```
-
-This launches the Expo iOS development workflow.
+- Landscape-first UI.
+- Fine/coarse foreground location awareness.
+- Location provider recovery controls.
+- Native heading support.
+- Android simulated-location rejection in Hunt verification.
+- Accelerometer support where available and permitted.
+- Haptic feedback where supported.
 
 ### Web
 
-```bash
-npm run web
-```
-
-A web implementation is included for development/testing. The native map and device-sensor experience is intended primarily for Android and iOS.
-
----
-
-## How to Use Treasi
-
-### First launch
-
-1. Open Treasi.
-2. Complete the splash screen.
-3. Complete the three onboarding stages.
-4. Grant foreground location permission.
-5. Create an account or sign in.
-6. Enter the Field Dashboard.
-
-### Create a treasure
-
-1. Open the cache/inventory interface.
-2. Select the option to create a new field cache.
-3. Confirm or enter the target coordinates.
-4. Enter a title.
-5. Add a clue.
-6. Add the hidden payload.
-7. Submit the cache.
-8. The treasure is written to Firestore.
-9. The activity feed records the new cache.
-
-### Hunt a treasure
-
-1. Select a treasure marker from the dashboard or inventory.
-2. Open the Hunt screen.
-3. Follow the live distance information.
-4. Use the compass to orient towards the target.
-5. Continue until the target is within the required proximity.
-6. Complete the excavation interaction.
-7. The application records the discovery.
-8. The payload is revealed.
-
-### Manage a treasure
-
-If you created a treasure, you can:
-
-- Edit its title
-- Edit its clue
-- Edit its payload
-- Archive the cache
-- Permanently delete the cache
-
----
-
-## CRUD Operations
-
-Treasi implements remote CRUD operations using Cloud Firestore.
-
-### Create
-
-A new treasure is added to:
-
-```text
-treasures
-```
-
-using a Firestore document.
-
-### Read
-
-The application reads:
-
-- User profiles
-- Treasure records
-- Discoveries
-- Leaderboard entries
-- Activity feed events
-- Friendship records
-- Messages
-
-Several views use Firestore real-time listeners so changes can appear without manually refreshing the application.
-
-### Update
-
-Treasure metadata can be updated by its creator.
-
-Examples:
-
-```text
-title
-hint
-payloadText
-isArchived
-```
-
-User profile and settings data can also be updated.
-
-### Delete
-
-Treasure creators can permanently delete their own treasure documents.
-
-The application also supports soft deletion through the archive state:
-
-```text
-isArchived = true
-```
-
----
-
-## Sensor and Location Features
-
-### GPS
-
-Treasi uses Expo Location for:
-
-- Requesting foreground location permission
-- Obtaining the user's current position
-- Watching location changes
-- Calculating distance to treasures
-- Displaying the user's position on the map
-
-The hunting experience uses higher-accuracy location tracking when actively navigating towards a target.
-
-### Magnetometer
-
-The Hunt screen uses the device magnetometer to provide heading information for the custom compass interface.
-
-The sensor stream is sampled frequently enough to make the compass responsive while the interface uses animated values to reduce visible jitter.
-
-### Accelerometer
-
-The accelerometer is used to detect the physical movement associated with the excavation interaction.
-
-### Haptics
-
-Expo Haptics is used to provide feedback after important interactions, including successful excavation.
-
----
-
-## Landscape Interface
-
-Landscape orientation is not simply a technical requirement. It is part of Treasi's interaction model.
-
-The application uses a **60/40 split**:
-
-```text
-┌─────────────────────────────────────────────────────────────┐
-│                                                             │
-│             LEFT 60%             │       RIGHT 40%          │
-│                                  │                          │
-│     MAP / INSTRUMENTS            │    TELEMETRY             │
-│     OPERATIONAL VIEW             │    CONTROLS              │
-│                                  │    ACTIONS                │
-│                                  │    FIELD DATA             │
-│                                  │                          │
-└─────────────────────────────────────────────────────────────┘
-```
-
-The left side is primarily responsible for visualising the physical environment, while the right side functions as the control console.
-
----
-
-## Accessibility and Usability
-
-The interface is designed to preserve accessibility while maintaining its vintage visual identity.
-
-### Contrast
-
-The primary body text uses a dark ink colour against light parchment surfaces to maintain strong readability.
-
-### Touch targets
-
-Interactive controls are designed around touch-friendly target sizes, with the project's design planning targeting approximately **48 × 48 dp** for important controls.
-
-### Screen readers
-
-Decorative visual elements should not be treated as meaningful content by screen readers.
-
-Important telemetry information is exposed through semantic labels where appropriate.
-
-### Motion accessibility
-
-The physical shake interaction can present an accessibility barrier for users with different motor capabilities.
-
-The project therefore includes a fallback interaction concept that allows excavation through an alternative control rather than requiring a physical shake.
-
-### Landscape ergonomics
-
-The main controls are positioned within the right-hand control area to keep important actions predictable when the phone is held horizontally.
-
----
-
-## Design System
-
-Treasi uses a vintage field-instrument visual language.
-
-### Typography
-
-| Role | Typeface |
-|---|---|
-| Headings | Courier Prime |
-| Body | Old Standard TT |
-
-### Colour Palette
-
-| Token | Hex | Use |
-|---|---|---|
-| Forest Deep | `#2C3B2E` | Main dark background/chassis |
-| Parchment | `#E8DCC0` | Primary light surfaces |
-| Secondary Parchment | `#F3ECD8` | Secondary light surfaces |
-| Sienna Accent | `#A64B2A` | CTAs and high-priority actions |
-| Brass Trim | `#B08D57` | Borders, controls and hardware details |
-| Ink Black | `#2A2420` | Primary text |
-
-### Visual principles
-
-The UI uses:
-
-- Vintage paper textures
-- Brass-style borders
-- Mechanical controls
-- Field terminology
-- Analogue-inspired displays
-- Strong horizontal composition
-- Subtle motion
-- Clear system/status feedback
-
----
-
-## Responsive and Platform Behaviour
-
-Treasi is designed primarily for Android and iOS landscape layouts.
-
-### Native map
-
-On native platforms, the application uses `react-native-maps`.
-
-### Web map fallback
-
-A web-specific `FieldMap.web.tsx` implementation is provided so the project can run through Expo Web without depending on the native map implementation.
-
-### Orientation
-
-The application is configured for landscape orientation through Expo configuration and the `useLandscapeOrientation` hook.
-
-### Device differences
-
-Different Android and iOS devices have different:
-
-- Aspect ratios
-- Sensor hardware
-- GPS accuracy
-- Compass calibration
-- Screen sizes
-
-The UI therefore uses dynamic dimensions and flex-based layout rather than relying exclusively on fixed screen sizes.
-
----
-
-### Pull request process
-
-1. Create a feature branch from `develop`.
-2. Implement the feature.
-3. Test the feature locally.
-4. Open a pull request into `develop`.
-5. Review the implementation.
-6. Resolve issues.
-7. Merge into `develop`.
-8. Promote stable code to `main`.
-
-Direct development commits to the production branch should be avoided.
+- Runs through Expo Web on localhost.
+- Uses the dedicated Leaflet/OpenStreetMap field-map implementation.
+- Uses browser geolocation where available.
+- Does not pretend to provide the same native compass behaviour as iOS/Android.
+- Sensor-driven interactions degrade to accessible controls.
 
 ---
 
 ## Known Limitations
 
-The following limitations should be considered when evaluating the current implementation.
+### GPS Precision
 
-### Physical sensor dependency
+Consumer GPS accuracy varies with hardware, buildings, weather, network availability and sky visibility. Treasi therefore cannot guarantee that every device will immediately achieve the accuracy required for a five-metre excavation radius.
 
-Compass and accelerometer functionality depends on the physical capabilities and calibration of the device.
+### Client-Side Geographic Verification
 
-### GPS accuracy
+The current Hunt verifies location in the client before committing the discovery transaction. The Firestore transaction protects duplicate discoveries and point updates, but a deliberately modified client could attempt to bypass client-side geographic checks.
 
-GPS accuracy can vary depending on:
+A stronger anti-cheat production architecture would verify discovery coordinates in trusted server-side logic.
 
-- Device hardware
-- Indoor/outdoor conditions
-- Environmental obstruction
-- Network availability
-- Satellite visibility
+### Compass Calibration
 
-The application therefore displays telemetry/GPS status information during navigation.
+Heading quality depends on physical device sensors and calibration. Treasi displays bearing information even when the native compass is unavailable or poorly calibrated.
 
-### Battery consumption
+### Web Sensors
 
-Continuous location and sensor monitoring can increase battery consumption.
+The web version cannot provide the full native sensor experience consistently across browsers. Web is supported as a development/runtime target, while the intended field experience is strongest on a physical iOS or Android device.
 
-The application includes a battery optimisation preference and uses less aggressive location updates in broader field scanning contexts.
+### Account Deletion
 
-### Web limitations
+The Profile screen includes a guarded Delete Account interface, but secure permanent deletion should only be enabled once a trusted server-side process can remove Firebase Authentication and related personal account data together. Treasi deliberately avoids partial deletion that could leave account data behind.
 
-The web version cannot reproduce the full native sensor experience of an Android/iOS device.
+### Location Sharing
 
-The native mobile build should be used for the final sensor-driven demonstration.
+Exact profile location should only be written when the Explorer explicitly enables the relevant location-sharing preference. Core Hunt location should remain foreground-only and does not require silently publishing the Explorer's location to other users.
 
-### Firebase configuration
+### Geospatial Scale
 
-The application requires an accessible Firebase project with the required services configured before the complete remote functionality can operate.
+The current treasure model stores a Firestore `GeoPoint` but does not yet use a geohash-backed server-side radius query. Large treasure datasets would require a more scalable geospatial-query strategy.
 
-### Image payloads
+### Development Dependencies
 
-The data model supports an optional `imageUrl`, and the hunting interface can display an image when one is present. The current cache-creation flow primarily focuses on text-based treasure content.
+The project currently contains some dependencies and legacy navigation/configuration files that are not central to the final screen-state navigation flow. They can be removed during a final dependency-clean-up pass once all native builds are confirmed.
 
 ---
 
 ## Future Improvements
 
-Potential future development includes:
+Potential future work includes:
 
-1. More advanced image capture and Firebase Storage upload for treasure evidence.
-2. Expanded achievement/badge functionality.
-3. Improved offline support for field exploration.
-4. More sophisticated GPS accuracy handling.
-5. Additional compass calibration feedback.
-6. More advanced anti-cheat validation for discovery events.
-7. Richer friendship and messaging interactions.
-8. Expanded leaderboard statistics.
-9. More field locations and community-created treasure zones.
-10. More detailed analytics for exploration activity.
-11. Improved sensor fallbacks for accessibility.
-12. Automated Firebase security-rule testing.
-13. Production environment configuration using environment variables.
-14. Formal Android and iOS release builds through the appropriate deployment pipelines.
+1. Trusted server-side discovery verification.
+2. Geohash-backed nearby treasure queries.
+3. Full Firebase Storage image upload during cache creation.
+4. Secure server-side account deletion.
+5. Richer achievement and badge progression.
+6. More detailed Explorer statistics.
+7. Offline-friendly cached field data.
+8. Richer Telegram/message inbox behaviour.
+9. Improved compass calibration guidance.
+10. Expanded privacy controls for social location sharing.
+11. Automated Firestore security-rule tests.
+12. Automated unit/integration tests for distance, bearing and navigation logic.
+13. Formal EAS Android/iOS development and release profiles.
+14. Removal of unused legacy dependencies and navigation files.
+15. Production geospatial monitoring and performance profiling.
 
 ---
 
-### Video link
+## Demo Video
 
-**Add final demonstration video link here:**
+The Treasi demonstration video is available in the linked Google Drive folder:
 
-```text
-[DEMO VIDEO LINK]
-```
+### [▶ Watch the Treasi Demo Video](https://drive.google.com/drive/folders/1_r2pFbygXuqpii-kw80xBZH0yWf4nzcy?usp=sharing)
 
-## Project Contribution
+The demonstration should show the main user journey, including authentication, the field dashboard, cache interaction, Hunt/location behaviour, Inventory, Leaderboard/Social functionality and Profile settings.
 
-### Angie van Rooyen
+---
 
-**Student Number:** 241077
+## Project Information
 
-**Institution:** Open Window, Department of Fundamentals
-
-**Course:** Interactive Development 300
-
-**Project:** Treasi
+**Project:** Treasi  
+**Tagline:** Hide. Explore. Stay connected.  
+**Student:** Angie van Rooyen  
+**Student Number:** 241077  
+**Institution:** Open Window  
+**Course:** Interactive Development 300 (DV300)  
+**Term:** Semester 2 — Theme 3  
+**Primary Framework:** React Native + Expo SDK 54  
+**Backend:** Firebase
 
 ---
 
 ## Acknowledgements
 
-Treasi was developed using the following technologies and libraries:
+Treasi was developed using technologies and libraries including:
 
+- React
 - React Native
 - Expo
 - TypeScript
 - Firebase Authentication
 - Cloud Firestore
 - Firebase Storage
-- React Navigation
 - React Native Maps
-- React Native Reanimated
 - React Native SVG
 - Expo Location
 - Expo Sensors
 - Expo Haptics
-- Expo Font
+- Expo Screen Orientation
+- Expo Vector Icons
 - AsyncStorage
+- React Native Web
 
-The project also draws on the interaction patterns and visual language of:
+The project's visual and interaction language draws inspiration from analogue navigation equipment, national park field guides, surveying tools, archival maps, mechanical dashboards and typewriter interfaces.
 
-- Vintage field guides
-- Surveying instruments
-- Analogue navigation equipment
-- National park ranger equipment
-- Mechanical dashboards
-- Typewriter and archival design
-
-All external libraries and frameworks remain subject to their respective licences and documentation.
+Third-party frameworks and libraries remain subject to their respective licences.
 
 ---
 
-## License
+## Licence
 
-This project was created as an academic submission for Open Window's Interactive Development 300 course.
+Treasi was created as an academic submission for Open Window's Interactive Development 300 course.
 
-Unless otherwise stated, the project's original application code, visual design and project-specific assets should be treated as academic work belonging to the project author.
+Unless otherwise stated, the original Treasi application code, visual design and project-specific assets are academic work belonging to the project author.
 
-Third-party libraries, frameworks and assets remain subject to their respective licences.
+Third-party libraries, frameworks, services and assets remain subject to their respective licences and terms.
 
 ---
 
 ## Project Statement
 
-> **Treasi transforms everyday physical routes into interactive grounds for discovery and connection. By combining landscape-first interaction, GPS, compass telemetry, accelerometer input and Firebase-powered social data, the application turns a smartphone from a passive communication device into a tactile field instrument.**
+> **Treasi transforms everyday physical routes into interactive grounds for discovery and connection. By combining a landscape-first interface, live location, directional navigation, optional motion interaction and Firebase-powered social data, Treasi turns a smartphone from a passive communication device into a tactile field instrument.**
 
-**Treasi — Hide. Explore. Stay connected.**
+<p align="center">
+  <strong>Treasi — Hide. Explore. Stay connected.</strong>
+</p>
