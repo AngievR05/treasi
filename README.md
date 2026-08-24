@@ -1,7 +1,7 @@
 # Treasi
 
 <p align="center">
-  <img src="../assets/Wireframes/Cover.png" alt="Treasi cover artwork" width="100%" />
+  <img src="./app/assets/Wireframes/Cover.png" alt="Treasi cover artwork" width="100%" />
 </p>
 
 <p align="center">
@@ -13,6 +13,8 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/AngievR05/treasi"><strong>GitHub Repository</strong></a>
+  &nbsp;•&nbsp;
   <a href="https://drive.google.com/drive/folders/1_r2pFbygXuqpii-kw80xBZH0yWf4nzcy?usp=sharing"><strong>Watch the Treasi demo video</strong></a>
 </p>
 
@@ -149,30 +151,30 @@ After a successful discovery:
 
 ## Wireframes
 
-The final project keeps the visual language established during Treasi's wireframing phase. The reference images are stored in `assets/Wireframes/` and are included below so the design progression is visible directly from the repository.
+The final project keeps the visual language established during Treasi's wireframing phase. The reference images are stored in `app/assets/Wireframes/` and are included below so the design progression is visible directly from the repository.
 
 ### Splash Screen
 
 <p align="center">
-  <img src="./assets/Wireframes/Splash%20Screen.png" alt="Treasi splash screen wireframe" width="85%" />
+  <img src="./app/assets/Wireframes/Splash%20Screen.png" alt="Treasi splash screen wireframe" width="85%" />
 </p>
 
 ### Authentication
 
 <p align="center">
-  <img src="./assets/Wireframes/Auth%20Screen.png" alt="Treasi authentication screen wireframe" width="85%" />
+  <img src="./app/assets/Wireframes/Auth%20Screen.png" alt="Treasi authentication screen wireframe" width="85%" />
 </p>
 
 ### Dashboard
 
 <p align="center">
-  <img src="./assets/Wireframes/Dashboard%20Screen.png" alt="Treasi dashboard wireframe" width="85%" />
+  <img src="./app/assets/Wireframes/Dashboard%20Screen.png" alt="Treasi dashboard wireframe" width="85%" />
 </p>
 
 ### Hunt
 
 <p align="center">
-  <img src="./assets/Wireframes/Hunt%20Screen.png" alt="Treasi Hunt screen wireframe" width="85%" />
+  <img src="./app/assets/Wireframes/Hunt%20Screen.png" alt="Treasi Hunt screen wireframe" width="85%" />
 </p>
 
 ### Inventory
@@ -180,12 +182,12 @@ The final project keeps the visual language established during Treasi's wirefram
 <table>
   <tr>
     <td align="center" width="50%">
-      <img src="./assets/Wireframes/Inventory.png" alt="Treasi Inventory wireframe" width="100%" />
+      <img src="./app/assets/Wireframes/Inventory.png" alt="Treasi Inventory wireframe" width="100%" />
       <br />
       <strong>Inventory</strong>
     </td>
     <td align="center" width="50%">
-      <img src="./assets/Wireframes/Inventory-1.png" alt="Treasi Inventory alternate wireframe" width="100%" />
+      <img src="./app/assets/Wireframes/Inventory-1.png" alt="Treasi Inventory alternate wireframe" width="100%" />
       <br />
       <strong>Inventory alternate state</strong>
     </td>
@@ -195,13 +197,13 @@ The final project keeps the visual language established during Treasi's wirefram
 ### Leaderboard
 
 <p align="center">
-  <img src="./assets/Wireframes/Leaderboard.png" alt="Treasi Leaderboard wireframe" width="85%" />
+  <img src="./app/assets/Wireframes/Leaderboard.png" alt="Treasi Leaderboard wireframe" width="85%" />
 </p>
 
 ### Profile
 
 <p align="center">
-  <img src="./assets/Wireframes/Profile.png" alt="Treasi Profile wireframe" width="85%" />
+  <img src="./app/assets/Wireframes/Profile.png" alt="Treasi Profile wireframe" width="85%" />
 </p>
 
 ---
@@ -777,74 +779,74 @@ The implemented interface uses a monospaced/Courier-style field-instrument treat
 ## Project Structure
 
 ```text
-app/
-├── .expo/
-├── assets/
-│   ├── Wireframes/
-│   │   ├── Auth Screen.png
-│   │   ├── Cover.png
-│   │   ├── Dashboard Screen.png
-│   │   ├── Hunt Screen.png
-│   │   ├── Inventory-1.png
-│   │   ├── Inventory.png
-│   │   ├── Leaderboard.png
-│   │   ├── Profile.png
-│   │   └── Splash Screen.png
-│   ├── adaptive-icon.png
-│   ├── favicon.png
-│   ├── icon.png
-│   ├── Logo.svg
-│   └── splash-icon.png
+treasi/
+├── .vscode/
+├── README.md
 │
-├── src/
-│   ├── components/
-│   │   ├── FieldMap.native.tsx
-│   │   ├── FieldMap.types.ts
-│   │   ├── FieldMap.web.tsx
-│   │   ├── FieldNavBar.tsx
-│   │   └── LandscapeSplitLayout.tsx
-│   │
-│   ├── config/
-│   │   ├── firebase.d.ts
-│   │   ├── firebase.native.ts
-│   │   ├── firebase.options.ts
-│   │   ├── firebase.ts
-│   │   └── firebase.web.ts
-│   │
-│   ├── hooks/
-│   │   ├── useAuth.ts
-│   │   └── useLandscapeOrientation.ts
-│   │
-│   ├── navigation/
-│   │   └── RootNavigator.tsx
-│   │
-│   ├── screens/
-│   │   ├── Auth/
-│   │   │   ├── LoginScreen.tsx
-│   │   │   └── SignUpScreen.tsx
-│   │   ├── DashboardScreen.tsx
-│   │   ├── HuntScreen.tsx
-│   │   ├── InventoryScreen.tsx
-│   │   ├── LeaderboardScreen.tsx
-│   │   ├── OnboardingScreen.tsx
-│   │   ├── ProfileSettingsScreen.tsx
-│   │   ├── SocialScreen.tsx
-│   │   └── SplashScreen.tsx
-│   │
-│   └── types/
-│       ├── firebase-auth-react-native.d.ts
-│       ├── firestore.ts
-│       ├── navigation.ts
-│       └── svg.d.ts
-│
-├── App.tsx
-├── app.json
-├── babel.config.js
-├── index.ts
-├── metro.config.js
-├── package.json
-├── package-lock.json
-└── tsconfig.json
+└── app/
+    ├── assets/
+    │   ├── Wireframes/
+    │   │   ├── Auth Screen.png
+    │   │   ├── Cover.png
+    │   │   ├── Dashboard Screen.png
+    │   │   ├── Hunt Screen.png
+    │   │   ├── Inventory-1.png
+    │   │   ├── Inventory.png
+    │   │   ├── Leaderboard.png
+    │   │   ├── Profile.png
+    │   │   └── Splash Screen.png
+    │   └── Logo.svg
+    │
+    ├── src/
+    │   ├── components/
+    │   │   ├── FieldMap.native.tsx
+    │   │   ├── FieldMap.types.ts
+    │   │   ├── FieldMap.web.tsx
+    │   │   ├── FieldNavBar.tsx
+    │   │   └── LandscapeSplitLayout.tsx
+    │   │
+    │   ├── config/
+    │   │   ├── firebase.d.ts
+    │   │   ├── firebase.native.ts
+    │   │   ├── firebase.options.ts
+    │   │   ├── firebase.ts
+    │   │   └── firebase.web.ts
+    │   │
+    │   ├── hooks/
+    │   │   ├── useAuth.ts
+    │   │   └── useLandscapeOrientation.ts
+    │   │
+    │   ├── navigation/
+    │   │   └── RootNavigator.tsx
+    │   │
+    │   ├── screens/
+    │   │   ├── Auth/
+    │   │   │   ├── LoginScreen.tsx
+    │   │   │   └── SignUpScreen.tsx
+    │   │   ├── DashboardScreen.tsx
+    │   │   ├── HuntScreen.tsx
+    │   │   ├── InventoryScreen.tsx
+    │   │   ├── LeaderboardScreen.tsx
+    │   │   ├── OnboardingScreen.tsx
+    │   │   ├── ProfileSettingsScreen.tsx
+    │   │   ├── SocialScreen.tsx
+    │   │   └── SplashScreen.tsx
+    │   │
+    │   └── types/
+    │       ├── firebase-auth-react-native.d.ts
+    │       ├── firestore.ts
+    │       ├── navigation.ts
+    │       └── svg.d.ts
+    │
+    ├── App.tsx
+    ├── DemoVideo.txt
+    ├── app.json
+    ├── babel.config.js
+    ├── index.ts
+    ├── metro.config.js
+    ├── package.json
+    ├── package-lock.json
+    └── tsconfig.json
 ```
 
 > `node_modules/`, `.expo/` and local environment secrets should not be committed to the repository.
@@ -893,11 +895,9 @@ Firebase client configuration does not replace security rules. Firestore and Sto
 ### 1. Clone the repository
 
 ```bash
-git clone <YOUR-GITHUB-REPOSITORY-URL>
+git clone https://github.com/AngievR05/treasi.git
 cd treasi/app
 ```
-
-Replace `<YOUR-GITHUB-REPOSITORY-URL>` with the final repository URL before submission.
 
 ### 2. Install dependencies
 
@@ -1200,6 +1200,7 @@ The demonstration should show the main user journey, including authentication, t
 ## Project Information
 
 **Project:** Treasi  
+**Repository:** https://github.com/AngievR05/treasi  
 **Tagline:** Hide. Explore. Stay connected.  
 **Student:** Angie van Rooyen  
 **Student Number:** 241077  
