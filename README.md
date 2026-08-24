@@ -1,7 +1,7 @@
 # Treasi
 
 <p align="center">
-  <img src="./assets/Wireframes/Cover.png" alt="Treasi cover artwork" width="100%" />
+  <img src="../assets/Wireframes/Cover.png" alt="Treasi cover artwork" width="100%" />
 </p>
 
 <p align="center">
