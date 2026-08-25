@@ -1,4 +1,5 @@
 import React, {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -10,6 +11,7 @@ import {
   ActivityIndicator,
   Animated,
   Easing,
+  Keyboard,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -110,7 +112,6 @@ const COLOURS = {
   success200: '#DDEFD9',
 
   danger100: '#FFF0EB',
-  danger300: '#FFB4A2',
 
   white: '#FFFFFF',
 } as const;
@@ -129,7 +130,7 @@ const MONO_BOLD_FONT =
 /* Error helpers                                                              */
 /* -------------------------------------------------------------------------- */
 
-// Converts Firebase Authentication errors into readable sign-in feedback.
+// Converts Firebase sign-in errors into safe user-facing messages.
 const getLoginErrorMessage = (
   error: unknown,
 ): string => {
@@ -139,9 +140,7 @@ const getLoginErrorMessage = (
     return 'Sign in could not be completed. Please try again.';
   }
 
-  switch (
-    error.code
-  ) {
+  switch (error.code) {
     case 'auth/invalid-email':
       return 'Enter a valid email address.';
 
@@ -180,9 +179,7 @@ const getProfileErrorMessage = (
     return 'Your account was verified, but Treasi could not load your Explorer profile.';
   }
 
-  switch (
-    error.code
-  ) {
+  switch (error.code) {
     case 'permission-denied':
     case 'firestore/permission-denied':
       return 'Your account was verified, but access to your Explorer profile was denied.';
@@ -200,7 +197,7 @@ const getProfileErrorMessage = (
   }
 };
 
-// Converts reset errors without exposing whether an account exists.
+// Keeps password-reset responses from exposing registered email addresses.
 const getPasswordResetErrorMessage = (
   error: unknown,
 ): string => {
@@ -210,9 +207,7 @@ const getPasswordResetErrorMessage = (
     return 'The passcode reset request could not be completed. Please try again.';
   }
 
-  switch (
-    error.code
-  ) {
+  switch (error.code) {
     case 'auth/invalid-email':
       return 'Enter a valid email address before requesting a passcode reset.';
 
@@ -225,10 +220,6 @@ const getPasswordResetErrorMessage = (
     case 'auth/operation-not-allowed':
       return 'Passcode reset is currently unavailable.';
 
-    /*
-     * Do not expose whether a specific email address has an account.
-     * Firebase email-enumeration protection may suppress this error.
-     */
     case 'auth/user-not-found':
       return '';
 
@@ -241,7 +232,7 @@ const getPasswordResetErrorMessage = (
 /* Explorer profile recovery                                                  */
 /* -------------------------------------------------------------------------- */
 
-// Creates a safe callsign only when an older Auth account has no profile.
+// Creates a compatible fallback callsign for legacy Auth-only accounts.
 const buildFallbackUsername = (
   email: string,
   displayName: string | null,
@@ -287,7 +278,7 @@ const buildFallbackUsername = (
   );
 };
 
-// Restores a missing profile without changing an existing user's preferences.
+// Restores a missing Firestore profile without overwriting existing accounts.
 const ensureExplorerProfile =
   async (
     user: User,
@@ -305,8 +296,8 @@ const ensureExplorerProfile =
       );
 
     /*
-     * Existing profiles are deliberately left untouched.
-     * Login must never overwrite saved preferences or points.
+     * Login must never reset the preferences or score of an
+     * Explorer who already has a Firestore profile.
      */
     if (
       snapshot.exists()
@@ -348,10 +339,6 @@ const ensureExplorerProfile =
         totalPoints:
           0,
 
-        /*
-         * Login is reached after Treasi's onboarding flow.
-         * This also safely repairs older Auth-only accounts.
-         */
         hasCompletedOnboarding:
           true,
 
@@ -387,7 +374,7 @@ const ensureExplorerProfile =
   };
 
 /* -------------------------------------------------------------------------- */
-/* Login screen                                                               */
+/* Login Screen                                                               */
 /* -------------------------------------------------------------------------- */
 
 export const LoginScreen:
@@ -412,25 +399,11 @@ export const LoginScreen:
     const isCompact =
       height < 430;
 
-    /* ---------------------------------------------------------------------- */
-    /* Input refs                                                             */
-    /* ---------------------------------------------------------------------- */
-
-    const emailInputRef =
-      useRef<TextInput>(
-        null,
-      );
-
-    const passwordInputRef =
-      useRef<TextInput>(
-        null,
-      );
-
     const isMountedRef =
       useRef(true);
 
     /* ---------------------------------------------------------------------- */
-    /* Form state                                                             */
+    /* Form                                                                   */
     /* ---------------------------------------------------------------------- */
 
     const [
@@ -460,7 +433,7 @@ export const LoginScreen:
       );
 
     /* ---------------------------------------------------------------------- */
-    /* Processing state                                                       */
+    /* Processing                                                             */
     /* ---------------------------------------------------------------------- */
 
     const [
@@ -481,17 +454,17 @@ export const LoginScreen:
       errorMessage,
       setErrorMessage,
     ] =
-      useState<
-        string | null
-      >(null);
+      useState<string | null>(
+        null,
+      );
 
     const [
       successMessage,
       setSuccessMessage,
     ] =
-      useState<
-        string | null
-      >(null);
+      useState<string | null>(
+        null,
+      );
 
     const [
       reduceMotionEnabled,
@@ -500,7 +473,7 @@ export const LoginScreen:
       useState(false);
 
     /* ---------------------------------------------------------------------- */
-    /* Animation values                                                       */
+    /* Animation                                                              */
     /* ---------------------------------------------------------------------- */
 
     const screenFadeAnim =
@@ -539,7 +512,7 @@ export const LoginScreen:
     }, []);
 
     /* ---------------------------------------------------------------------- */
-    /* Reduce Motion                                                          */
+    /* Reduced Motion                                                         */
     /* ---------------------------------------------------------------------- */
 
     useEffect(() => {
@@ -562,10 +535,7 @@ export const LoginScreen:
           },
         )
         .catch(() => {
-          /*
-           * Static behaviour remains safe if the accessibility
-           * preference cannot be read.
-           */
+          // Static behaviour remains available if this preference cannot load.
         });
 
       const subscription =
@@ -635,7 +605,7 @@ export const LoginScreen:
     ]);
 
     /* ---------------------------------------------------------------------- */
-    /* Derived state                                                          */
+    /* Derived values                                                         */
     /* ---------------------------------------------------------------------- */
 
     const isLoading =
@@ -684,463 +654,524 @@ export const LoginScreen:
     /* ---------------------------------------------------------------------- */
 
     const clearFeedback =
-      (): void => {
-        if (
-          errorMessage
-        ) {
+      useCallback(
+        (): void => {
           setErrorMessage(
             null,
           );
-        }
 
-        if (
-          successMessage
-        ) {
           setSuccessMessage(
             null,
           );
-        }
 
-        feedbackFadeAnim.setValue(
-          1,
-        );
-      };
-
-    const animateFeedback =
-      (): void => {
-        feedbackFadeAnim.stopAnimation();
-
-        if (
-          reduceMotionEnabled
-        ) {
           feedbackFadeAnim.setValue(
             1,
           );
-
-          return;
-        }
-
-        feedbackFadeAnim.setValue(
-          0,
-        );
-
-        Animated.timing(
+        },
+        [
           feedbackFadeAnim,
-          {
-            toValue:
+        ],
+      );
+
+    const animateFeedback =
+      useCallback(
+        (): void => {
+          feedbackFadeAnim.stopAnimation();
+
+          if (
+            reduceMotionEnabled
+          ) {
+            feedbackFadeAnim.setValue(
               1,
+            );
 
-            duration:
-              180,
+            return;
+          }
 
-            easing:
-              Easing.out(
-                Easing.cubic,
-              ),
+          feedbackFadeAnim.setValue(
+            0,
+          );
 
-            useNativeDriver:
-              true,
-          },
-        ).start();
-      };
+          Animated.timing(
+            feedbackFadeAnim,
+            {
+              toValue:
+                1,
+
+              duration:
+                180,
+
+              easing:
+                Easing.out(
+                  Easing.cubic,
+                ),
+
+              useNativeDriver:
+                true,
+            },
+          ).start();
+        },
+        [
+          feedbackFadeAnim,
+          reduceMotionEnabled,
+        ],
+      );
 
     const displayError =
-      (
-        message: string,
-      ): void => {
-        if (
-          !isMountedRef.current
-        ) {
-          return;
-        }
+      useCallback(
+        (
+          message: string,
+        ): void => {
+          if (
+            !isMountedRef.current
+          ) {
+            return;
+          }
 
-        setSuccessMessage(
-          null,
-        );
-
-        setErrorMessage(
-          message,
-        );
-
-        animateFeedback();
-
-        AccessibilityInfo
-          .announceForAccessibility(
-            `Sign in error. ${message}`,
+          setSuccessMessage(
+            null,
           );
-      };
 
-    const displaySuccess =
-      (
-        message: string,
-      ): void => {
-        if (
-          !isMountedRef.current
-        ) {
-          return;
-        }
-
-        setErrorMessage(
-          null,
-        );
-
-        setSuccessMessage(
-          message,
-        );
-
-        animateFeedback();
-
-        AccessibilityInfo
-          .announceForAccessibility(
+          setErrorMessage(
             message,
           );
-      };
+
+          animateFeedback();
+
+          AccessibilityInfo
+            .announceForAccessibility(
+              `Sign in error. ${message}`,
+            );
+        },
+        [
+          animateFeedback,
+        ],
+      );
+
+    const displaySuccess =
+      useCallback(
+        (
+          message: string,
+        ): void => {
+          if (
+            !isMountedRef.current
+          ) {
+            return;
+          }
+
+          setErrorMessage(
+            null,
+          );
+
+          setSuccessMessage(
+            message,
+          );
+
+          animateFeedback();
+
+          AccessibilityInfo
+            .announceForAccessibility(
+              message,
+            );
+        },
+        [
+          animateFeedback,
+        ],
+      );
 
     /* ---------------------------------------------------------------------- */
-    /* Press animation                                                        */
+    /* Button animation                                                       */
     /* ---------------------------------------------------------------------- */
 
     const animateButtonScale =
-      (
-        value: number,
-      ): void => {
-        buttonScaleAnim.stopAnimation();
+      useCallback(
+        (
+          value: number,
+        ): void => {
+          buttonScaleAnim.stopAnimation();
 
-        if (
-          reduceMotionEnabled
-        ) {
-          buttonScaleAnim.setValue(
-            1,
-          );
+          if (
+            reduceMotionEnabled
+          ) {
+            buttonScaleAnim.setValue(
+              1,
+            );
 
-          return;
-        }
+            return;
+          }
 
-        Animated.spring(
+          Animated.spring(
+            buttonScaleAnim,
+            {
+              toValue:
+                value,
+
+              damping:
+                17,
+
+              stiffness:
+                230,
+
+              mass:
+                0.75,
+
+              useNativeDriver:
+                true,
+            },
+          ).start();
+        },
+        [
           buttonScaleAnim,
-          {
-            toValue:
-              value,
-
-            damping:
-              17,
-
-            stiffness:
-              230,
-
-            mass:
-              0.75,
-
-            useNativeDriver:
-              true,
-          },
-        ).start();
-      };
+          reduceMotionEnabled,
+        ],
+      );
 
     /* ---------------------------------------------------------------------- */
-    /* Input                                                                  */
+    /* Input handling                                                         */
     /* ---------------------------------------------------------------------- */
 
     const handleEmailChange =
-      (
-        value: string,
-      ): void => {
-        clearFeedback();
+      useCallback(
+        (
+          value: string,
+        ): void => {
+          clearFeedback();
 
-        setEmail(
-          value,
-        );
-      };
+          /*
+           * Avoid transforming the value while the native field is focused.
+           * Firebase receives a normalised copy only when the form submits.
+           */
+          setEmail(
+            value,
+          );
+        },
+        [
+          clearFeedback,
+        ],
+      );
 
     const handlePasswordChange =
-      (
-        value: string,
-      ): void => {
-        clearFeedback();
+      useCallback(
+        (
+          value: string,
+        ): void => {
+          clearFeedback();
 
-        setPassword(
-          value,
-        );
-      };
+          setPassword(
+            value,
+          );
+        },
+        [
+          clearFeedback,
+        ],
+      );
 
     /* ---------------------------------------------------------------------- */
     /* Validation                                                             */
     /* ---------------------------------------------------------------------- */
 
     const validateLogin =
-      (): boolean => {
-        if (
-          !normalisedEmail
-        ) {
-          displayError(
-            'Enter your Explorer email address.',
-          );
+      useCallback(
+        (): boolean => {
+          if (
+            !normalisedEmail
+          ) {
+            displayError(
+              'Enter your Explorer email address.',
+            );
 
-          emailInputRef.current?.focus();
+            return false;
+          }
 
-          return false;
-        }
+          if (
+            !emailValid
+          ) {
+            displayError(
+              'Enter a valid email address.',
+            );
 
-        if (
-          !emailValid
-        ) {
-          displayError(
-            'Enter a valid email address.',
-          );
+            return false;
+          }
 
-          emailInputRef.current?.focus();
+          if (
+            !password
+          ) {
+            displayError(
+              'Enter your passcode.',
+            );
 
-          return false;
-        }
+            return false;
+          }
 
-        if (
-          !password
-        ) {
-          displayError(
-            'Enter your passcode.',
-          );
-
-          passwordInputRef.current?.focus();
-
-          return false;
-        }
-
-        return true;
-      };
+          return true;
+        },
+        [
+          displayError,
+          emailValid,
+          normalisedEmail,
+          password,
+        ],
+      );
 
     /* ---------------------------------------------------------------------- */
-    /* Login                                                                  */
+    /* Sign in                                                                */
     /* ---------------------------------------------------------------------- */
 
     const handleLogin =
-      async (): Promise<void> => {
-        if (
-          isBusy
-        ) {
-          return;
-        }
-
-        clearFeedback();
-
-        if (
-          !validateLogin()
-        ) {
-          return;
-        }
-
-        setLoginStage(
-          'authenticating',
-        );
-
-        try {
-          const credential =
-            await signInWithEmailAndPassword(
-              auth,
-              normalisedEmail,
-              password,
-            );
-
+      useCallback(
+        async (): Promise<void> => {
           if (
-            !isMountedRef.current
+            isBusy
           ) {
             return;
           }
 
+          clearFeedback();
+
+          if (
+            !validateLogin()
+          ) {
+            return;
+          }
+
+          Keyboard.dismiss();
+
+          setFocusedField(
+            null,
+          );
+
           setLoginStage(
-            'profile',
+            'authenticating',
           );
 
           try {
-            /*
-             * Existing Firestore profiles are read only.
-             * No saved settings, points or onboarding fields are
-             * overwritten during normal sign-in.
-             */
-            await ensureExplorerProfile(
-              credential.user,
-            );
-          } catch (
-            profileError: unknown
-          ) {
-            if (__DEV__) {
-              console.warn(
-                '[Treasi] Explorer profile verification failed:',
-                profileError,
+            const credential =
+              await signInWithEmailAndPassword(
+                auth,
+                normalisedEmail,
+                password,
               );
+
+            if (
+              !isMountedRef.current
+            ) {
+              return;
             }
 
-            /*
-             * Protected screens rely on Firestore profile data.
-             * Clean up the Auth session if profile recovery fails.
-             */
+            setLoginStage(
+              'profile',
+            );
+
             try {
-              await signOut(
-                auth,
+              /*
+               * Existing profiles remain untouched during normal login.
+               */
+              await ensureExplorerProfile(
+                credential.user,
               );
             } catch (
-              signOutError: unknown
+              profileError: unknown
             ) {
               if (__DEV__) {
                 console.warn(
-                  '[Treasi] Unable to clean up failed login session:',
-                  signOutError,
+                  '[Treasi] Explorer profile verification failed:',
+                  profileError,
                 );
               }
+
+              /*
+               * Do not leave an authenticated session active when the
+               * required Explorer profile could not be established.
+               */
+              try {
+                await signOut(
+                  auth,
+                );
+              } catch (
+                signOutError: unknown
+              ) {
+                if (__DEV__) {
+                  console.warn(
+                    '[Treasi] Unable to clean up failed login session:',
+                    signOutError,
+                  );
+                }
+              }
+
+              if (
+                isMountedRef.current
+              ) {
+                setLoginStage(
+                  'idle',
+                );
+
+                displayError(
+                  getProfileErrorMessage(
+                    profileError,
+                  ),
+                );
+              }
+
+              return;
             }
 
             if (
-              isMountedRef.current
+              !isMountedRef.current
             ) {
-              setLoginStage(
-                'idle',
-              );
-
-              displayError(
-                getProfileErrorMessage(
-                  profileError,
-                ),
-              );
+              return;
             }
 
-            return;
-          }
-
-          if (
-            !isMountedRef.current
-          ) {
-            return;
-          }
-
-          setLoginStage(
-            'idle',
-          );
-
-          AccessibilityInfo
-            .announceForAccessibility(
-              'Signed in successfully.',
+            setLoginStage(
+              'idle',
             );
 
-          /*
-           * App.tsx resolves onboarding and performs the final route.
-           */
-          onLoginSuccess();
-        } catch (
-          error: unknown
-        ) {
-          if (
-            !isMountedRef.current
+            AccessibilityInfo
+              .announceForAccessibility(
+                'Signed in successfully.',
+              );
+
+            /*
+             * App.tsx performs the final onboarding/authenticated route.
+             */
+            onLoginSuccess();
+          } catch (
+            error: unknown
           ) {
-            return;
+            if (
+              !isMountedRef.current
+            ) {
+              return;
+            }
+
+            setLoginStage(
+              'idle',
+            );
+
+            displayError(
+              getLoginErrorMessage(
+                error,
+              ),
+            );
           }
-
-          setLoginStage(
-            'idle',
-          );
-
-          displayError(
-            getLoginErrorMessage(
-              error,
-            ),
-          );
-        }
-      };
+        },
+        [
+          clearFeedback,
+          displayError,
+          isBusy,
+          normalisedEmail,
+          onLoginSuccess,
+          password,
+          validateLogin,
+        ],
+      );
 
     /* ---------------------------------------------------------------------- */
     /* Password reset                                                         */
     /* ---------------------------------------------------------------------- */
 
     const handlePasswordReset =
-      async (): Promise<void> => {
-        if (
-          isBusy
-        ) {
-          return;
-        }
-
-        clearFeedback();
-
-        if (
-          !normalisedEmail
-        ) {
-          displayError(
-            'Enter your email address first, then select Forgot Passcode.',
-          );
-
-          emailInputRef.current?.focus();
-
-          return;
-        }
-
-        if (
-          !emailValid
-        ) {
-          displayError(
-            'Enter a valid email address before requesting a passcode reset.',
-          );
-
-          emailInputRef.current?.focus();
-
-          return;
-        }
-
-        setIsResettingPassword(
-          true,
-        );
-
-        try {
-          await sendPasswordResetEmail(
-            auth,
-            normalisedEmail,
-          );
-
+      useCallback(
+        async (): Promise<void> => {
           if (
-            !isMountedRef.current
+            isBusy
           ) {
             return;
           }
 
-          displaySuccess(
-            'If an Explorer account exists for that email address, Firebase has sent passcode reset instructions.',
-          );
-        } catch (
-          error: unknown
-        ) {
-          if (
-            !isMountedRef.current
-          ) {
-            return;
-          }
+          clearFeedback();
 
-          const message =
-            getPasswordResetErrorMessage(
-              error,
+          if (
+            !normalisedEmail
+          ) {
+            displayError(
+              'Enter your email address first, then select Forgot Passcode.',
             );
 
-          /*
-           * Treat user-not-found as a generic successful request
-           * so the screen does not expose registered addresses.
-           */
+            return;
+          }
+
           if (
-            message === ''
+            !emailValid
           ) {
+            displayError(
+              'Enter a valid email address before requesting a passcode reset.',
+            );
+
+            return;
+          }
+
+          Keyboard.dismiss();
+
+          setFocusedField(
+            null,
+          );
+
+          setIsResettingPassword(
+            true,
+          );
+
+          try {
+            await sendPasswordResetEmail(
+              auth,
+              normalisedEmail,
+            );
+
+            if (
+              !isMountedRef.current
+            ) {
+              return;
+            }
+
             displaySuccess(
               'If an Explorer account exists for that email address, Firebase has sent passcode reset instructions.',
             );
-          } else {
-            displayError(
-              message,
-            );
-          }
-        } finally {
-          if (
-            isMountedRef.current
+          } catch (
+            error: unknown
           ) {
-            setIsResettingPassword(
-              false,
-            );
+            if (
+              !isMountedRef.current
+            ) {
+              return;
+            }
+
+            const message =
+              getPasswordResetErrorMessage(
+                error,
+              );
+
+            /*
+             * Preserve email-enumeration protection.
+             */
+            if (
+              message === ''
+            ) {
+              displaySuccess(
+                'If an Explorer account exists for that email address, Firebase has sent passcode reset instructions.',
+              );
+            } else {
+              displayError(
+                message,
+              );
+            }
+          } finally {
+            if (
+              isMountedRef.current
+            ) {
+              setIsResettingPassword(
+                false,
+              );
+            }
           }
-        }
-      };
+        },
+        [
+          clearFeedback,
+          displayError,
+          displaySuccess,
+          emailValid,
+          isBusy,
+          normalisedEmail,
+        ],
+      );
 
     /* ---------------------------------------------------------------------- */
     /* Render                                                                 */
@@ -1157,6 +1188,7 @@ export const LoginScreen:
             ? 'padding'
             : undefined
         }
+        keyboardVerticalOffset={0}
       >
         <Animated.View
           style={[
@@ -1169,6 +1201,9 @@ export const LoginScreen:
           ]}
         >
           <ScrollView
+            style={
+              styles.scrollView
+            }
             contentContainerStyle={[
               styles.scrollContainer,
 
@@ -1208,7 +1243,10 @@ export const LoginScreen:
             showsVerticalScrollIndicator={
               false
             }
-            contentInsetAdjustmentBehavior="automatic"
+            bounces={
+              Platform.OS ===
+              'ios'
+            }
           >
             <View
               style={[
@@ -1301,7 +1339,7 @@ export const LoginScreen:
                   </View>
 
                   {/* -------------------------------------------------------- */}
-                  {/* Error feedback                                           */}
+                  {/* Error                                                    */}
                   {/* -------------------------------------------------------- */}
 
                   {errorMessage ? (
@@ -1347,7 +1385,7 @@ export const LoginScreen:
                   ) : null}
 
                   {/* -------------------------------------------------------- */}
-                  {/* Success feedback                                         */}
+                  {/* Success                                                  */}
                   {/* -------------------------------------------------------- */}
 
                   {successMessage ? (
@@ -1403,13 +1441,14 @@ export const LoginScreen:
                       styles.inputStack
                     }
                   >
+                    {/* Email */}
+
                     <View
                       style={
                         styles.fieldGroup
                       }
                     >
                       <Text
-                        nativeID="login-email-label"
                         style={
                           styles.inputLabel
                         }
@@ -1424,25 +1463,31 @@ export const LoginScreen:
                           focusedField ===
                             'email' &&
                             styles.inputContainerFocused,
+
+                          isBusy &&
+                            styles.inputContainerDisabled,
                         ]}
                       >
-                        <Ionicons
+                        <View
                           accessible={
                             false
                           }
-                          importantForAccessibility="no"
-                          name="mail-outline"
-                          size={20}
-                          color={
-                            COLOURS.ink900
+                          importantForAccessibility="no-hide-descendants"
+                          style={
+                            styles.inputIconContainer
                           }
-                        />
+                        >
+                          <Ionicons
+                            name="mail-outline"
+                            size={20}
+                            color={
+                              COLOURS.ink900
+                            }
+                          />
+                        </View>
 
                         <TextInput
-                          ref={
-                            emailInputRef
-                          }
-                          accessibilityLabelledBy="login-email-label"
+                          accessibilityLabel="Explorer email"
                           accessibilityHint="Enter the email address registered to your Treasi account."
                           autoCapitalize="none"
                           autoComplete="email"
@@ -1469,11 +1514,6 @@ export const LoginScreen:
                               'email',
                             )
                           }
-                          onSubmitEditing={() =>
-                            passwordInputRef
-                              .current
-                              ?.focus()
-                          }
                           placeholder="name@example.com"
                           placeholderTextColor={
                             COLOURS.bronze600
@@ -1482,10 +1522,12 @@ export const LoginScreen:
                           selectionColor={
                             COLOURS.rust700
                           }
+                          spellCheck={
+                            false
+                          }
                           style={
                             styles.textInput
                           }
-                          textContentType="emailAddress"
                           value={
                             email
                           }
@@ -1493,13 +1535,14 @@ export const LoginScreen:
                       </View>
                     </View>
 
+                    {/* Password */}
+
                     <View
                       style={
                         styles.fieldGroup
                       }
                     >
                       <Text
-                        nativeID="login-password-label"
                         style={
                           styles.inputLabel
                         }
@@ -1514,25 +1557,31 @@ export const LoginScreen:
                           focusedField ===
                             'password' &&
                             styles.inputContainerFocused,
+
+                          isBusy &&
+                            styles.inputContainerDisabled,
                         ]}
                       >
-                        <Ionicons
+                        <View
                           accessible={
                             false
                           }
-                          importantForAccessibility="no"
-                          name="lock-closed-outline"
-                          size={20}
-                          color={
-                            COLOURS.ink900
+                          importantForAccessibility="no-hide-descendants"
+                          style={
+                            styles.inputIconContainer
                           }
-                        />
+                        >
+                          <Ionicons
+                            name="lock-closed-outline"
+                            size={20}
+                            color={
+                              COLOURS.ink900
+                            }
+                          />
+                        </View>
 
                         <TextInput
-                          ref={
-                            passwordInputRef
-                          }
-                          accessibilityLabelledBy="login-password-label"
+                          accessibilityLabel="Passcode"
                           accessibilityHint="Enter the passcode for your Treasi account."
                           autoCapitalize="none"
                           autoComplete="current-password"
@@ -1542,6 +1591,7 @@ export const LoginScreen:
                           editable={
                             !isBusy
                           }
+                          keyboardType="default"
                           maxLength={
                             MAX_PASSWORD_LENGTH
                           }
@@ -1572,10 +1622,12 @@ export const LoginScreen:
                           selectionColor={
                             COLOURS.rust700
                           }
+                          spellCheck={
+                            false
+                          }
                           style={
                             styles.textInput
                           }
-                          textContentType="password"
                           value={
                             password
                           }
@@ -1588,11 +1640,8 @@ export const LoginScreen:
                               ? 'Hide passcode'
                               : 'Show passcode'
                           }
-                          accessibilityHint="Changes whether the passcode is visible on screen."
+                          accessibilityHint="Changes whether your passcode is visible."
                           accessibilityState={{
-                            expanded:
-                              showPassword,
-
                             disabled:
                               isBusy,
                           }}
@@ -1639,7 +1688,7 @@ export const LoginScreen:
                       <Pressable
                         accessibilityRole="button"
                         accessibilityLabel="Forgot passcode"
-                        accessibilityHint="Sends Firebase passcode reset instructions to the email address entered above."
+                        accessibilityHint="Sends passcode reset instructions to the email address entered above."
                         accessibilityState={{
                           disabled:
                             isBusy,
@@ -1699,7 +1748,7 @@ export const LoginScreen:
                   </View>
 
                   {/* -------------------------------------------------------- */}
-                  {/* Sign-in action                                           */}
+                  {/* Login                                                    */}
                   {/* -------------------------------------------------------- */}
 
                   <Animated.View
@@ -1723,7 +1772,7 @@ export const LoginScreen:
                           ? loadingLabel
                           : 'Enter the Treasi field'
                       }
-                      accessibilityHint="Signs in to Treasi with your email address and passcode."
+                      accessibilityHint="Signs in with your email address and passcode."
                       accessibilityState={{
                         disabled:
                           isBusy,
@@ -1787,24 +1836,42 @@ export const LoginScreen:
                           </Text>
                         </View>
                       ) : (
-                        <Text
-                          maxFontSizeMultiplier={
-                            1.5
-                          }
-                          style={
-                            styles.buttonText
-                          }
-                        >
-                          ENTER THE FIELD
-                        </Text>
+                        <>
+                          <Ionicons
+                            accessible={
+                              false
+                            }
+                            importantForAccessibility="no"
+                            name="log-in-outline"
+                            size={18}
+                            color={
+                              COLOURS.parchment200
+                            }
+                          />
+
+                          <Text
+                            maxFontSizeMultiplier={
+                              1.5
+                            }
+                            style={
+                              styles.buttonText
+                            }
+                          >
+                            ENTER THE FIELD
+                          </Text>
+                        </>
                       )}
                     </Pressable>
                   </Animated.View>
 
+                  {/* -------------------------------------------------------- */}
+                  {/* Registration                                             */}
+                  {/* -------------------------------------------------------- */}
+
                   <Pressable
                     accessibilityRole="link"
-                    accessibilityLabel="Register a new Explorer account"
-                    accessibilityHint="Opens the Treasi sign-up screen."
+                    accessibilityLabel="Create a new Explorer account"
+                    accessibilityHint="Opens the Treasi registration screen."
                     accessibilityState={{
                       disabled:
                         isBusy,
@@ -1813,9 +1880,15 @@ export const LoginScreen:
                       isBusy
                     }
                     hitSlop={4}
-                    onPress={
-                      onNavigateSignUp
-                    }
+                    onPress={() => {
+                      Keyboard.dismiss();
+
+                      setFocusedField(
+                        null,
+                      );
+
+                      onNavigateSignUp();
+                    }}
                     style={({
                       pressed,
                     }) => [
@@ -1841,7 +1914,7 @@ export const LoginScreen:
               </View>
 
               {/* ============================================================ */}
-              {/* 40% — FIELD ACCESS INFORMATION                              */}
+              {/* 40% — FIELD INFORMATION                                     */}
               {/* ============================================================ */}
 
               <View
@@ -1968,7 +2041,7 @@ export const LoginScreen:
                         styles.infoDescription
                       }
                     >
-                      Your email address and passcode are verified by Firebase Authentication.
+                      Your email address and passcode are verified securely by Firebase Authentication.
                     </Text>
                   </View>
 
@@ -2011,7 +2084,7 @@ export const LoginScreen:
                         styles.infoDescription
                       }
                     >
-                      Signing in reads your existing Explorer profile. It does not reset your haptics, motion, battery or interface preferences.
+                      Signing in reads your Explorer profile without resetting your points or field preferences.
                     </Text>
                   </View>
 
@@ -2054,7 +2127,7 @@ export const LoginScreen:
                         styles.infoDescription
                       }
                     >
-                      After successful authentication, Treasi restores your Firebase session when the app starts again.
+                      Firebase restores your authenticated session when Treasi starts again.
                     </Text>
                   </View>
 
@@ -2097,7 +2170,7 @@ export const LoginScreen:
                         styles.infoDescription
                       }
                     >
-                      Signing in does not request or change location and motion permissions. Those are handled by the relevant field features.
+                      Login does not request location or motion access. Field features request only the permissions they require.
                     </Text>
                   </View>
                 </View>
@@ -2148,6 +2221,7 @@ const styles =
   StyleSheet.create({
     fullScreenChassis: {
       flex: 1,
+
       backgroundColor:
         COLOURS.forest900,
     },
@@ -2156,21 +2230,32 @@ const styles =
       flex: 1,
     },
 
+    scrollView: {
+      flex: 1,
+    },
+
     scrollContainer: {
       flexGrow: 1,
+
       width: '100%',
+
       justifyContent:
         'center',
+
       alignItems:
         'center',
     },
 
     layoutSplitWrapper: {
       width: '100%',
+
       maxWidth: 1180,
+
       gap: 16,
+
       alignItems:
         'stretch',
+
       justifyContent:
         'center',
     },
@@ -2193,6 +2278,7 @@ const styles =
 
     flexShrinkContainer: {
       flex: 1,
+
       minWidth: 0,
     },
 
@@ -2279,8 +2365,7 @@ const styles =
 
       lineHeight: 16,
 
-      fontWeight:
-        '700',
+      fontWeight: '700',
 
       letterSpacing: 0.75,
     },
@@ -2303,8 +2388,7 @@ const styles =
 
       lineHeight: 41,
 
-      fontWeight:
-        '900',
+      fontWeight: '900',
 
       letterSpacing: 5,
 
@@ -2331,8 +2415,7 @@ const styles =
 
       lineHeight: 20,
 
-      fontStyle:
-        'italic',
+      fontStyle: 'italic',
 
       textAlign:
         'center',
@@ -2373,6 +2456,8 @@ const styles =
     errorText: {
       flex: 1,
 
+      minWidth: 0,
+
       color:
         COLOURS.rust800,
 
@@ -2383,8 +2468,7 @@ const styles =
 
       lineHeight: 19,
 
-      fontWeight:
-        '700',
+      fontWeight: '700',
     },
 
     successBox: {
@@ -2418,6 +2502,8 @@ const styles =
     successText: {
       flex: 1,
 
+      minWidth: 0,
+
       color:
         COLOURS.success800,
 
@@ -2428,8 +2514,7 @@ const styles =
 
       lineHeight: 18,
 
-      fontWeight:
-        '700',
+      fontWeight: '700',
     },
 
     /* ---------------------------------------------------------------------- */
@@ -2461,8 +2546,7 @@ const styles =
 
       lineHeight: 19,
 
-      fontWeight:
-        '800',
+      fontWeight: '800',
 
       letterSpacing: 0.8,
     },
@@ -2470,21 +2554,13 @@ const styles =
     inputContainer: {
       width: '100%',
 
-      minHeight: 52,
+      minHeight: 56,
 
       flexDirection:
         'row',
 
       alignItems:
         'center',
-
-      gap: 10,
-
-      paddingLeft: 12,
-
-      paddingRight: 4,
-
-      paddingVertical: 4,
 
       backgroundColor:
         COLOURS.parchment100,
@@ -2495,25 +2571,33 @@ const styles =
         COLOURS.bronze600,
 
       borderRadius: 6,
+
+      overflow: 'hidden',
     },
 
     inputContainerFocused: {
       borderColor:
         COLOURS.rust700,
 
-      shadowColor:
-        COLOURS.rust700,
+      borderWidth: 2,
+    },
 
-      shadowOffset: {
-        width: 0,
-        height: 0,
-      },
+    inputContainerDisabled: {
+      opacity: 0.66,
+    },
 
-      shadowOpacity: 0.18,
+    inputIconContainer: {
+      width: 46,
 
-      shadowRadius: 4,
+      minHeight: 52,
 
-      elevation: 2,
+      justifyContent:
+        'center',
+
+      alignItems:
+        'center',
+
+      flexShrink: 0,
     },
 
     textInput: {
@@ -2521,10 +2605,21 @@ const styles =
 
       minWidth: 0,
 
-      paddingVertical: 9,
+      minHeight: 52,
+
+      paddingHorizontal: 4,
+
+      paddingVertical:
+        Platform.OS ===
+        'android'
+          ? 8
+          : 10,
 
       color:
         COLOURS.ink900,
+
+      backgroundColor:
+        'transparent',
 
       fontFamily:
         MONO_FONT,
@@ -2532,12 +2627,29 @@ const styles =
       fontSize: 16,
 
       lineHeight: 22,
+
+      textAlignVertical:
+        'center',
+
+      /*
+       * Removes the default Android TextInput underline while keeping
+       * the custom Treasi field border on the surrounding container.
+       */
+      ...(Platform.OS ===
+      'android'
+        ? {
+            paddingTop: 8,
+            paddingBottom: 8,
+          }
+        : {}),
     },
 
     eyeButton: {
-      minWidth: 48,
+      width: 52,
 
-      minHeight: 48,
+      minHeight: 52,
+
+      flexShrink: 0,
 
       justifyContent:
         'center',
@@ -2578,8 +2690,7 @@ const styles =
 
       lineHeight: 16,
 
-      fontWeight:
-        '800',
+      fontWeight: '800',
 
       letterSpacing: 0.55,
 
@@ -2613,11 +2724,16 @@ const styles =
 
       width: '100%',
 
+      flexDirection:
+        'row',
+
       alignItems:
         'center',
 
       justifyContent:
         'center',
+
+      gap: 8,
 
       paddingHorizontal: 16,
 
@@ -2667,8 +2783,7 @@ const styles =
 
       lineHeight: 19,
 
-      fontWeight:
-        '800',
+      fontWeight: '800',
 
       letterSpacing: 0.9,
 
@@ -2706,8 +2821,7 @@ const styles =
 
       lineHeight: 18,
 
-      fontWeight:
-        '800',
+      fontWeight: '800',
 
       letterSpacing: 0.6,
 
@@ -2768,8 +2882,7 @@ const styles =
 
       lineHeight: 19,
 
-      fontWeight:
-        '800',
+      fontWeight: '800',
 
       letterSpacing: 0.9,
     },
@@ -2813,8 +2926,7 @@ const styles =
 
       lineHeight: 19,
 
-      fontWeight:
-        '800',
+      fontWeight: '800',
 
       letterSpacing: 0.7,
     },
@@ -2883,8 +2995,7 @@ const styles =
 
       lineHeight: 14,
 
-      fontWeight:
-        '800',
+      fontWeight: '800',
 
       letterSpacing: 0.65,
     },
