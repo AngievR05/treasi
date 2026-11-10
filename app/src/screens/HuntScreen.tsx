@@ -32,6 +32,10 @@ import { Ionicons } from '@expo/vector-icons';
 import { Accelerometer } from 'expo-sensors';
 import * as Haptics from 'expo-haptics';
 import * as Location from 'expo-location';
+import * as ScreenOrientation from 'expo-screen-orientation';
+import { onAuthStateChanged } from 'firebase/auth';
+import { readDashboardProfile, readDashboardTreasure } from '../utils/dashboardData';
+import { HUNT_LOCATION_MAX_AGE_MS, isFreshHuntFix, withHuntTimeout } from '../utils/huntValidation';
 
 import Svg, {
   Line,
@@ -73,7 +77,7 @@ const MAX_ACCEPTABLE_GPS_ACCURACY_METRES =
   15;
 
 const MAX_LOCATION_AGE_MS =
-  12_000;
+  HUNT_LOCATION_MAX_AGE_MS;
 
 const CACHED_LOCATION_MAX_AGE_MS =
   30_000;
@@ -333,11 +337,10 @@ const getDistanceInMetres = (
     2 *
     Math.atan2(
       Math.sqrt(
-        haversine,
+        Math.min(1, Math.max(0, haversine)),
       ),
       Math.sqrt(
-        1 -
-          haversine,
+        Math.max(0, 1 - haversine),
       ),
     );
 
@@ -571,10 +574,8 @@ const showAccessibleAlert = (
     `${title}. ${message}`,
   );
 
-  Alert.alert(
-    title,
-    message,
-  );
+  if (Platform.OS === 'web' && typeof window !== 'undefined') window.alert(`${title}\n\n${message}`);
+  else Alert.alert(title, message);
 };
 
 /* -------------------------------------------------------------------------- */
@@ -1026,6 +1027,26 @@ export const HuntScreen:
     const isLandscape =
       windowWidth >
       windowHeight;
+    const [interfaceOrientation, setInterfaceOrientation] = useState<ScreenOrientation.Orientation | null>(null);
+    useEffect(() => {
+      if (Platform.OS !== 'ios') return;
+      let active = true;
+      let receivedEvent = false;
+      const subscription = ScreenOrientation.addOrientationChangeListener(event => {
+        receivedEvent = true;
+        if (active) setInterfaceOrientation(event.orientationInfo.orientation);
+      });
+      void ScreenOrientation.getOrientationAsync().then(orientation => {
+        if (active && !receivedEvent) setInterfaceOrientation(orientation);
+      }).catch(() => {});
+      return () => { active = false; subscription.remove(); };
+    }, []);
+    // Expo's iOS CLLocationManager leaves headings relative to the portrait top edge.
+    // UIInterfaceOrientation landscape-left has the camera on the right; the screen's top is -90°.
+    const headingOrientationOffset = Platform.OS !== 'ios' ? 0
+      : interfaceOrientation === ScreenOrientation.Orientation.LANDSCAPE_LEFT ? -90
+        : interfaceOrientation === ScreenOrientation.Orientation.LANDSCAPE_RIGHT ? 90
+          : interfaceOrientation === ScreenOrientation.Orientation.PORTRAIT_DOWN ? 180 : 0;
 
     const targetTreasureId =
       useMemo(
@@ -1048,12 +1069,17 @@ export const HuntScreen:
         ],
       );
 
-    const currentUser =
-      auth.currentUser;
+    const [currentUser, setCurrentUser] = useState(auth.currentUser);
+    useEffect(() => onAuthStateChanged(auth, setCurrentUser), []);
 
     const currentUserId =
       currentUser?.uid ??
       null;
+    const huntContextRef = useRef({ userId: currentUserId, targetId: targetTreasureId });
+    if (huntContextRef.current.userId !== currentUserId || huntContextRef.current.targetId !== targetTreasureId) {
+      huntContextRef.current = { userId: currentUserId, targetId: targetTreasureId };
+    }
+    const currentHuntContext = huntContextRef.current;
 
     /* ---------------------------------------------------------------------- */
     /* Firestore state                                                        */
@@ -1333,9 +1359,11 @@ export const HuntScreen:
       setAppIsActive,
     ] =
       useState(
-        AppState.currentState ===
-          'active',
+        AppState.currentState !== 'background',
       );
+    const [interactionIsActive, setInteractionIsActive] = useState(AppState.currentState !== 'background' && AppState.currentState !== 'inactive');
+    const interactionActiveRef = useRef(interactionIsActive);
+    const motionRequestRef = useRef(false);
 
     /* ---------------------------------------------------------------------- */
     /* Image modal                                                            */
@@ -1375,6 +1403,8 @@ export const HuntScreen:
 
     const headingRequestSequenceRef =
       useRef(0);
+    const headingWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const [headingRetryKey, setHeadingRetryKey] = useState(0);
 
     const locationWatchdogRef =
       useRef<ReturnType<typeof setTimeout> | null>(
@@ -1463,7 +1493,8 @@ export const HuntScreen:
           };
         },
         [
-          treasure,
+          treasure?.location?.latitude,
+          treasure?.location?.longitude,
         ],
       );
 
@@ -1532,8 +1563,8 @@ export const HuntScreen:
         headingRequestSequenceRef.current +=
           1;
 
-        locationSubscriptionRef.current?.remove();
-        headingSubscriptionRef.current?.remove();
+        try { locationSubscriptionRef.current?.remove(); } catch {}
+        try { headingSubscriptionRef.current?.remove(); } catch {}
 
         locationSubscriptionRef.current =
           null;
@@ -1551,6 +1582,7 @@ export const HuntScreen:
           locationWatchdogRef.current =
             null;
         }
+        if (headingWatchdogRef.current) clearTimeout(headingWatchdogRef.current);
 
         targetRotationAnim.stopAnimation();
         compassCardRotationAnim.stopAnimation();
@@ -1565,6 +1597,19 @@ export const HuntScreen:
     /* ---------------------------------------------------------------------- */
 
     useEffect(() => {
+      setTreasure(null);
+      setUserProfile(null);
+      setIsExcavated(false);
+      setIsSubmitting(false);
+      setImageModalVisible(false);
+      setImageLoadFailed(false);
+      setIsRefreshingLocation(false);
+      setTreasureError(null);
+      setProfileError(null);
+      setDiscoveryError(null);
+      setTreasureLoading(Boolean(targetTreasureId && currentUserId));
+      setProfileLoading(Boolean(targetTreasureId && currentUserId));
+      setDiscoveryLoading(Boolean(targetTreasureId && currentUserId));
       latestLiveLocationRef.current =
         null;
 
@@ -1648,6 +1693,7 @@ export const HuntScreen:
       compassCardRotationAnim,
       targetRotationAnim,
       targetTreasureId,
+      currentUserId,
     ]);
 
     /* ---------------------------------------------------------------------- */
@@ -1662,10 +1708,17 @@ export const HuntScreen:
             nextState:
               AppStateStatus,
           ) => {
-            setAppIsActive(
-              nextState ===
-                'active',
-            );
+            interactionActiveRef.current = nextState === 'active';
+            setInteractionIsActive(nextState === 'active');
+            // iOS permission sheets are inactive, rather than backgrounded.
+            // Keep permission requests alive while suspending excavation input.
+            if (nextState === 'background') {
+              latestLiveLocationRef.current = null;
+              locationRequestSequenceRef.current += 1;
+              headingRequestSequenceRef.current += 1;
+              setAppIsActive(false);
+              setLatestLocationTimestamp(null);
+            } else if (nextState === 'active') setAppIsActive(true);
           },
         );
 
@@ -1770,6 +1823,7 @@ export const HuntScreen:
     /* ---------------------------------------------------------------------- */
 
     useEffect(() => {
+      let active = true;
       if (
         !targetTreasureId ||
         !currentUserId
@@ -1841,6 +1895,7 @@ export const HuntScreen:
           (
             snapshot,
           ) => {
+            if (!active || huntContextRef.current !== currentHuntContext) return;
             setTreasureLoading(
               false,
             );
@@ -1859,39 +1914,10 @@ export const HuntScreen:
               return;
             }
 
-            const data =
-              snapshot.data() as
-                TreasureDocument;
-
-            const nextTreasure:
-              TreasureDocument = {
-                ...data,
-
-                treasureId:
-                  data.treasureId ||
-                  snapshot.id,
-              };
-
-            if (
-              !nextTreasure
-                .location ||
-              !isValidCoordinate(
-                nextTreasure
-                  .location
-                  .latitude,
-                nextTreasure
-                  .location
-                  .longitude,
-              )
-            ) {
-              setTreasure(
-                nextTreasure,
-              );
-
-              setTreasureError(
-                'The selected treasure contains invalid field coordinates.',
-              );
-
+            const nextTreasure = readDashboardTreasure(targetTreasureId, snapshot.data());
+            if (!nextTreasure) {
+              setTreasure(null);
+              setTreasureError('The selected treasure contains invalid field coordinates.');
               return;
             }
 
@@ -1907,6 +1933,7 @@ export const HuntScreen:
           (
             error,
           ) => {
+            if (!active || huntContextRef.current !== currentHuntContext) return;
             logDevelopmentWarning(
               '[Treasi Hunt] Treasure subscription failed:',
               error,
@@ -1929,6 +1956,7 @@ export const HuntScreen:
           (
             snapshot,
           ) => {
+            if (!active || huntContextRef.current !== currentHuntContext) return;
             setProfileLoading(
               false,
             );
@@ -1948,8 +1976,7 @@ export const HuntScreen:
             }
 
             setUserProfile(
-              snapshot.data() as
-                UserDocument,
+              readDashboardProfile(snapshot.data()),
             );
 
             setProfileError(
@@ -1960,6 +1987,7 @@ export const HuntScreen:
           (
             error,
           ) => {
+            if (!active || huntContextRef.current !== currentHuntContext) return;
             logDevelopmentWarning(
               '[Treasi Hunt] Profile subscription failed:',
               error,
@@ -1982,6 +2010,7 @@ export const HuntScreen:
           (
             snapshot,
           ) => {
+            if (!active || huntContextRef.current !== currentHuntContext) return;
             setDiscoveryLoading(
               false,
             );
@@ -1998,6 +2027,7 @@ export const HuntScreen:
           (
             error,
           ) => {
+            if (!active || huntContextRef.current !== currentHuntContext) return;
             logDevelopmentWarning(
               '[Treasi Hunt] Discovery subscription failed:',
               error,
@@ -2022,12 +2052,14 @@ export const HuntScreen:
         );
 
       return () => {
+        active = false;
         unsubscribeTreasure();
         unsubscribeProfile();
         unsubscribeDiscovery();
       };
     }, [
       currentUserId,
+      currentHuntContext,
       firestoreRetryKey,
       targetTreasureId,
     ]);
@@ -2218,6 +2250,8 @@ export const HuntScreen:
     const removeHeadingSubscription =
       useCallback(
         (): void => {
+          if (headingWatchdogRef.current) clearTimeout(headingWatchdogRef.current);
+          headingWatchdogRef.current = null;
           try {
             headingSubscriptionRef.current?.remove();
           } catch {
@@ -2248,6 +2282,10 @@ export const HuntScreen:
           ) {
             return;
           }
+
+          if (source === 'cached' && latestLiveLocationRef.current) return;
+          if (!Number.isFinite(location.timestamp) || location.timestamp > Date.now() + 1_000 ||
+              (source === 'live' && !isFreshHuntFix(location))) return;
 
           const {
             latitude,
@@ -2487,8 +2525,7 @@ export const HuntScreen:
 
           try {
             let permission =
-              await Location
-                .getForegroundPermissionsAsync();
+              await withHuntTimeout(Location.getForegroundPermissionsAsync(), 8_000);
 
             if (
               requestSequence !==
@@ -2587,8 +2624,7 @@ export const HuntScreen:
             );
 
             const servicesEnabled =
-              await Location
-                .hasServicesEnabledAsync();
+              await withHuntTimeout(Location.hasServicesEnabledAsync(), 8_000);
 
             if (
               requestSequence !==
@@ -2616,49 +2652,14 @@ export const HuntScreen:
               return;
             }
 
-            /*
-             * A recent cached fix can orient the interface while the live
-             * high-accuracy watcher acquires a fresh GPS position.
-             */
-            try {
-              const cachedPosition =
-                await Location
-                  .getLastKnownPositionAsync(
-                    {
-                      maxAge:
-                        CACHED_LOCATION_MAX_AGE_MS,
-
-                      requiredAccuracy:
-                        CACHED_LOCATION_REQUIRED_ACCURACY_METRES,
-                    },
-                  );
-
-              if (
-                requestSequence ===
-                  locationRequestSequenceRef.current &&
-                cachedPosition
-              ) {
-                applyLocation(
-                  cachedPosition,
-                  'cached',
-                );
+            void withHuntTimeout(Location.getLastKnownPositionAsync({
+              maxAge: CACHED_LOCATION_MAX_AGE_MS,
+              requiredAccuracy: CACHED_LOCATION_REQUIRED_ACCURACY_METRES,
+            }), 2_000).then(cachedPosition => {
+              if (cachedPosition && isMountedRef.current && requestSequence === locationRequestSequenceRef.current) {
+                applyLocation(cachedPosition, 'cached');
               }
-            } catch (
-              error: unknown
-            ) {
-              logDevelopmentWarning(
-                '[Treasi Hunt] Cached location unavailable:',
-                error,
-              );
-            }
-
-            if (
-              requestSequence !==
-                locationRequestSequenceRef.current ||
-              !isMountedRef.current
-            ) {
-              return;
-            }
+            }).catch(() => {});
 
             const locationOptions:
               Location.LocationOptions =
@@ -2690,14 +2691,14 @@ export const HuntScreen:
                   requestPermission,
               };
 
-            const subscription =
-              await Location
-                .watchPositionAsync(
+            let registrationExpired = false;
+            const registration = Location.watchPositionAsync(
                   locationOptions,
 
                   (
                     location,
                   ) => {
+                    if (!isMountedRef.current || requestSequence !== locationRequestSequenceRef.current) return;
                     applyLocation(
                       location,
                       'live',
@@ -2735,7 +2736,18 @@ export const HuntScreen:
                       'Live location updates were interrupted.',
                     );
                   },
-                );
+                ).then(subscription => {
+                  if (registrationExpired || !isMountedRef.current || requestSequence !== locationRequestSequenceRef.current) subscription.remove();
+                  return subscription;
+                });
+            let subscription: Location.LocationSubscription;
+            try {
+              subscription = await withHuntTimeout(registration, 10_000);
+            } catch (error) {
+              registrationExpired = true;
+              throw error;
+            }
+
 
             if (
               requestSequence !==
@@ -2847,6 +2859,9 @@ export const HuntScreen:
               null,
             );
 
+            locationRequestSequenceRef.current += 1;
+            removeLocationSubscription();
+            setIsRefreshingLocation(false);
             setGpsStatus(
               'ERROR',
             );
@@ -2872,6 +2887,7 @@ export const HuntScreen:
         [
           applyLocation,
           clearLocationWatchdog,
+          currentHuntContext,
           isArchived,
           isExcavated,
           removeLocationSubscription,
@@ -2940,6 +2956,7 @@ export const HuntScreen:
           ) {
             return;
           }
+          setHeadingRetryKey(value => value + 1);
 
           const deniedPermanently =
             locationPermissionStatus ===
@@ -3063,11 +3080,13 @@ export const HuntScreen:
           setCompassStatus(
             'CHECKING',
           );
+          headingWatchdogRef.current = setTimeout(() => {
+            if (isMountedRef.current && requestSequence === headingRequestSequenceRef.current) setCompassStatus('UNAVAILABLE');
+          }, 8_000);
 
           try {
-            const subscription =
-              await Location
-                .watchHeadingAsync(
+            let registrationExpired = false;
+            const registration = Location.watchHeadingAsync(
                   (
                     heading,
                   ) => {
@@ -3094,18 +3113,27 @@ export const HuntScreen:
                     if (
                       !Number.isFinite(
                         selectedHeading,
-                      )
+                      ) || selectedHeading < 0 || selectedHeading > 360
                     ) {
                       return;
                     }
 
                     const normalisedHeading =
                       normaliseDegrees(
-                        selectedHeading,
+                        selectedHeading + headingOrientationOffset,
                       );
 
                     latestHeadingRef.current =
                       normalisedHeading;
+                    if (headingWatchdogRef.current) clearTimeout(headingWatchdogRef.current);
+                    headingWatchdogRef.current = setTimeout(() => {
+                      if (!isMountedRef.current || requestSequence !== headingRequestSequenceRef.current) return;
+                      latestHeadingRef.current = null;
+                      setDeviceHeading(null);
+                      setHeadingReference(null);
+                      setCompassStatus('UNAVAILABLE');
+                      applyHeadingToCompass(0, targetBearingRef.current);
+                    }, 8_000);
 
                     setHeadingReference(
                       useTrueHeading
@@ -3118,8 +3146,7 @@ export const HuntScreen:
                     );
 
                     setCompassStatus(
-                      heading.accuracy <=
-                        0
+                      !Number.isFinite(heading.accuracy) || heading.accuracy < 2 || heading.accuracy > 3
                         ? 'LOW_ACCURACY'
                         : 'READY',
                     );
@@ -3165,8 +3192,19 @@ export const HuntScreen:
                     setCompassStatus(
                       'ERROR',
                     );
+                    latestHeadingRef.current = null;
+                    setDeviceHeading(null);
+                    setHeadingReference(null);
+                    applyHeadingToCompass(0, targetBearingRef.current);
                   },
-                );
+                ).then(subscription => {
+                  if (registrationExpired || !isMountedRef.current || requestSequence !== headingRequestSequenceRef.current) subscription.remove();
+                  return subscription;
+                });
+            let subscription: Location.LocationSubscription;
+            try { subscription = await withHuntTimeout(registration, 8_000); }
+            catch (error) { registrationExpired = true; throw error; }
+
 
             if (
               !isMountedRef.current ||
@@ -3196,11 +3234,19 @@ export const HuntScreen:
               setCompassStatus(
                 'UNAVAILABLE',
               );
+              headingRequestSequenceRef.current += 1;
+              removeHeadingSubscription();
+              latestHeadingRef.current = null;
+              setDeviceHeading(null);
+              setHeadingReference(null);
+              applyHeadingToCompass(0, targetBearingRef.current);
             }
           }
         },
         [
           applyHeadingToCompass,
+          currentHuntContext,
+          headingOrientationOffset,
           removeHeadingSubscription,
         ],
       );
@@ -3210,6 +3256,14 @@ export const HuntScreen:
     /* ---------------------------------------------------------------------- */
 
     useEffect(() => {
+      if (Platform.OS === 'ios' && (interfaceOrientation === null || interfaceOrientation === ScreenOrientation.Orientation.UNKNOWN)) {
+        headingRequestSequenceRef.current += 1;
+        removeHeadingSubscription();
+        latestHeadingRef.current = null;
+        setDeviceHeading(null);
+        setCompassStatus('UNAVAILABLE');
+        return;
+      }
       if (
         Platform.OS ===
           'web'
@@ -3255,6 +3309,8 @@ export const HuntScreen:
       removeHeadingSubscription,
       startHeadingTracking,
       targetLocation,
+      headingRetryKey,
+      interfaceOrientation,
     ]);
 
     /* ---------------------------------------------------------------------- */
@@ -3358,7 +3414,7 @@ export const HuntScreen:
         cancelled =
           true;
       };
-    }, []);
+    }, [appIsActive]);
 
     /* ---------------------------------------------------------------------- */
     /* Enable optional shake control                                          */
@@ -3368,7 +3424,7 @@ export const HuntScreen:
       useCallback(
         async (): Promise<void> => {
           if (
-            isRequestingMotionPermission
+            isRequestingMotionPermission || motionRequestRef.current
           ) {
             return;
           }
@@ -3376,11 +3432,13 @@ export const HuntScreen:
           setIsRequestingMotionPermission(
             true,
           );
+          motionRequestRef.current = true;
 
           try {
             const permission =
               await Accelerometer
                 .requestPermissionsAsync();
+            if (!isMountedRef.current) return;
 
             const status =
               permission.status as
@@ -3409,6 +3467,7 @@ export const HuntScreen:
             const available =
               await Accelerometer
                 .isAvailableAsync();
+            if (!isMountedRef.current) return;
 
             setAccelerometerAvailable(
               available,
@@ -3429,6 +3488,7 @@ export const HuntScreen:
           } catch (
             error: unknown
           ) {
+            if (!isMountedRef.current) return;
             logDevelopmentWarning(
               '[Treasi Hunt] Motion permission request failed:',
               error,
@@ -3439,6 +3499,7 @@ export const HuntScreen:
               'Shake excavation could not be enabled. The on-screen excavation control still works.',
             );
           } finally {
+            motionRequestRef.current = false;
             if (
               isMountedRef.current
             ) {
@@ -3462,7 +3523,9 @@ export const HuntScreen:
         'live' &&
       latestLocationTimestamp !==
         null &&
-      freshnessClock -
+      Number.isFinite(latestLocationTimestamp) &&
+      latestLocationTimestamp <= Date.now() + 1_000 &&
+      Math.max(freshnessClock, Date.now()) -
         latestLocationTimestamp <=
         MAX_LOCATION_AGE_MS;
 
@@ -3471,6 +3534,7 @@ export const HuntScreen:
     /* ---------------------------------------------------------------------- */
 
     const canExcavate =
+      interactionIsActive && !isLoading && !blockingError &&
       !isOwnTreasure &&
       !isArchived &&
       !isExcavated &&
@@ -3626,6 +3690,9 @@ export const HuntScreen:
     const executeExcavation =
       useCallback(
         async (): Promise<void> => {
+          const operationContext = currentHuntContext;
+          const isCurrentOperation = () => isMountedRef.current && huntContextRef.current === operationContext && auth.currentUser?.uid === operationContext.userId;
+          if (!isCurrentOperation() || !interactionActiveRef.current || isLoading || blockingError) return;
           /*
            * The ref closes the short gap before React commits isSubmitting,
            * preventing a shake and tap from starting two transactions.
@@ -3776,8 +3843,8 @@ export const HuntScreen:
             );
 
           if (
-            locationAge >
-            MAX_LOCATION_AGE_MS
+            !isFreshHuntFix(currentLocation) ||
+            locationAge > MAX_LOCATION_AGE_MS
           ) {
             showAccessibleAlert(
               'Location Too Old',
@@ -3931,6 +3998,7 @@ export const HuntScreen:
                     await transaction.get(
                       treasureReference,
                     );
+                  if (!isCurrentOperation() || !interactionActiveRef.current) throw new Error('HUNT_CANCELLED');
 
                   if (
                     discoverySnapshot.exists()
@@ -4001,7 +4069,7 @@ export const HuntScreen:
                   if (
                     typeof currentPoints !==
                       'number' ||
-                    !Number.isInteger(
+                    !Number.isSafeInteger(
                       currentPoints,
                     ) ||
                     currentPoints <
@@ -4015,6 +4083,16 @@ export const HuntScreen:
                   const nextPoints =
                     currentPoints +
                     100;
+                  if (!Number.isSafeInteger(nextPoints)) throw new Error('INVALID_PROFILE_POINTS');
+                  const liveFix = latestLiveLocationRef.current;
+                  if (!liveFix || !isFreshHuntFix(liveFix) || !isValidAccuracy(liveFix.coords.accuracy) ||
+                      liveFix.coords.accuracy > MAX_ACCEPTABLE_GPS_ACCURACY_METRES ||
+                      !isValidCoordinate(liveFix.coords.latitude, liveFix.coords.longitude) ||
+                      (Platform.OS === 'android' && liveFix.mocked === true)) throw new Error('FRESH_LOCATION_REQUIRED');
+                  if (getDistanceInMetres(liveFix.coords.latitude, liveFix.coords.longitude,
+                    liveTreasure.location.latitude, liveTreasure.location.longitude) > DISCOVERY_RADIUS_METRES) {
+                    throw new Error('TARGET_OUT_OF_RANGE');
+                  }
 
                   const usernameSource =
                     String(
@@ -4100,7 +4178,7 @@ export const HuntScreen:
               );
 
             if (
-              !isMountedRef.current
+              !isCurrentOperation()
             ) {
               return;
             }
@@ -4150,6 +4228,7 @@ export const HuntScreen:
               }
             }
 
+            if (!isCurrentOperation()) return;
             announce(
               `Excavation complete. 100 points awarded. ${
                 treasure.payloadText
@@ -4158,10 +4237,15 @@ export const HuntScreen:
               }`,
             );
 
-            onSuccess?.();
+            if (isCurrentOperation()) {
+              try { onSuccess?.(); } catch (error) {
+                logDevelopmentWarning('[Treasi Hunt] Discovery saved, but the success callback failed:', error);
+              }
+            }
           } catch (
             error: unknown
           ) {
+            if (!isCurrentOperation()) return;
             const message =
               error instanceof
                 Error
@@ -4171,6 +4255,14 @@ export const HuntScreen:
             switch (
               message
             ) {
+              case 'HUNT_CANCELLED':
+                break;
+              case 'FRESH_LOCATION_REQUIRED':
+                showAccessibleAlert('Fresh Location Required', 'Your GPS fix changed or expired before the discovery could be recorded. Retry with a fresh position.');
+                break;
+              case 'TARGET_OUT_OF_RANGE':
+                showAccessibleAlert('Target Moved', 'The cache location changed or you moved out of range. Follow the updated target and try again.');
+                break;
               case 'ALREADY_EXCAVATED':
                 if (
                   isMountedRef.current
@@ -4258,11 +4350,10 @@ export const HuntScreen:
                 );
             }
           } finally {
-            excavationLockRef.current =
-              false;
+            if (huntContextRef.current === operationContext) excavationLockRef.current = false;
 
             if (
-              isMountedRef.current
+              isCurrentOperation()
             ) {
               setIsSubmitting(
                 false,
@@ -4272,6 +4363,9 @@ export const HuntScreen:
         },
         [
           excavationStatusText,
+          currentHuntContext,
+          isLoading,
+          blockingError,
           gpsStatus,
           isArchived,
           isExcavated,
@@ -4304,6 +4398,8 @@ export const HuntScreen:
         return;
       }
 
+      let subscription: { remove: () => void };
+      try {
       Accelerometer
         .setUpdateInterval(
           ACCELEROMETER_UPDATE_INTERVAL_MS,
@@ -4315,13 +4411,12 @@ export const HuntScreen:
           ? SENSITIVE_SHAKE_IMPULSE_THRESHOLD
           : DEFAULT_SHAKE_IMPULSE_THRESHOLD;
 
-      const subscription =
-        Accelerometer.addListener(
+      subscription = Accelerometer.addListener(
           (
             data,
           ) => {
             if (
-              !isMountedRef.current ||
+              !isMountedRef.current || !interactionActiveRef.current ||
               excavationLockRef.current
             ) {
               return;
@@ -4341,6 +4436,7 @@ export const HuntScreen:
              * Normal gravity is roughly 1 g. We react to acceleration away
              * from that baseline instead of the raw magnitude.
              */
+            if (!Number.isFinite(magnitude)) return;
             const shakeImpulse =
               Math.abs(
                 magnitude -
@@ -4365,8 +4461,13 @@ export const HuntScreen:
           },
         );
 
+      } catch (error) {
+        logDevelopmentWarning('[Treasi Hunt] Shake sensor unavailable:', error);
+        setAccelerometerAvailable(false);
+        return;
+      }
       return () => {
-        subscription.remove();
+        try { subscription.remove(); } catch {}
       };
     }, [
       accelerometerAvailable,
@@ -4481,6 +4582,7 @@ export const HuntScreen:
       !isArchived &&
       !isExcavated &&
       (
+        (locationFixSource === 'live' && !isLiveFixFresh) ||
         gpsStatus ===
           'PERMISSION_REQUIRED' ||
         gpsStatus ===
@@ -6137,6 +6239,8 @@ export const HuntScreen:
         {treasure.imageUrl
           ?.trim() ? (
           <Modal
+            testID="hunt-photo-modal"
+            supportedOrientations={['portrait', 'portrait-upside-down', 'landscape-left', 'landscape-right']}
             visible={
               imageModalVisible
             }
@@ -6159,7 +6263,6 @@ export const HuntScreen:
               }
             >
               <View
-                accessible
                 accessibilityViewIsModal
                 accessibilityLabel="Field photo viewer"
                 onAccessibilityEscape={() =>
