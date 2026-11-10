@@ -10,6 +10,8 @@ import {
   AccessibilityInfo,
   ActivityIndicator,
   Alert,
+  type AlertButton,
+  AppState,
   KeyboardAvoidingView,
   Linking,
   Modal,
@@ -29,6 +31,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 
 import {
+  onAuthStateChanged,
   collection,
   deleteField,
   doc,

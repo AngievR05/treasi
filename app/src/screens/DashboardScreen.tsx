@@ -10,9 +10,8 @@ import {
   AccessibilityInfo,
   ActivityIndicator,
   Alert,
+  type AlertButton,
   Animated,
-  AppState,
-  type AppStateStatus,
   Image,
   Linking,
   Modal,
@@ -48,6 +47,9 @@ import {
 } from 'firebase/firestore';
 
 import { auth, db } from '../config/firebase';
+import { onAuthStateChanged } from 'firebase/auth';
+import { isFreshLocation, useDashboardLocation } from '../hooks/useDashboardLocation';
+import { readDashboardActivity, readDashboardProfile, readDashboardTreasure } from '../utils/dashboardData';
 
 import { FieldNavBar } from '../components/FieldNavBar';
 
@@ -85,11 +87,6 @@ interface Props {
   ) => void;
 }
 
-type LocationFixSource =
-  | 'none'
-  | 'cached'
-  | 'live';
-
 interface FirestoreSyncErrors {
   profile: string | null;
   treasures: string | null;
@@ -117,22 +114,11 @@ const TREASURE_REGION_DELTA = 0.08;
 
 const MAX_TREASURE_DISTANCE_KM = 20;
 
-const FIELD_RADIUS_METRES = 20_000;
-
 const MAX_ACTIVITY_ITEMS = 10;
 
 const GPS_ACCURACY_WARNING_METRES = 100;
 
-const MAX_STAMP_LOCATION_AGE_MS =
-  2 * 60 * 1000;
-
 const NAVIGATION_LOCK_MS = 600;
-
-const LOCATION_LAST_KNOWN_MAX_AGE_MS =
-  60 * 1000;
-
-const LOCATION_LAST_KNOWN_REQUIRED_ACCURACY_METRES =
-  500;
 
 const COLOURS = {
   forest950: '#172018',
@@ -246,8 +232,8 @@ const calculateHaversineDistance = (
   const c =
     2 *
     Math.atan2(
-      Math.sqrt(a),
-      Math.sqrt(1 - a),
+      Math.sqrt(Math.min(1, a)),
+      Math.sqrt(Math.max(0, 1 - a)),
     );
 
   return earthRadiusKm * c;
@@ -287,6 +273,7 @@ const formatRelativeTime = (
   try {
     const milliseconds =
       timestamp.toMillis();
+    if (!Number.isFinite(milliseconds)) return 'RECENT';
 
     const differenceSeconds =
       Math.max(
@@ -367,6 +354,19 @@ const getRankTitle = (
 };
 
 // Announces alerts so VoiceOver and TalkBack receive the same feedback.
+const showDashboardAlert = (title: string, message: string, buttons?: AlertButton[]): void => {
+  if (Platform.OS === 'web' && typeof window !== 'undefined') {
+    const action = buttons?.find(button => button.style !== 'cancel');
+    if (action) {
+      if (window.confirm(`${title}\n\n${message}`)) action.onPress?.();
+    } else {
+      window.alert(`${title}\n\n${message}`);
+    }
+    return;
+  }
+  Alert.alert(title, message, buttons);
+};
+
 const announceAlert = (
   title: string,
   message: string,
@@ -376,7 +376,7 @@ const announceAlert = (
       `${title}. ${message}`,
     );
 
-  Alert.alert(
+  showDashboardAlert(
     title,
     message,
   );
@@ -406,8 +406,8 @@ export const DashboardScreen:
     /* Authentication                                                        */
     /* ---------------------------------------------------------------------- */
 
-    const currentUser =
-      auth.currentUser;
+    const [currentUser, setCurrentUser] = useState(auth.currentUser);
+    useEffect(() => onAuthStateChanged(auth, setCurrentUser), []);
 
     /* ---------------------------------------------------------------------- */
     /* Refs                                                                  */
@@ -418,19 +418,13 @@ export const DashboardScreen:
         null,
       );
 
-    const locationSubscriptionRef =
-      useRef<Location.LocationSubscription | null>(
-        null,
-      );
-
-    const locationRequestSequenceRef =
-      useRef(0);
-
     const isMountedRef =
       useRef(true);
 
     const isNavigatingRef =
       useRef(false);
+    const archiveInProgressRef = useRef(false);
+    const canStampLocationRef = useRef(false);
 
     const navigationUnlockTimeoutRef =
       useRef<ReturnType<
@@ -486,62 +480,22 @@ export const DashboardScreen:
         treasures: null,
         activity: null,
       });
+    const [syncAttempt, setSyncAttempt] = useState(0);
+
+    // Refresh relative activity labels even when no new database event arrives.
+    const [, refreshTime] = useState(0);
+    useEffect(() => {
+      const timer = setInterval(() => refreshTime(value => value + 1), 60_000);
+      return () => clearInterval(timer);
+    }, []);
 
     /* ---------------------------------------------------------------------- */
     /* Location state                                                        */
     /* ---------------------------------------------------------------------- */
 
-    const [
-      userLocation,
-      setUserLocation,
-    ] =
-      useState<Location.LocationObject | null>(
-        null,
-      );
-
-    const [
-      locationFixSource,
-      setLocationFixSource,
-    ] =
-      useState<LocationFixSource>(
-        'none',
-      );
-
-    const [
-      isInitialisingLocation,
-      setIsInitialisingLocation,
-    ] =
-      useState(true);
-
-    const [
-      locationError,
-      setLocationError,
-    ] =
-      useState<string | null>(
-        null,
-      );
-
-    const [
-      locationPermissionStatus,
-      setLocationPermissionStatus,
-    ] =
-      useState<Location.PermissionStatus | null>(
-        null,
-      );
-
-    const [
-      canAskLocationAgain,
-      setCanAskLocationAgain,
-    ] =
-      useState(true);
-
-    const [
-      locationServicesEnabled,
-      setLocationServicesEnabled,
-    ] =
-      useState<boolean | null>(
-        null,
-      );
+    const { userLocation, locationFixSource, isInitialisingLocation, locationError,
+      locationPermissionStatus, canAskLocationAgain, locationServicesEnabled,
+      startLocationService } = useDashboardLocation();
 
     /* ---------------------------------------------------------------------- */
     /* Map state                                                             */
@@ -602,18 +556,6 @@ export const DashboardScreen:
       return () => {
         isMountedRef.current =
           false;
-
-        locationRequestSequenceRef.current +=
-          1;
-
-        try {
-          locationSubscriptionRef.current?.remove();
-        } catch {
-          // Subscription may already have been removed.
-        }
-
-        locationSubscriptionRef.current =
-          null;
 
         if (
           navigationUnlockTimeoutRef.current
@@ -727,19 +669,21 @@ export const DashboardScreen:
           screen: string,
           params?: NavigationParams,
         ): void => {
-          if (
-            isNavigatingRef.current
-          ) {
+          if (!isMountedRef.current || !onNavigate || isNavigatingRef.current) {
             return;
           }
 
           isNavigatingRef.current =
             true;
 
-          onNavigate?.(
-            screen,
-            params,
-          );
+          try {
+            onNavigate(screen, params);
+          } catch (error) {
+            isNavigatingRef.current = false;
+            logDevelopmentWarning('[Treasi Dashboard] Navigation failed:', error);
+            announceAlert('NAVIGATION UNAVAILABLE', 'Please try opening this section again.');
+            return;
+          }
 
           if (
             navigationUnlockTimeoutRef.current
@@ -771,6 +715,15 @@ export const DashboardScreen:
     /* ---------------------------------------------------------------------- */
 
     useEffect(() => {
+      setUserData(null);
+      setAllTreasures([]);
+      setActivityFeed([]);
+      setSelectedTreasure(null);
+      setFirestoreErrors({ profile: null, treasures: null, activity: null });
+    }, [currentUser?.uid]);
+
+    useEffect(() => {
+      let active = true;
       if (
         !currentUser?.uid
       ) {
@@ -819,6 +772,7 @@ export const DashboardScreen:
           userDocumentRef,
 
           (snapshot) => {
+            if (!active) return;
             setFirestoreErrors(
               (current) => ({
                 ...current,
@@ -830,8 +784,7 @@ export const DashboardScreen:
               snapshot.exists()
             ) {
               setUserData(
-                snapshot.data() as
-                  UserDocument,
+                readDashboardProfile(snapshot.data()),
               );
             } else {
               setUserData(
@@ -849,6 +802,7 @@ export const DashboardScreen:
           },
 
           (error) => {
+            if (!active) return;
             logDevelopmentWarning(
               '[Treasi Dashboard] User subscription failed:',
               error,
@@ -886,6 +840,7 @@ export const DashboardScreen:
           treasuresQuery,
 
           (snapshot) => {
+            if (!active) return;
             const validTreasures:
               TreasureDocument[] =
               [];
@@ -894,29 +849,8 @@ export const DashboardScreen:
               (
                 documentSnapshot,
               ) => {
-                const data =
-                  documentSnapshot.data() as
-                    TreasureDocument;
-
-                if (
-                  !data?.location ||
-                  !isValidCoordinate(
-                    data.location
-                      .latitude,
-                    data.location
-                      .longitude,
-                  )
-                ) {
-                  return;
-                }
-
-                validTreasures.push({
-                  ...data,
-
-                  treasureId:
-                    data.treasureId ||
-                    documentSnapshot.id,
-                });
+                const treasure = readDashboardTreasure(documentSnapshot.id, documentSnapshot.data());
+                if (treasure) validTreasures.push(treasure);
               },
             );
 
@@ -934,6 +868,7 @@ export const DashboardScreen:
           },
 
           (error) => {
+            if (!active) return;
             logDevelopmentWarning(
               '[Treasi Dashboard] Treasure subscription failed:',
               error,
@@ -973,6 +908,7 @@ export const DashboardScreen:
           activityQuery,
 
           (snapshot) => {
+            if (!active) return;
             const activities:
               ActivityFeedDocument[] =
               [];
@@ -981,17 +917,7 @@ export const DashboardScreen:
               (
                 documentSnapshot,
               ) => {
-                const data =
-                  documentSnapshot.data() as
-                    ActivityFeedDocument;
-
-                activities.push({
-                  ...data,
-
-                  activityId:
-                    data.activityId ||
-                    documentSnapshot.id,
-                });
+                activities.push(readDashboardActivity(documentSnapshot.id, documentSnapshot.data()));
               },
             );
 
@@ -1012,6 +938,7 @@ export const DashboardScreen:
           },
 
           (error) => {
+            if (!active) return;
             logDevelopmentWarning(
               '[Treasi Dashboard] Activity subscription failed:',
               error,
@@ -1036,501 +963,14 @@ export const DashboardScreen:
         );
 
       return () => {
+        active = false;
         unsubscribeUser();
         unsubscribeTreasures();
         unsubscribeActivity();
       };
     }, [
       currentUser?.uid,
-    ]);
-
-    /* ---------------------------------------------------------------------- */
-    /* Location subscription helpers                                         */
-    /* ---------------------------------------------------------------------- */
-
-    const removeLocationSubscription =
-      useCallback(
-        (): void => {
-          try {
-            locationSubscriptionRef.current?.remove();
-          } catch {
-            // Subscription may already be removed.
-          }
-
-          locationSubscriptionRef.current =
-            null;
-        },
-        [],
-      );
-
-    const applyLocation =
-      useCallback(
-        (
-          location:
-            Location.LocationObject,
-          source:
-            LocationFixSource,
-        ): void => {
-          if (
-            !isMountedRef.current
-          ) {
-            return;
-          }
-
-          const {
-            latitude,
-            longitude,
-          } =
-            location.coords;
-
-          if (
-            !isValidCoordinate(
-              latitude,
-              longitude,
-            )
-          ) {
-            return;
-          }
-
-          setUserLocation(
-            location,
-          );
-
-          setLocationFixSource(
-            source,
-          );
-
-          setLocationError(
-            null,
-          );
-        },
-        [],
-      );
-
-    /* ---------------------------------------------------------------------- */
-    /* Location service                                                      */
-    /* ---------------------------------------------------------------------- */
-
-    const startLocationService =
-      useCallback(
-        async (
-          requestPermission:
-            boolean,
-        ): Promise<void> => {
-          const requestSequence =
-            ++locationRequestSequenceRef.current;
-
-          removeLocationSubscription();
-
-          if (
-            !isMountedRef.current
-          ) {
-            return;
-          }
-
-          setIsInitialisingLocation(
-            true,
-          );
-
-          setLocationError(
-            null,
-          );
-
-          try {
-            /*
-             * Browser location requires localhost or another secure context.
-             */
-            if (
-              Platform.OS ===
-                'web' &&
-              typeof window !==
-                'undefined' &&
-              !window.isSecureContext
-            ) {
-              setUserLocation(
-                null,
-              );
-
-              setLocationFixSource(
-                'none',
-              );
-
-              setLocationError(
-                'LOCATION REQUIRES HTTPS OR LOCALHOST IN YOUR BROWSER.',
-              );
-
-              setIsInitialisingLocation(
-                false,
-              );
-
-              return;
-            }
-
-            /* ---------------------------------------------------------------- */
-            /* Permission state                                                 */
-            /* ---------------------------------------------------------------- */
-
-            let permission =
-              await Location.getForegroundPermissionsAsync();
-
-            if (
-              requestSequence !==
-                locationRequestSequenceRef.current ||
-              !isMountedRef.current
-            ) {
-              return;
-            }
-
-            setLocationPermissionStatus(
-              permission.status,
-            );
-
-            setCanAskLocationAgain(
-              permission.canAskAgain,
-            );
-
-            /*
-             * Do not automatically re-prompt after onboarding.
-             * A system prompt is only triggered after an explicit user action.
-             */
-            if (
-              permission.status !==
-                Location
-                  .PermissionStatus
-                  .GRANTED &&
-              requestPermission &&
-              permission.canAskAgain
-            ) {
-              permission =
-                await Location.requestForegroundPermissionsAsync();
-
-              if (
-                requestSequence !==
-                  locationRequestSequenceRef.current ||
-                !isMountedRef.current
-              ) {
-                return;
-              }
-
-              setLocationPermissionStatus(
-                permission.status,
-              );
-
-              setCanAskLocationAgain(
-                permission.canAskAgain,
-              );
-            }
-
-            if (
-              permission.status !==
-              Location
-                .PermissionStatus
-                .GRANTED
-            ) {
-              setUserLocation(
-                null,
-              );
-
-              setLocationFixSource(
-                'none',
-              );
-
-              setLocationError(
-                permission.status ===
-                  Location
-                    .PermissionStatus
-                    .DENIED
-                  ? 'LOCATION ACCESS IS DENIED. ENABLE IT TO USE NEARBY CACHES AND LOCATION STAMPING.'
-                  : 'LOCATION ACCESS IS NOT ENABLED. SELECT ENABLE LOCATION TO USE NEARBY FEATURES.',
-              );
-
-              setIsInitialisingLocation(
-                false,
-              );
-
-              return;
-            }
-
-            /* ---------------------------------------------------------------- */
-            /* Device location services                                         */
-            /* ---------------------------------------------------------------- */
-
-            const servicesEnabled =
-              await Location.hasServicesEnabledAsync();
-
-            if (
-              requestSequence !==
-                locationRequestSequenceRef.current ||
-              !isMountedRef.current
-            ) {
-              return;
-            }
-
-            setLocationServicesEnabled(
-              servicesEnabled,
-            );
-
-            if (
-              !servicesEnabled
-            ) {
-              setUserLocation(
-                null,
-              );
-
-              setLocationFixSource(
-                'none',
-              );
-
-              setLocationError(
-                'DEVICE LOCATION SERVICES ARE SWITCHED OFF.',
-              );
-
-              setIsInitialisingLocation(
-                false,
-              );
-
-              return;
-            }
-
-            /* ---------------------------------------------------------------- */
-            /* Fast cached position                                             */
-            /* ---------------------------------------------------------------- */
-
-            try {
-              const cachedPosition =
-                await Location.getLastKnownPositionAsync(
-                  {
-                    maxAge:
-                      LOCATION_LAST_KNOWN_MAX_AGE_MS,
-
-                    requiredAccuracy:
-                      LOCATION_LAST_KNOWN_REQUIRED_ACCURACY_METRES,
-                  },
-                );
-
-              if (
-                requestSequence ===
-                  locationRequestSequenceRef.current &&
-                cachedPosition &&
-                isValidCoordinate(
-                  cachedPosition.coords
-                    .latitude,
-                  cachedPosition.coords
-                    .longitude,
-                )
-              ) {
-                applyLocation(
-                  cachedPosition,
-                  'cached',
-                );
-              }
-            } catch (
-              error: unknown
-            ) {
-              logDevelopmentWarning(
-                '[Treasi Dashboard] Cached location unavailable:',
-                error,
-              );
-            }
-
-            /* ---------------------------------------------------------------- */
-            /* Current position                                                 */
-            /* ---------------------------------------------------------------- */
-
-            try {
-              const currentPosition =
-                await Location.getCurrentPositionAsync(
-                  {
-                    accuracy:
-                      Location
-                        .Accuracy
-                        .Balanced,
-                  },
-                );
-
-              if (
-                requestSequence ===
-                  locationRequestSequenceRef.current &&
-                currentPosition &&
-                isValidCoordinate(
-                  currentPosition.coords
-                    .latitude,
-                  currentPosition.coords
-                    .longitude,
-                )
-              ) {
-                applyLocation(
-                  currentPosition,
-                  'live',
-                );
-              }
-            } catch (
-              error: unknown
-            ) {
-              logDevelopmentWarning(
-                '[Treasi Dashboard] Current location fix unavailable:',
-                error,
-              );
-            }
-
-            if (
-              requestSequence !==
-                locationRequestSequenceRef.current ||
-              !isMountedRef.current
-            ) {
-              return;
-            }
-
-            /* ---------------------------------------------------------------- */
-            /* Foreground location watcher                                      */
-            /* ---------------------------------------------------------------- */
-
-            const subscription =
-              await Location.watchPositionAsync(
-                {
-                  accuracy:
-                    Location
-                      .Accuracy
-                      .Balanced,
-
-                  timeInterval:
-                    5000,
-
-                  distanceInterval:
-                    15,
-                },
-
-                (
-                  newLocation,
-                ) => {
-                  applyLocation(
-                    newLocation,
-                    'live',
-                  );
-                },
-
-                (
-                  message,
-                ) => {
-                  if (
-                    !isMountedRef.current
-                  ) {
-                    return;
-                  }
-
-                  logDevelopmentWarning(
-                    '[Treasi Dashboard] Location watcher reported an error:',
-                    message,
-                  );
-
-                  setLocationError(
-                    'LIVE LOCATION UPDATES WERE INTERRUPTED. RETRY LOCATION.',
-                  );
-                },
-              );
-
-            if (
-              requestSequence !==
-                locationRequestSequenceRef.current ||
-              !isMountedRef.current
-            ) {
-              subscription.remove();
-
-              return;
-            }
-
-            locationSubscriptionRef.current =
-              subscription;
-
-            setIsInitialisingLocation(
-              false,
-            );
-          } catch (
-            error: unknown
-          ) {
-            logDevelopmentWarning(
-              '[Treasi Dashboard] Location service failed:',
-              error,
-            );
-
-            if (
-              requestSequence !==
-                locationRequestSequenceRef.current ||
-              !isMountedRef.current
-            ) {
-              return;
-            }
-
-            setLocationError(
-              Platform.OS ===
-                'web'
-                ? 'BROWSER LOCATION COULD NOT BE STARTED.'
-                : 'DEVICE LOCATION COULD NOT BE STARTED.',
-            );
-
-            setIsInitialisingLocation(
-              false,
-            );
-          }
-        },
-        [
-          applyLocation,
-          removeLocationSubscription,
-        ],
-      );
-
-    /* ---------------------------------------------------------------------- */
-    /* Location lifecycle                                                    */
-    /* ---------------------------------------------------------------------- */
-
-    useEffect(() => {
-      /*
-       * The first check never triggers a new permission prompt.
-       * Permission was already explained during onboarding.
-       */
-      void startLocationService(
-        false,
-      );
-
-      const handleAppStateChange =
-        (
-          nextState:
-            AppStateStatus,
-        ): void => {
-          if (
-            nextState ===
-            'active'
-          ) {
-            void startLocationService(
-              false,
-            );
-
-            return;
-          }
-
-          locationRequestSequenceRef.current +=
-            1;
-
-          removeLocationSubscription();
-        };
-
-      const subscription =
-        AppState.addEventListener(
-          'change',
-          handleAppStateChange,
-        );
-
-      return () => {
-        subscription.remove();
-
-        locationRequestSequenceRef.current +=
-          1;
-
-        removeLocationSubscription();
-      };
-    }, [
-      removeLocationSubscription,
-      startLocationService,
+      syncAttempt,
     ]);
 
     /* ---------------------------------------------------------------------- */
@@ -1915,8 +1355,8 @@ export const DashboardScreen:
         return;
       }
 
-      const stillAvailable =
-        allTreasures.some(
+      const latestTreasure =
+        allTreasures.find(
           (
             treasure,
           ) =>
@@ -1925,11 +1365,13 @@ export const DashboardScreen:
         );
 
       if (
-        !stillAvailable
+        !latestTreasure
       ) {
         setSelectedTreasure(
           null,
         );
+      } else if (latestTreasure !== selectedTreasure) {
+        setSelectedTreasure(latestTreasure);
       }
     }, [
       allTreasures,
@@ -1987,11 +1429,14 @@ export const DashboardScreen:
     const canStampLocation =
       Boolean(
         userLocation &&
+          isFreshLocation(userLocation) &&
+          !locationError &&
           mapUserLocation &&
           locationFixSource ===
             'live' &&
           !isInitialisingLocation,
       );
+    canStampLocationRef.current = canStampLocation;
 
     const handleStampLocation =
       useCallback(
@@ -2037,27 +1482,22 @@ export const DashboardScreen:
             return;
           }
 
-          const locationAge =
-            Math.max(
-              0,
-              Date.now() -
-                userLocation.timestamp,
-            );
-
-          if (
-            locationAge >
-            MAX_STAMP_LOCATION_AGE_MS
-          ) {
-            announceAlert(
-              'LOCATION TOO OLD',
-              'Treasi needs a newer location fix before creating a treasure. Retry location and wait for an updated position.',
-            );
-
+          if (!isFreshLocation(userLocation)) {
+            announceAlert('LOCATION TOO OLD', 'Retry location and wait for a current GPS fix before stamping a treasure.');
             return;
           }
 
           const navigateToCreate =
             (): void => {
+              // The iOS confirmation can stay open long enough for a fix to expire.
+              if (!isFreshLocation(userLocation)) {
+                announceAlert('LOCATION TOO OLD', 'Retry location before stamping this cache.');
+                return;
+              }
+              if (!canStampLocationRef.current) {
+                announceAlert('CURRENT LOCATION REQUIRED', 'Wait for live location updates before stamping this cache.');
+                return;
+              }
               safeNavigate(
                 'INVENTORY',
                 {
@@ -2097,7 +1537,7 @@ export const DashboardScreen:
                 )} metres.`,
               );
 
-            Alert.alert(
+            showDashboardAlert(
               'LOW LOCATION ACCURACY',
               `The current location accuracy is approximately ±${Math.round(
                 accuracy,
@@ -2143,7 +1583,8 @@ export const DashboardScreen:
           if (
             !currentUser ||
             !treasureId ||
-            isArchiving
+            archiveInProgressRef.current ||
+            currentUser.uid !== auth.currentUser?.uid
           ) {
             return;
           }
@@ -2170,6 +1611,7 @@ export const DashboardScreen:
             return;
           }
 
+          archiveInProgressRef.current = true;
           setIsArchiving(
             true,
           );
@@ -2273,16 +1715,16 @@ export const DashboardScreen:
               return;
             }
 
-            setSelectedTreasure(
-              null,
-            );
+            if (currentUser.uid !== auth.currentUser?.uid) return;
+            setAllTreasures(current => current.filter(item => item.treasureId !== treasureId));
+            setSelectedTreasure(current => current?.treasureId === treasureId ? null : current);
 
             AccessibilityInfo
               .announceForAccessibility(
                 'Treasure cache archived successfully.',
               );
 
-            Alert.alert(
+            showDashboardAlert(
               'CACHE ARCHIVED',
               'The treasure has been removed from the active field map.',
             );
@@ -2303,6 +1745,7 @@ export const DashboardScreen:
               );
             }
           } finally {
+            archiveInProgressRef.current = false;
             if (
               isMountedRef.current
             ) {
@@ -2315,7 +1758,6 @@ export const DashboardScreen:
         [
           allTreasures,
           currentUser,
-          isArchiving,
           userData?.username,
         ],
       );
@@ -2887,7 +2329,6 @@ export const DashboardScreen:
 
           {locationError ? (
             <View
-              accessible
               accessibilityRole="alert"
               accessibilityLiveRegion="polite"
               style={
@@ -3022,13 +2463,17 @@ export const DashboardScreen:
               : styles.rightViewportPortrait
           }
         >
+          <ScrollView
+            style={styles.consoleScroll}
+            contentContainerStyle={styles.consoleScrollContent}
+            showsVerticalScrollIndicator={false}
+          >
           {/* --------------------------------------------------------------- */}
           {/* Firestore errors                                                 */}
           {/* --------------------------------------------------------------- */}
 
           {firestoreErrorText ? (
             <View
-              accessible
               accessibilityRole="alert"
               accessibilityLiveRegion="polite"
               style={
@@ -3059,6 +2504,14 @@ export const DashboardScreen:
                   firestoreErrorText
                 }
               </Text>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Retry field sync"
+                onPress={() => setSyncAttempt(value => value + 1)}
+                style={styles.retryButton}
+              >
+                <Text style={styles.retryButtonText}>RETRY SYNC</Text>
+              </Pressable>
             </View>
           ) : null}
 
@@ -3240,15 +2693,9 @@ export const DashboardScreen:
                 </Text>
               </View>
             ) : (
-              <ScrollView
+              <View
                 style={
                   styles.signalsScroll
-                }
-                contentContainerStyle={
-                  styles.signalsScrollContent
-                }
-                showsVerticalScrollIndicator={
-                  false
                 }
               >
                 {activityFeed.map(
@@ -3349,9 +2796,11 @@ export const DashboardScreen:
                     );
                   },
                 )}
-              </ScrollView>
+              </View>
             )}
           </View>
+
+          </ScrollView>
 
           {/* --------------------------------------------------------------- */}
           {/* Stamp current location                                           */}
@@ -3432,7 +2881,7 @@ export const DashboardScreen:
           <FieldNavBar
             currentTab="MAP"
             onNavigate={
-              onNavigate
+              safeNavigate
             }
           />
         </View>
@@ -3442,6 +2891,8 @@ export const DashboardScreen:
         {/* ------------------------------------------------------------------ */}
 
         <Modal
+          testID="dashboard-treasure-modal"
+          supportedOrientations={['portrait', 'portrait-upside-down', 'landscape-left', 'landscape-right']}
           visible={
             Boolean(
               selectedTreasure,
@@ -3465,7 +2916,6 @@ export const DashboardScreen:
             }
           >
             <View
-              accessible
               accessibilityViewIsModal
               onAccessibilityEscape={() =>
                 setSelectedTreasure(
@@ -3775,7 +3225,7 @@ export const DashboardScreen:
                           'Archive confirmation.',
                         );
 
-                      Alert.alert(
+                      showDashboardAlert(
                         'ARCHIVE TREASURE',
                         'Remove this treasure from the active field map? Existing discovery history will be preserved.',
                         [
@@ -3997,6 +3447,16 @@ const styles =
         'hidden',
     },
 
+    consoleScroll: {
+      flex: 1,
+      minHeight: 0,
+    },
+
+    consoleScrollContent: {
+      flexGrow: 1,
+      paddingBottom: 8,
+    },
+
     rightViewportLandscape: {
       flex: 0.4,
       minWidth: 0,
@@ -4170,9 +3630,8 @@ const styles =
       position:
         'absolute',
       top: 12,
-      alignSelf:
-        'center',
-      maxWidth: '66%',
+      left: 80,
+      right: 12,
       minHeight: 38,
       paddingHorizontal: 10,
       paddingVertical: 6,
@@ -4401,8 +3860,9 @@ const styles =
     /* ---------------------------------------------------------------------- */
 
     signalsContainer: {
-      flex: 1,
-      minHeight: 0,
+      flexGrow: 1,
+      flexShrink: 0,
+      minHeight: 60,
       marginVertical: 8,
     },
 
@@ -4436,13 +3896,10 @@ const styles =
     },
 
     signalsScroll: {
-      flex: 1,
+      gap: 8,
     },
 
-    signalsScrollContent: {
-      gap: 8,
-      paddingBottom: 2,
-    },
+
 
     emptyFeedBox: {
       marginTop: 6,
