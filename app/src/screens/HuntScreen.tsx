@@ -1,3 +1,4 @@
+import { getDistanceInMetres, getBearingInDegrees, normaliseDegrees, shortestAngleDelta, readHuntHeading, getMagneticDeclination } from '../utils/huntNavigation';
 import React, {
   useCallback,
   useEffect,
@@ -198,6 +199,7 @@ type CompassStatus =
 
 type HeadingReference =
   | 'true'
+  | 'corrected'
   | 'magnetic'
   | null;
 
@@ -284,150 +286,16 @@ const isValidAccuracy = (
   accuracy >= 0;
 
 // Calculates straight-line geographic distance.
-const getDistanceInMetres = (
-  latitudeA: number,
-  longitudeA: number,
-  latitudeB: number,
-  longitudeB: number,
-): number => {
-  const earthRadiusMetres =
-    6_371_000;
 
-  const latitudeDifference =
-    ((latitudeB -
-      latitudeA) *
-      Math.PI) /
-    180;
-
-  const longitudeDifference =
-    ((longitudeB -
-      longitudeA) *
-      Math.PI) /
-    180;
-
-  const latitudeARadians =
-    (latitudeA *
-      Math.PI) /
-    180;
-
-  const latitudeBRadians =
-    (latitudeB *
-      Math.PI) /
-    180;
-
-  const haversine =
-    Math.sin(
-      latitudeDifference /
-        2,
-    ) **
-      2 +
-    Math.cos(
-      latitudeARadians,
-    ) *
-      Math.cos(
-        latitudeBRadians,
-      ) *
-      Math.sin(
-        longitudeDifference /
-          2,
-      ) **
-        2;
-
-  const angularDistance =
-    2 *
-    Math.atan2(
-      Math.sqrt(
-        Math.min(1, Math.max(0, haversine)),
-      ),
-      Math.sqrt(
-        Math.max(0, 1 - haversine),
-      ),
-    );
-
-  return (
-    earthRadiusMetres *
-    angularDistance
-  );
-};
 
 // Calculates true bearing from the Explorer to the cache.
-const getBearingInDegrees = (
-  fromLatitude: number,
-  fromLongitude: number,
-  toLatitude: number,
-  toLongitude: number,
-): number => {
-  const fromLatitudeRadians =
-    (fromLatitude *
-      Math.PI) /
-    180;
 
-  const toLatitudeRadians =
-    (toLatitude *
-      Math.PI) /
-    180;
-
-  const longitudeDifferenceRadians =
-    ((toLongitude -
-      fromLongitude) *
-      Math.PI) /
-    180;
-
-  const y =
-    Math.sin(
-      longitudeDifferenceRadians,
-    ) *
-    Math.cos(
-      toLatitudeRadians,
-    );
-
-  const x =
-    Math.cos(
-      fromLatitudeRadians,
-    ) *
-      Math.sin(
-        toLatitudeRadians,
-      ) -
-    Math.sin(
-      fromLatitudeRadians,
-    ) *
-      Math.cos(
-        toLatitudeRadians,
-      ) *
-      Math.cos(
-        longitudeDifferenceRadians,
-      );
-
-  return normaliseDegrees(
-    Math.atan2(
-      y,
-      x,
-    ) *
-      (180 /
-        Math.PI),
-  );
-};
 
 // Keeps angles between zero and 360 degrees.
-const normaliseDegrees = (
-  degrees: number,
-): number =>
-  ((degrees % 360) +
-    360) %
-  360;
+
 
 // Finds the shortest path between two compass angles.
-const shortestAngleDelta = (
-  fromDegrees: number,
-  toDegrees: number,
-): number =>
-  ((
-    toDegrees -
-    fromDegrees +
-    540
-  ) %
-    360) -
-  180;
+
 
 // Converts a bearing to a cardinal label.
 const getCardinalDirection = (
@@ -457,51 +325,9 @@ const getCardinalDirection = (
 };
 
 // Formats distance without producing very long metre values.
-const formatDistance = (
-  distanceMetres:
-    number | null,
-): string => {
-  if (
-    distanceMetres ===
-    null
-  ) {
-    return '--- m';
-  }
-
-  if (
-    distanceMetres <
-    1_000
-  ) {
-    return `${String(
-      Math.max(
-        0,
-        Math.round(
-          distanceMetres,
-        ),
-      ),
-    ).padStart(
-      3,
-      '0',
-    )} m`;
-  }
-
-  const kilometres =
-    distanceMetres /
-    1_000;
-
-  if (
-    kilometres <
-    10
-  ) {
-    return `${kilometres.toFixed(
-      1,
-    )} km`;
-  }
-
-  return `${Math.round(
-    kilometres,
-  )} km`;
-};
+const formatDistance = (metres: number | null): string => metres === null ? '--- m'
+  : metres < 1000 ? String(Math.max(0, Math.round(metres))).padStart(3, '0') + ' m'
+    : (metres / 1000).toFixed(metres < 10000 ? 2 : 1) + ' km';
 
 // Finds whether the platform granted precise rather than approximate location.
 const getPreciseLocationPermission = (
@@ -801,7 +627,7 @@ const CompassDial:
            * SVG remains inside an ordinary Animated.View so react-native-svg
            * never receives StyleSheet.absoluteFill directly on web.
            */}
-          <Animated.View
+          <Animated.View testID="hunt-compass-card"
             pointerEvents="none"
             style={[
               styles.compassSvgLayer,
@@ -945,7 +771,7 @@ const CompassDial:
           </Animated.View>
 
           {/* The rust needle points towards the selected treasure. */}
-          <Animated.View
+          <Animated.View testID="hunt-target-arrow"
             style={[
               styles.targetNeedleWrapper,
 
@@ -953,7 +779,7 @@ const CompassDial:
                 opacity:
                   hasTargetBearing
                     ? 1
-                    : 0.25,
+                    : 0,
 
                 transform: [
                   {
@@ -2156,6 +1982,7 @@ export const HuntScreen:
               damping: 18,
               stiffness: 110,
               mass: 0.75,
+            overshootClamping: true,
 
               useNativeDriver:
                 true,
@@ -2474,6 +2301,12 @@ export const HuntScreen:
     /* ---------------------------------------------------------------------- */
     /* Location tracking                                                      */
     /* ---------------------------------------------------------------------- */
+
+    useEffect(() => {
+      setDistance(null);
+      setTargetBearing(null);
+      targetBearingRef.current = null;
+    }, [targetLocation?.latitude, targetLocation?.longitude]);
 
     const startLocationTracking =
       useCallback(
@@ -3076,6 +2909,11 @@ export const HuntScreen:
             ++headingRequestSequenceRef.current;
 
           removeHeadingSubscription();
+          latestHeadingRef.current = null;
+          lastHeadingStateUpdateRef.current = 0;
+          setDeviceHeading(null);
+          setHeadingReference(null);
+          setHeadingAccuracy(null);
 
           setCompassStatus(
             'CHECKING',
@@ -3098,33 +2936,19 @@ export const HuntScreen:
                       return;
                     }
 
-                    const useTrueHeading =
-                      Number.isFinite(
-                        heading.trueHeading,
-                      ) &&
-                      heading.trueHeading >=
-                        0;
-
-                    const selectedHeading =
-                      useTrueHeading
-                        ? heading.trueHeading
-                        : heading.magHeading;
-
-                    if (
-                      !Number.isFinite(
-                        selectedHeading,
-                      ) || selectedHeading < 0 || selectedHeading > 360
-                    ) {
+                    const fix = latestLiveLocationRef.current;
+                    const declination = fix && isFreshHuntFix(fix) ? getMagneticDeclination(fix.coords.latitude, fix.coords.longitude) : null;
+                    const reading = readHuntHeading(heading, headingOrientationOffset, declination);
+                    if (!reading) {
+                      latestHeadingRef.current = null;
+                      setDeviceHeading(null);
+                      setHeadingReference(null);
+                      setHeadingAccuracy(0);
+                      setCompassStatus('LOW_ACCURACY');
                       return;
                     }
-
-                    const normalisedHeading =
-                      normaliseDegrees(
-                        selectedHeading + headingOrientationOffset,
-                      );
-
-                    latestHeadingRef.current =
-                      normalisedHeading;
+                    const normalisedHeading = reading.degrees;
+                    latestHeadingRef.current = normalisedHeading;
                     if (headingWatchdogRef.current) clearTimeout(headingWatchdogRef.current);
                     headingWatchdogRef.current = setTimeout(() => {
                       if (!isMountedRef.current || requestSequence !== headingRequestSequenceRef.current) return;
@@ -3132,45 +2956,12 @@ export const HuntScreen:
                       setDeviceHeading(null);
                       setHeadingReference(null);
                       setCompassStatus('UNAVAILABLE');
-                      applyHeadingToCompass(0, targetBearingRef.current);
                     }, 8_000);
-
-                    setHeadingReference(
-                      useTrueHeading
-                        ? 'true'
-                        : 'magnetic',
-                    );
-
-                    setHeadingAccuracy(
-                      heading.accuracy,
-                    );
-
-                    setCompassStatus(
-                      !Number.isFinite(heading.accuracy) || heading.accuracy < 2 || heading.accuracy > 3
-                        ? 'LOW_ACCURACY'
-                        : 'READY',
-                    );
-
-                    const now =
-                      Date.now();
-
-                    if (
-                      now -
-                        lastHeadingStateUpdateRef.current >=
-                      HEADING_STATE_UPDATE_INTERVAL_MS
-                    ) {
-                      lastHeadingStateUpdateRef.current =
-                        now;
-
-                      setDeviceHeading(
-                        normalisedHeading,
-                      );
-                    }
-
-                    applyHeadingToCompass(
-                      normalisedHeading,
-                      targetBearingRef.current,
-                    );
+                    setHeadingReference(reading.reference);
+                    setHeadingAccuracy(reading.calibration);
+                    setCompassStatus(reading.calibration < 2 ? 'LOW_ACCURACY' : 'READY');
+                    setDeviceHeading(normalisedHeading);
+                    applyHeadingToCompass(normalisedHeading, targetBearingRef.current);
                   },
 
                   (
@@ -3626,7 +3417,7 @@ export const HuntScreen:
                     )} metres.`
                   : '';
 
-              return `The current location is not precise enough for excavation.${accuracyText}`;
+              return `The current location is not precise enough for excavation.${accuracyText} Hunt needs accuracy of 15 metres or better and a reported distance within 5 metres. Move outdoors with a clear view of the sky, keep the phone steady, and allow 20–30 seconds for a better fix. Enable Precise Location in iOS Settings, then retry.`;
             }
 
             case 'OK':
@@ -3651,7 +3442,10 @@ export const HuntScreen:
             distance >
             DISCOVERY_RADIUS_METRES
           ) {
-            return `Target is approximately ${Math.round(
+            if (gpsAccuracy !== null && distance - gpsAccuracy <= DISCOVERY_RADIUS_METRES) {
+            return 'The GPS uncertainty overlaps the five-metre dig area. Keep the phone steady outdoors and wait for a more precise fix instead of chasing a jumping arrow. The excavation radius remains five metres.';
+          }
+          return `Target is approximately ${Math.round(
               distance,
             )} metres away. Move within ${DISCOVERY_RADIUS_METRES} metres to excavate.`;
           }
@@ -4478,10 +4272,34 @@ export const HuntScreen:
         ?.motionSensitivityEnabled,
     ]);
 
+    const handleCompassRecovery = useCallback(async () => {
+      if (Platform.OS === 'ios' && (interfaceOrientation === null || interfaceOrientation === ScreenOrientation.Orientation.UNKNOWN)) {
+        try {
+          const orientation = await withHuntTimeout(ScreenOrientation.getOrientationAsync(), 3000);
+          if (!isMountedRef.current) return;
+          setInterfaceOrientation(current => current === null || current === ScreenOrientation.Orientation.UNKNOWN ? orientation : current);
+        } catch { /* Keep the compass unavailable until its screen reference is known. */ }
+      }
+      if (isMountedRef.current) setHeadingRetryKey(value => value + 1);
+    }, [interfaceOrientation]);
     /* ---------------------------------------------------------------------- */
     /* Display values                                                         */
     /* ---------------------------------------------------------------------- */
 
+    const canShowTargetArrow = isLiveFixFresh && gpsStatus === 'OK' && targetBearing !== null &&
+      distance !== null && gpsAccuracy !== null && distance > gpsAccuracy &&
+      (headingReference === 'true' || headingReference === 'corrected') && (headingAccuracy ?? 0) >= 2;
+    const navigationGuidance = !isLiveFixFresh ? 'WAITING FOR FRESH GPS · TARGET ARROW PAUSED'
+      : gpsStatus !== 'OK' ? 'GPS ACCURACY LOW · TARGET ARROW PAUSED'
+        : distance === null ? 'CALCULATING TARGET DISTANCE · TARGET ARROW PAUSED'
+          : gpsAccuracy !== null && distance <= gpsAccuracy ? 'NEAR TARGET · DIRECTION WITHIN GPS UNCERTAINTY'
+            : targetBearing === null ? 'TARGET DIRECTION UNAVAILABLE · USE DISTANCE'
+              : compassStatus === 'CHECKING' ? 'WAITING FOR COMPASS · TARGET ARROW PAUSED'
+                : compassStatus === 'ERROR' || compassStatus === 'UNAVAILABLE' ? 'COMPASS UNAVAILABLE · RETRY OR USE NUMERICAL BEARING'
+                  : (headingAccuracy ?? 0) < 2 ? 'CALIBRATE COMPASS · KEEP PHONE FLAT AND AWAY FROM METAL'
+                    : headingReference === 'magnetic' ? 'TRUE NORTH UNAVAILABLE · USE NUMERICAL BEARING'
+                      : deviceHeading === null ? 'WAITING FOR COMPASS · TARGET ARROW PAUSED'
+                        : 'POINT THE TOP EDGE OF THE SCREEN ALONG THE ARROW';
     const formattedDistance =
       formatDistance(
         distance,
@@ -4515,7 +4333,7 @@ export const HuntScreen:
 
           return `${Math.round(
             targetBearing,
-          )}° ${getCardinalDirection(
+          ) % 360}° TRUE ${getCardinalDirection(
             targetBearing,
           )}`;
         },
@@ -4528,6 +4346,7 @@ export const HuntScreen:
       headingReference ===
         'true'
         ? 'TRUE NORTH'
+        : headingReference === 'corrected' ? 'TRUE NORTH (MAGNETIC CORRECTED)'
         : headingReference ===
             'magnetic'
           ? 'MAGNETIC NORTH'
@@ -4542,7 +4361,7 @@ export const HuntScreen:
               ? 'Device heading unavailable.'
               : `Device heading ${Math.round(
                   deviceHeading,
-                )} degrees ${getCardinalDirection(
+                ) % 360} degrees ${getCardinalDirection(
                   deviceHeading,
                 )}.`;
 
@@ -4556,10 +4375,11 @@ export const HuntScreen:
                   targetBearing,
                 )}.`;
 
-          return `Treasure compass. ${headingText} ${bearingText} Distance ${accessibleDistance}.`;
+          return `Treasure compass. ${headingText} ${bearingText} Distance ${accessibleDistance}. ${canShowTargetArrow ? 'Target arrow available.' : 'Target arrow paused.'}`;
         },
         [
           accessibleDistance,
+          canShowTargetArrow,
           deviceHeading,
           targetBearing,
         ],
@@ -4583,6 +4403,7 @@ export const HuntScreen:
       !isExcavated &&
       (
         (locationFixSource === 'live' && !isLiveFixFresh) ||
+        (distance !== null && gpsAccuracy !== null && distance > DISCOVERY_RADIUS_METRES && distance - gpsAccuracy <= DISCOVERY_RADIUS_METRES) ||
         gpsStatus ===
           'PERMISSION_REQUIRED' ||
         gpsStatus ===
@@ -5226,10 +5047,7 @@ export const HuntScreen:
                     size={
                       compassSize
                     }
-                    hasTargetBearing={
-                      targetBearing !==
-                      null
-                    }
+                    hasTargetBearing={canShowTargetArrow}
                     accessibilityLabel={
                       compassAccessibilityLabel
                     }
@@ -5299,6 +5117,7 @@ export const HuntScreen:
                   }
                 </Text>
 
+                {(compassStatus === 'UNAVAILABLE' || compassStatus === 'ERROR' || compassStatus === 'LOW_ACCURACY') && <Pressable accessibilityRole="button" accessibilityLabel="Retry compass" onPress={() => { void handleCompassRecovery(); }} style={styles.locationActionButton}><Text style={styles.locationActionButtonText}>RETRY COMPASS</Text></Pressable>}
                 {headingAccuracy !==
                   null &&
                 compassStatus !==
@@ -5315,6 +5134,7 @@ export const HuntScreen:
                     /3
                   </Text>
                 ) : null}
+                {Platform.OS === 'ios' && headingAccuracy !== null && headingAccuracy > 0 && <Text style={styles.headingAccuracyText}>COMPASS UNCERTAINTY {headingAccuracy === 3 ? '≤20°' : headingAccuracy === 2 ? '≤35°' : '≤50°'}</Text>}
               </View>
 
               <View
@@ -5322,6 +5142,8 @@ export const HuntScreen:
                   styles.telemetryGroup
                 }
               >
+                <Text accessibilityLiveRegion="polite" style={styles.locationExplanation}>{navigationGuidance}</Text>
+                {gpsAccuracy !== null && <Text style={styles.headingAccuracyText}>STRAIGHT-LINE ESTIMATE · GPS ±{Math.round(gpsAccuracy)} M</Text>}
                 <OdometerDisplay
                   value={
                     formattedDistance
@@ -5447,6 +5269,7 @@ export const HuntScreen:
                   }
                 </Text>
 
+                {gpsStatus === 'LOW_ACCURACY' && Platform.OS === 'ios' && <Pressable accessibilityRole="button" accessibilityLabel="Open iOS location settings" onPress={() => { void Linking.openSettings().catch(() => showAccessibleAlert('Settings Unavailable', 'Open iOS Settings and enable Precise Location for Treasi.')); }} style={styles.locationActionButton}><Text style={styles.locationActionButtonText}>OPEN LOCATION SETTINGS</Text></Pressable>}
                 {locationRecoveryVisible ? (
                   <Pressable
                     accessibilityRole="button"
@@ -5638,7 +5461,7 @@ export const HuntScreen:
                 }
               >
                 <View
-                  accessible
+
                   accessibilityLabel={`${treasure.title || 'Treasure cache'}. Hint: ${
                     treasure.hint ||
                     'No clue provided.'

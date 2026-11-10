@@ -1,3 +1,6 @@
+import { getDistanceInKilometres } from '../utils/huntNavigation';
+import { useNearbyTreasures } from '../hooks/useNearbyTreasures';
+import { geohashForLocation } from 'geofire-common';
 import { useKeyboardEditing } from '../hooks/useKeyboardEditing';
 import { KeyboardEditingBar } from '../components/KeyboardEditingBar';
 import { FormScrollView, FormTextInput } from '../components/FormScrollView';
@@ -300,68 +303,7 @@ const isValidCoordinate = (
   longitude <= 180;
 
 // Calculates straight-line geographic distance.
-const calculateHaversineDistance = (
-  latitudeA: number,
-  longitudeA: number,
-  latitudeB: number,
-  longitudeB: number,
-): number => {
-  const earthRadiusKm =
-    6371;
 
-  const latitudeDifference =
-    ((latitudeB -
-      latitudeA) *
-      Math.PI) /
-    180;
-
-  const longitudeDifference =
-    ((longitudeB -
-      longitudeA) *
-      Math.PI) /
-    180;
-
-  const latitudeARadians =
-    (latitudeA *
-      Math.PI) /
-    180;
-
-  const latitudeBRadians =
-    (latitudeB *
-      Math.PI) /
-    180;
-
-  const value =
-    Math.sin(
-      latitudeDifference /
-        2,
-    ) **
-      2 +
-    Math.cos(
-      latitudeARadians,
-    ) *
-      Math.cos(
-        latitudeBRadians,
-      ) *
-      Math.sin(
-        longitudeDifference /
-          2,
-      ) **
-        2;
-
-  return (
-    earthRadiusKm *
-    2 *
-    Math.atan2(
-      Math.sqrt(
-        Math.min(1, Math.max(0, value)),
-      ),
-      Math.sqrt(
-        Math.max(0, 1 - value),
-      ),
-    )
-  );
-};
 
 // Parses coordinates entered manually.
 const parseCoordinate = (
@@ -1235,117 +1177,13 @@ export const InventoryScreen:
     /* READ: active treasures                                                 */
     /* ---------------------------------------------------------------------- */
 
+    const nearbyQuery = useNearbyTreasures(currentUserId, userCoords, INVENTORY_RADIUS_KM, retryKey);
     useEffect(() => {
-      let active = true;
-      if (
-        !currentUserId
-      ) {
-        setActiveTreasureRecords(
-          [],
-        );
+      setActiveTreasureRecords(nearbyQuery.items.map(item => buildTreasureRecord(item.treasureId, item)!).filter(Boolean));
+      setActiveTreasuresLoading(nearbyQuery.loading);
+      setActiveTreasuresError(nearbyQuery.error);
+    }, [nearbyQuery.items, nearbyQuery.loading, nearbyQuery.error]);
 
-        setActiveTreasuresLoading(
-          false,
-        );
-
-        setActiveTreasuresError(
-          'EXPLORER SESSION REQUIRED',
-        );
-
-        return;
-      }
-
-      setActiveTreasuresLoading(
-        true,
-      );
-
-      setActiveTreasuresError(
-        null,
-      );
-
-      const activeQuery =
-        query(
-          collection(
-            db,
-            'treasures',
-          ),
-
-          where(
-            'isArchived',
-            '==',
-            false,
-          ),
-        );
-
-      const unsubscribe =
-        onSnapshot(
-          activeQuery,
-
-          (
-            snapshot,
-          ) => {
-            if (!active || accountRef.current !== currentAccount) return;
-            const records =
-              snapshot.docs
-                .map(
-                  (
-                    snapshotDocument,
-                  ) =>
-                    buildTreasureRecord(
-                      snapshotDocument.id,
-                      snapshotDocument.data() as
-                        Partial<TreasureDocument>,
-                    ),
-                )
-                .filter(
-                  (
-                    record,
-                  ): record is TreasureRecord =>
-                    record !==
-                    null,
-                );
-
-            setActiveTreasureRecords(
-              records,
-            );
-
-            setActiveTreasuresError(
-              null,
-            );
-
-            setActiveTreasuresLoading(
-              false,
-            );
-          },
-
-          (
-            error,
-          ) => {
-            if (!active || accountRef.current !== currentAccount) return;
-            logDevelopmentWarning(
-              '[Treasi Inventory] Active treasure subscription failed:',
-              error,
-            );
-
-            setActiveTreasuresLoading(
-              false,
-            );
-
-            setActiveTreasuresError(
-              getFriendlyFirestoreError(
-                error,
-                'FAILED TO SYNCHRONISE ACTIVE FIELD CACHE DATA.',
-              ),
-            );
-          },
-        );
-
-      return () => { active = false; unsubscribe(); };
-    }, [
-      currentUserId,
-      currentAccount,
-      retryKey,
-    ]);
 
     /* ---------------------------------------------------------------------- */
     /* READ: all treasures owned by the current Explorer                      */
@@ -1679,7 +1517,7 @@ export const InventoryScreen:
 
                 const distanceKm =
                   userCoords
-                    ? calculateHaversineDistance(
+                    ? getDistanceInKilometres(
                         userCoords.latitude,
                         userCoords.longitude,
                         cacheLat,
@@ -2357,6 +2195,7 @@ export const InventoryScreen:
                 );
 
               const createdData = {
+                geohash: geohashForLocation([latitude, longitude]),
                 treasureId:
                   treasureReference.id,
 
@@ -2842,6 +2681,7 @@ export const InventoryScreen:
                       payloadText:
                         editPayload.trim(),
 
+                      geohash: geohashForLocation([latitude, longitude]),
                       location:
                         new GeoPoint(
                           latitude,
@@ -2853,7 +2693,7 @@ export const InventoryScreen:
                     },
                   );
 
-                  return { ...liveTreasure, title: editTitle.trim().toUpperCase(), hint: editHint.trim(), payloadText: editPayload.trim(), location: new GeoPoint(latitude, longitude) };
+                  return { ...liveTreasure, geohash: geohashForLocation([latitude, longitude]), title: editTitle.trim().toUpperCase(), hint: editHint.trim(), payloadText: editPayload.trim(), location: new GeoPoint(latitude, longitude) };
                 },
               );
 
@@ -3201,6 +3041,7 @@ export const InventoryScreen:
                   transaction.update(
                     treasureReference,
                     {
+                      geohash: geohashForLocation([liveTreasure.location.latitude, liveTreasure.location.longitude]),
                       isArchived:
                         false,
 
@@ -3209,7 +3050,7 @@ export const InventoryScreen:
                     },
                   );
 
-                  return { ...liveTreasure, isArchived: false };
+                  return { ...liveTreasure, geohash: geohashForLocation([liveTreasure.location.latitude, liveTreasure.location.longitude]), isArchived: false };
                 },
               );
 
@@ -3720,31 +3561,9 @@ export const InventoryScreen:
         ],
       );
 
-    const syncWarningText =
-      useMemo(
-        () =>
-          [
-            ownerTreasuresError,
-            profileError,
-            discoveryError,
-          ]
-            .filter(
-              (
-                value,
-              ): value is string =>
-                Boolean(
-                  value,
-                ),
-            )
-            .join(
-              ' · ',
-            ),
-        [
-          discoveryError,
-          ownerTreasuresError,
-          profileError,
-        ],
-      );
+    const syncWarningText = useMemo(() =>
+      [activeTreasuresError, ownerTreasuresError, profileError, discoveryError].filter(Boolean).join(' · '),
+      [activeTreasuresError, ownerTreasuresError, profileError, discoveryError]);
 
     /* ---------------------------------------------------------------------- */
     /* Render                                                                 */
@@ -4607,7 +4426,7 @@ export const InventoryScreen:
                   </Text>
                 </Pressable>
               </FormScrollView>
-            ) : activeTreasuresError ? (
+            ) : activeTreasuresError && inventoryItems.length === 0 ? (
               <View
                 accessibilityRole="alert"
                 style={
@@ -4664,7 +4483,7 @@ export const InventoryScreen:
                   </Text>
                 </Pressable>
               </View>
-            ) : isLoading ? (
+            ) : isLoading && inventoryItems.length === 0 ? (
               <View
                 accessible
                 accessibilityRole="progressbar"

@@ -82,6 +82,7 @@ export interface UserDocument {
  * Physical digital caches planted in physical space.
  */
 export interface TreasureDocument {
+  geohash?: string;
   treasureId: string;
 
   creatorId: string;

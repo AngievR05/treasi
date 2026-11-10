@@ -1,3 +1,5 @@
+import { getDistanceInKilometres } from '../utils/huntNavigation';
+import { useNearbyTreasures } from '../hooks/useNearbyTreasures';
 import React, {
   useCallback,
   useEffect,
@@ -192,52 +194,7 @@ const isValidCoordinate = (
   longitude <= 180;
 
 // Calculates real straight-line distance between two geographic positions.
-const calculateHaversineDistance = (
-  latitudeA: number,
-  longitudeA: number,
-  latitudeB: number,
-  longitudeB: number,
-): number => {
-  const earthRadiusKm = 6371;
 
-  const latitudeDifference =
-    ((latitudeB - latitudeA) *
-      Math.PI) /
-    180;
-
-  const longitudeDifference =
-    ((longitudeB - longitudeA) *
-      Math.PI) /
-    180;
-
-  const a =
-    Math.sin(
-      latitudeDifference / 2,
-    ) **
-      2 +
-    Math.cos(
-      (latitudeA * Math.PI) /
-        180,
-    ) *
-      Math.cos(
-        (latitudeB * Math.PI) /
-          180,
-      ) *
-      Math.sin(
-        longitudeDifference /
-          2,
-      ) **
-        2;
-
-  const c =
-    2 *
-    Math.atan2(
-      Math.sqrt(Math.min(1, a)),
-      Math.sqrt(Math.max(0, 1 - a)),
-    );
-
-  return earthRadiusKm * c;
-};
 
 // Formats map distances using metres for nearby treasures.
 const formatDistanceText = (
@@ -496,6 +453,12 @@ export const DashboardScreen:
     const { userLocation, locationFixSource, isInitialisingLocation, locationError,
       locationPermissionStatus, canAskLocationAgain, locationServicesEnabled,
       startLocationService } = useDashboardLocation(userData?.batteryOptimizerEnabled === true);
+
+    const nearbyQuery = useNearbyTreasures(currentUser?.uid, userLocation?.coords ?? null, MAX_TREASURE_DISTANCE_KM, syncAttempt);
+    useEffect(() => {
+      setAllTreasures(nearbyQuery.items);
+      setFirestoreErrors(current => ({ ...current, treasures: nearbyQuery.error }));
+    }, [nearbyQuery.items, nearbyQuery.error]);
 
     /* ---------------------------------------------------------------------- */
     /* Map state                                                             */
@@ -822,68 +785,6 @@ export const DashboardScreen:
       /* Active treasures                                                     */
       /* -------------------------------------------------------------------- */
 
-      const treasuresQuery =
-        query(
-          collection(
-            db,
-            'treasures',
-          ),
-          where(
-            'isArchived',
-            '==',
-            false,
-          ),
-        );
-
-      const unsubscribeTreasures =
-        onSnapshot(
-          treasuresQuery,
-
-          (snapshot) => {
-            if (!active) return;
-            const validTreasures:
-              TreasureDocument[] =
-              [];
-
-            snapshot.forEach(
-              (
-                documentSnapshot,
-              ) => {
-                const treasure = readDashboardTreasure(documentSnapshot.id, documentSnapshot.data());
-                if (treasure) validTreasures.push(treasure);
-              },
-            );
-
-            setAllTreasures(
-              validTreasures,
-            );
-
-            setFirestoreErrors(
-              (current) => ({
-                ...current,
-                treasures:
-                  null,
-              }),
-            );
-          },
-
-          (error) => {
-            if (!active) return;
-            logDevelopmentWarning(
-              '[Treasi Dashboard] Treasure subscription failed:',
-              error,
-            );
-
-            setFirestoreErrors(
-              (current) => ({
-                ...current,
-                treasures:
-                  'TREASURE FIELD SYNC OFFLINE',
-              }),
-            );
-          },
-        );
-
       /* -------------------------------------------------------------------- */
       /* Activity feed                                                        */
       /* -------------------------------------------------------------------- */
@@ -965,7 +866,6 @@ export const DashboardScreen:
       return () => {
         active = false;
         unsubscribeUser();
-        unsubscribeTreasures();
         unsubscribeActivity();
       };
     }, [
@@ -1058,11 +958,11 @@ export const DashboardScreen:
       useMemo(
         () => {
           /*
-           * Without a real location, show the real active cache collection
-           * rather than inventing proximity.
+           * Nearby loading waits for coordinates instead of downloading
+           * an unbounded active-cache collection.
            */
           if (!userLocation) {
-            return allTreasures;
+            return [];
           }
 
           const {
@@ -1099,7 +999,7 @@ export const DashboardScreen:
               }
 
               const distanceKm =
-                calculateHaversineDistance(
+                getDistanceInKilometres(
                   userLatitude,
                   userLongitude,
                   treasure.location
@@ -1842,7 +1742,7 @@ export const DashboardScreen:
             return null;
           }
 
-          return calculateHaversineDistance(
+          return getDistanceInKilometres(
             userLatitude,
             userLongitude,
             treasureLatitude,

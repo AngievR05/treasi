@@ -292,7 +292,7 @@ The Hunt experience includes:
 - Horizontal accuracy checks.
 - Five-metre discovery radius.
 - Native compass heading on supported iOS/Android devices.
-- True-north heading where available, with magnetic-north fallback.
+- True-north heading, with location-based magnetic correction when needed and available.
 - Numerical bearing fallback.
 - Android simulated-location rejection for discovery verification.
 - iOS/Android precise-location checks where exposed by the platform.
@@ -642,7 +642,7 @@ On native iOS and Android, Treasi uses Expo Location heading data rather than ma
 The Hunt compass:
 
 - Uses true heading when available.
-- Falls back to magnetic heading.
+- Corrects magnetic heading to true north using the current position and a valid World Magnetic Model; pauses the target arrow when a reliable north reference is unavailable.
 - Rotates the instrument card relative to the device heading.
 - Points the target needle towards the geographic bearing of the treasure.
 - Shows numerical bearing as a fallback.
@@ -1157,7 +1157,7 @@ Exact profile location should only be written when the Explorer explicitly enabl
 
 ### Geospatial Scale
 
-The current treasure model stores a Firestore `GeoPoint` but does not yet use a geohash-backed server-side radius query. Large treasure datasets would require a more scalable geospatial-query strategy.
+Dashboard and Inventory use geohash-backed geographic queries with exact WGS84 distance filtering. Existing caches require a geohash backfill and the composite index must be deployed before these clients are released. See [geographic loading rollout](app/GEOGRAPHIC_LOADING_ROLLOUT.md).
 
 ### Development Dependencies
 
@@ -1170,7 +1170,7 @@ The project currently contains some dependencies and legacy navigation/configura
 Potential future work includes:
 
 1. Trusted server-side discovery verification.
-2. Geohash-backed nearby treasure queries.
+2. Monitor geographic query performance and tune radius/pagination for dense areas.
 3. Full Firebase Storage image upload during cache creation.
 4. Secure server-side account deletion.
 5. Richer achievement and badge progression.

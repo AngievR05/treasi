@@ -1,3 +1,4 @@
+jest.mock('geofire-common', () => ({ ...jest.requireActual('geofire-common'), geohashQueryBounds: () => [['a', 'z']] }));
 import React from 'react';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react-native';
 import { AccessibilityInfo, Alert, Linking } from 'react-native';
@@ -20,7 +21,7 @@ jest.mock('firebase/auth', () => ({ onAuthStateChanged: (_, callback) => {
 jest.mock('firebase/firestore', () => ({
   collection: (_, path) => ({ path }),
   doc: (parent, ...parts) => ({ path: parts.length ? parts.join('/') : `${parent.path}/event` }),
-  query: reference => reference, where: jest.fn(), orderBy: jest.fn(), limit: jest.fn(),
+  query: reference => reference, where: jest.fn(), orderBy: jest.fn(), limit: jest.fn(), startAt: jest.fn(), endAt: jest.fn(),
   serverTimestamp: () => 'server-timestamp', writeBatch: () => mockBatch,
   onSnapshot: (reference, next, error) => {
     const unsubscribe = jest.fn();

@@ -1,3 +1,5 @@
+import { geohashForLocation } from 'geofire-common';
+jest.mock('geofire-common', () => ({ ...jest.requireActual('geofire-common'), geohashQueryBounds: () => [['a', 'z']] }));
 import { observeKeyboard } from './helpers/keyboard';
 import React from 'react';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react-native';
@@ -22,6 +24,7 @@ jest.mock('firebase/firestore', () => ({
   },
   where: (field, _, value) => ({ field, value }),
   query: (reference, filter) => ({ ...reference, key: `${reference.path}:${filter.field}` }),
+  orderBy: jest.fn(), startAt: jest.fn(), endAt: jest.fn(),
   GeoPoint: class { constructor(latitude, longitude) { this.latitude = latitude; this.longitude = longitude; } },
   serverTimestamp: () => 'server-timestamp', writeBatch: () => mockBatch, runTransaction: jest.fn(),
   onSnapshot: (reference, next, error) => {
@@ -46,7 +49,7 @@ const querySnapshot = entries => {
 };
 const emit = async (entries = [['own-id', cache()]], found = []) => act(() => {
   mockObservers.get(`users/${mockAuth.currentUser.uid}`).next(snapshot({ uid: mockAuth.currentUser.uid, username: 'EXPLORER' }));
-  mockObservers.get('treasures:isArchived').next(querySnapshot(entries.filter(([, data]) => !data.isArchived)));
+  mockObservers.get('treasures:isArchived')?.next(querySnapshot(entries.filter(([, data]) => !data.isArchived)));
   mockObservers.get('treasures:creatorId').next(querySnapshot(entries.filter(([, data]) => data.creatorId === mockAuth.currentUser.uid)));
   mockObservers.get('discoveries:hunterId').next(querySnapshot(found.map(id => [`found-${id}`, { treasureId: id }])));
 });
@@ -113,7 +116,7 @@ test('creates a cache and its activity atomically, then selects the committed re
   await mount(); await openCreate(); await fillCreate(); await press('Seal and bury cache');
   expect(mockBatch.commit).toHaveBeenCalledTimes(1); expect(mockBatch.set).toHaveBeenCalledTimes(2);
   const [reference, data] = mockBatch.set.mock.calls[0];
-  expect(data).toEqual(expect.objectContaining({ treasureId: reference.id, creatorId: 'explorer', title: 'NEW CACHE', hint: 'A clue', payloadText: 'A reward', isArchived: false,
+  expect(data).toEqual(expect.objectContaining({ treasureId: reference.id, creatorId: 'explorer', title: 'NEW CACHE', hint: 'A clue', payloadText: 'A reward', isArchived: false, geohash: geohashForLocation([-25.89, 28.18]),
     location: { latitude: -25.89, longitude: 28.18 } }));
   expect(mockBatch.set.mock.calls[1][1]).toEqual(expect.objectContaining({ type: 'TREASURE_HIDDEN', targetId: reference.id }));
   expect(screen.getByLabelText('Edit NEW CACHE')).toBeTruthy();
@@ -190,7 +193,7 @@ test('edits title, clue, reward and coordinates in an owner-checked transaction'
   await change('Edit secret payload', 'New reward'); await change('Edit cache latitude', '-26'); await change('Edit cache longitude', '29');
   await press('Save cache changes');
   expect(mockTransaction.get).toHaveBeenCalledWith(expect.objectContaining({ path: 'treasures/own-id' }));
-  expect(mockTransaction.update).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ title: 'UPDATED CACHE', hint: 'New clue', payloadText: 'New reward', location: { latitude: -26, longitude: 29 } }));
+  expect(mockTransaction.update).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ title: 'UPDATED CACHE', hint: 'New clue', payloadText: 'New reward', geohash: geohashForLocation([-26, 29]), location: { latitude: -26, longitude: 29 } }));
   expect(screen.getByLabelText('Edit UPDATED CACHE')).toBeTruthy();
 });
 
@@ -219,7 +222,7 @@ test('archives a cache and its activity atomically, retaining it for restore', a
 test('restores an archived owner cache', async () => {
   mockStoredCache = cache({ isArchived: true }); await mount({}, [['own-id', mockStoredCache]]);
   await press('Restore OWN CACHE'); await press('RESTORE CACHE');
-  expect(mockTransaction.update).toHaveBeenCalledWith(expect.anything(), { isArchived: false, updatedAt: 'server-timestamp' });
+  expect(mockTransaction.update).toHaveBeenCalledWith(expect.anything(), { isArchived: false, geohash: geohashForLocation([-25.89, 28.18]), updatedAt: 'server-timestamp' });
   expect(screen.getByLabelText('Archive OWN CACHE')).toBeTruthy();
 });
 
@@ -299,7 +302,9 @@ test('malformed text is safe in detail and edit views, while malformed coordinat
 
 test('retrying subscriptions ignores callbacks from old listeners', async () => {
   await mount(); const old = mockObservers.get('treasures:isArchived');
-  await act(() => old.error(new Error('unavailable'))); await press('Retry cache synchronisation');
+  await act(() => old.error(new Error('unavailable')));
+  expect(screen.getByRole('button', { name: /^OWN CACHE\./ })).toBeTruthy();
+  await press('Retry Inventory synchronisation');
   expect(old.unsubscribe).toHaveBeenCalledTimes(1); await emit();
   await act(() => old.next(querySnapshot([['foreign', cache({ title: 'STALE RECORD', creatorId: 'other' })]])));
   expect(screen.queryByRole('button', { name: /^STALE RECORD\./ })).toBeNull();

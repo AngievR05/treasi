@@ -1,3 +1,4 @@
+import { Geodesic } from 'geographiclib-geodesic';
 import React from 'react';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react-native';
 import { AccessibilityInfo, Alert, AppState, Linking } from 'react-native';
@@ -299,7 +300,7 @@ test('compass uses true north, supports magnetic fallback, and clears stale head
   await act(() => mockHeadings.at(-1).next({ trueHeading: 90, magHeading: 80, accuracy: 3 }));
   expect(screen.getByText('TRUE NORTH · COMPASS READY')).toBeTruthy();
   await act(() => mockHeadings.at(-1).next({ trueHeading: -1, magHeading: 80, accuracy: 2 }));
-  expect(screen.getByText('MAGNETIC NORTH · COMPASS READY')).toBeTruthy();
+  expect(screen.getByText('TRUE NORTH (MAGNETIC CORRECTED) · COMPASS READY')).toBeTruthy();
   await act(() => mockHeadings.at(-1).error('interrupted'));
   expect(screen.getByText('COMPASS INTERRUPTED · USE BEARING')).toBeTruthy();
 });
@@ -369,4 +370,80 @@ test('terminated Firestore listeners cannot restore old target state after retry
   await emit(); await position(fix());
   await act(() => old.next(snapshot(treasure({ isArchived: true }))));
   expect(screen.getByLabelText('Excavate treasure')).toBeEnabled();
+});
+
+test.each([
+  [ScreenOrientation.Orientation.PORTRAIT_UP, 90],
+  [ScreenOrientation.Orientation.LANDSCAPE_LEFT, 180],
+  [ScreenOrientation.Orientation.LANDSCAPE_RIGHT, 0],
+])('the target arrow points straight ahead when the screen top faces the eastward cache in orientation %s', async (orientation, heading) => {
+  ScreenOrientation.getOrientationAsync.mockResolvedValue(orientation);
+  const target = Geodesic.WGS84.Direct(-25.89, 28.18, 90, 100);
+  await mount({}, treasure({ location: { latitude: target.lat2, longitude: target.lon2 } })); await position(fix());
+  await act(() => mockHeadings.at(-1).next({ trueHeading: heading, magHeading: heading, accuracy: 3 }));
+  expect(screen.getByTestId('hunt-target-arrow', { includeHiddenElements: true })).toHaveStyle({ opacity: 1 });
+  const dial = screen.getByLabelText(/^Treasure compass\./);
+  expect(dial.props.accessibilityLabel).toContain('Device heading 90 degrees E.');
+  expect(dial.props.accessibilityLabel).toContain('Target bearing 90 degrees E.');
+});
+test('the arrow is paused inside GPS uncertainty instead of pointing at a fictitious north-bearing target', async () => {
+  await mount(); await position(fix()); await act(() => mockHeadings.at(-1).next({ trueHeading: 90, magHeading: 90, accuracy: 3 }));
+  expect(screen.getByTestId('hunt-target-arrow', { includeHiddenElements: true })).toHaveStyle({ opacity: 0 });
+  expect(screen.getByText('NEAR TARGET · DIRECTION WITHIN GPS UNCERTAINTY')).toBeTruthy();
+});
+test('stale GPS pauses the target arrow even if compass headings continue arriving', async () => {
+  const target = Geodesic.WGS84.Direct(-25.89, 28.18, 90, 100);
+  await mount({}, treasure({ location: { latitude: target.lat2, longitude: target.lon2 } })); await position(fix());
+  await act(() => mockHeadings.at(-1).next({ trueHeading: 90, magHeading: 90, accuracy: 3 }));
+  expect(screen.getByTestId('hunt-target-arrow', { includeHiddenElements: true })).toHaveStyle({ opacity: 1 });
+  await act(() => jest.advanceTimersByTime(13000)); await act(() => mockHeadings.at(-1).next({ trueHeading: 90, magHeading: 90, accuracy: 3 }));
+  expect(screen.getByTestId('hunt-target-arrow', { includeHiddenElements: true })).toHaveStyle({ opacity: 0 });
+});
+test('uncalibrated compass readings never keep an old ready heading visible', async () => {
+  await mount(); await position(fix()); await act(() => mockHeadings.at(-1).next({ trueHeading: 90, magHeading: 90, accuracy: 3 }));
+  await act(() => mockHeadings.at(-1).next({ trueHeading: 270, magHeading: 270, accuracy: 0 })); expect(screen.queryByLabelText(/^Treasure compass\./)).toBeNull();
+});
+test('poor GPS explains the exact thresholds, offers recovery guidance, and opens iOS settings', async () => {
+  await mount(); await position(fix({ coords: { latitude: -25.89, longitude: 28.18, accuracy: 40 } }));
+  expect(screen.getAllByText(/Hunt needs accuracy of 15 metres or better and a reported distance within 5 metres/).length).toBeGreaterThan(0);
+  expect(screen.getAllByText(/clear view of the sky/).length).toBeGreaterThan(0); await press('Open iOS location settings'); expect(Linking.openSettings).toHaveBeenCalledTimes(1);
+  await press('Check excavation readiness'); expect(runTransaction).not.toHaveBeenCalled();
+});
+test('a fix overlapping the dig boundary offers guidance and retry without widening the five-metre radius', async () => {
+  const target = Geodesic.WGS84.Direct(-25.89, 28.18, 90, 8);
+  await mount({}, treasure({ location: { latitude: target.lat2, longitude: target.lon2 } }));
+  await position(fix({ coords: { latitude: -25.89, longitude: 28.18, accuracy: 10 } }));
+  expect(screen.getAllByText(/GPS uncertainty overlaps the five-metre dig area/).length).toBeGreaterThan(0); expect(screen.getByLabelText('RETRY LOCATION')).toBeEnabled();
+  await press('Check excavation readiness'); expect(runTransaction).not.toHaveBeenCalled();
+});
+
+test('compass recovery retries a failed iOS orientation lookup before displaying a heading', async () => {
+  ScreenOrientation.getOrientationAsync.mockRejectedValueOnce(new Error('orientation failed'));
+  await mount(); expect(Location.watchHeadingAsync).not.toHaveBeenCalled();
+  ScreenOrientation.getOrientationAsync.mockResolvedValueOnce(ScreenOrientation.Orientation.LANDSCAPE_LEFT);
+  await press('Retry compass'); await position(fix());
+  await act(() => mockHeadings.at(-1).next({ trueHeading: 90, magHeading: 90, accuracy: 3 }));
+  expect(screen.getByLabelText(/^Treasure compass\./).props.accessibilityLabel).toContain('Device heading 0 degrees N.');
+});
+test('compass retry ignores callbacks from its previous subscription', async () => {
+  await mount(); await position(fix()); const old = mockHeadings.at(-1); await act(() => old.error('interrupted'));
+  await press('Retry compass'); await act(() => old.next({ trueHeading: 90, magHeading: 90, accuracy: 3 }));
+  expect(screen.queryByLabelText(/^Treasure compass\./)).toBeNull();
+  await act(() => mockHeadings.at(-1).next({ trueHeading: 0, magHeading: 0, accuracy: 3 })); expect(screen.getByLabelText(/^Treasure compass\./)).toBeTruthy();
+});
+test('a moved target clears the previous numerical distance until its new position is calculated', async () => {
+  await mount(); await position(fix());
+  const moved = Geodesic.WGS84.Direct(-25.89, 28.18, 90, 100);
+  await emit('cache-id', treasure({ location: { latitude: moved.lat2, longitude: moved.lon2 } }));
+  expect(screen.getByLabelText('Distance to target: unavailable')).toBeTruthy();
+  await position(fix()); expect(screen.getByLabelText('Distance to target: 100 metres')).toBeTruthy();
+});
+
+test('an interrupted compass never instructs the user to follow an unavailable arrow', async () => {
+  const target = Geodesic.WGS84.Direct(-25.89, 28.18, 90, 100);
+  await mount({}, treasure({ location: { latitude: target.lat2, longitude: target.lon2 } })); await position(fix());
+  await act(() => mockHeadings.at(-1).next({ trueHeading: 90, magHeading: 90, accuracy: 3 }));
+  await act(() => mockHeadings.at(-1).error('interrupted'));
+  expect(screen.getByText('COMPASS UNAVAILABLE · RETRY OR USE NUMERICAL BEARING')).toBeTruthy();
+  expect(screen.queryByText('POINT THE TOP EDGE OF THE SCREEN ALONG THE ARROW')).toBeNull();
 });
