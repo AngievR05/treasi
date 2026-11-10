@@ -5,11 +5,6 @@
     "version": "1.0.0",
     "orientation": "landscape",
     "userInterfaceStyle": "dark",
-    "splash": {
-      "image": "./assets/splash-icon.png",
-      "resizeMode": "contain",
-      "backgroundColor": "#2C3B2E"
-    },
     "ios": {
       "supportsTablet": true,
       "requireFullScreen": true,
@@ -32,13 +27,23 @@
       "bundler": "metro"
     },
     "plugins": [
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/splash-icon.png",
+          "imageWidth": 160,
+          "resizeMode": "contain",
+          "backgroundColor": "#2C3B2E"
+        }
+      ],
       "expo-font",
       [
         "expo-location",
         {
           "locationWhenInUsePermission": "Allow Treasi to access device GPS for field cache hunting."
         }
-      ]
+      ],
+      "expo-status-bar"
     ]
   }
 }

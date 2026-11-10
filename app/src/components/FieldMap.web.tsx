@@ -1616,7 +1616,7 @@ const styles =
     },
 
     loading: {
-      ...StyleSheet.absoluteFillObject,
+      ...StyleSheet.absoluteFill,
 
       alignItems:
         'center',
@@ -1639,7 +1639,7 @@ const styles =
     },
 
     errorOverlay: {
-      ...StyleSheet.absoluteFillObject,
+      ...StyleSheet.absoluteFill,
 
       alignItems:
         'center',

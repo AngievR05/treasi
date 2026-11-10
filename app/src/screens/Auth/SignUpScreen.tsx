@@ -17,6 +17,7 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  type TextInputInstance,
   useWindowDimensions,
   View,
 } from 'react-native';
@@ -254,22 +255,22 @@ export const SignUpScreen:
     /* ---------------------------------------------------------------------- */
 
     const callsignInputRef =
-      useRef<TextInput>(
+      useRef<TextInputInstance>(
         null,
       );
 
     const emailInputRef =
-      useRef<TextInput>(
+      useRef<TextInputInstance>(
         null,
       );
 
     const passwordInputRef =
-      useRef<TextInput>(
+      useRef<TextInputInstance>(
         null,
       );
 
     const confirmPasswordInputRef =
-      useRef<TextInput>(
+      useRef<TextInputInstance>(
         null,
       );
 

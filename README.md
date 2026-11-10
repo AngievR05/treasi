@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  A landscape-first, sensor-driven scavenger-hunt application built with React Native, Expo SDK 54 and Firebase.
+  A landscape-first, sensor-driven scavenger-hunt application built with React Native, Expo SDK 58 and Firebase.
 </p>
 
 <p align="center">
@@ -73,7 +73,7 @@ The application combines:
 - Social and leaderboard features
 - A landscape-first 60/40 interface
 
-Treasi is designed for **Expo SDK 54** and targets **iPhone, Android and Expo Web**.
+Treasi is designed for **Expo SDK 58** and targets **iPhone, Android and Expo Web**.
 
 ---
 
@@ -412,10 +412,10 @@ flowchart TD
 
 | Technology | Purpose |
 | --- | --- |
-| React 19 | Component model |
-| React Native 0.81 | Cross-platform native UI |
-| TypeScript 5.9 | Type-safe application development |
-| Expo SDK 54 | Native development platform and runtime |
+| React 19.3 | Component model |
+| React Native 0.88 | Cross-platform native UI |
+| TypeScript 6.0 | Type-safe application development |
+| Expo SDK 58 | Native development platform and runtime |
 | React Native Web | Browser support |
 | React Native Maps | Native field-map rendering |
 | React Native SVG | Custom instrument graphics |
@@ -857,7 +857,7 @@ treasi/
 
 Before running Treasi, install or configure:
 
-- **Node.js** and npm.
+- **Node.js 24.3+** (Node 24 LTS recommended) and npm.
 - A Firebase project.
 - Expo-compatible development tooling.
 - A modern browser for the web version.
@@ -907,7 +907,7 @@ npm install
 
 ### 3. Align Expo dependencies
 
-For Expo SDK 54, Expo's installer should be used when correcting native package versions:
+For Expo SDK 58, Expo's installer should be used when correcting native package versions:
 
 ```bash
 npx expo install --fix
@@ -971,7 +971,7 @@ npx expo start --tunnel --clear
 npm run ios
 ```
 
-On current physical iPhones, an **Expo development build** is preferable for an SDK 54 project when the installed Expo Go version does not support the project's SDK.
+After an SDK upgrade, rebuild existing **Expo development builds** before using them. Expo Go must also support SDK 58.
 
 A development-client workflow can be started with:
 
@@ -1207,7 +1207,7 @@ The demonstration should show the main user journey, including authentication, t
 **Institution:** Open Window  
 **Course:** Interactive Development 300 (DV300)  
 **Term:** Semester 2 — Theme 3  
-**Primary Framework:** React Native + Expo SDK 54  
+**Primary Framework:** React Native + Expo SDK 58<br />
 **Backend:** Firebase
 
 ---

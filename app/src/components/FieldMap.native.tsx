@@ -419,7 +419,7 @@ export const FieldMap =
               PROVIDER_DEFAULT
             }
             style={
-              StyleSheet.absoluteFillObject
+              StyleSheet.absoluteFill
             }
             initialRegion={
               initialRegionRef.current

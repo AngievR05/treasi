@@ -1,10 +1,7 @@
 module.exports = function (api) {
   api.cache(true);
   return {
+    // Expo configures the Reanimated/Worklets Babel plugin automatically.
     presets: ['babel-preset-expo'],
-    plugins: [
-      // Must always be listed LAST in the plugins array
-      'react-native-reanimated/plugin',
-    ],
   };
 };
