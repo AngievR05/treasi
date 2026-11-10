@@ -10,8 +10,6 @@ import {
   AccessibilityInfo,
   ActivityIndicator,
   Alert,
-  AppState,
-  type AppStateStatus,
   KeyboardAvoidingView,
   Linking,
   Modal,
@@ -28,6 +26,9 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import * as Location from 'expo-location';
+import { onAuthStateChanged } from 'firebase/auth';
+import { isFreshLocation, useDashboardLocation } from '../hooks/useDashboardLocation';
+import { readDashboardProfile, readDashboardTreasure } from '../utils/dashboardData';
 
 import { Ionicons } from '@expo/vector-icons';
 
@@ -190,18 +191,6 @@ const MAX_HINT_LENGTH =
 const MAX_PAYLOAD_LENGTH =
   1000;
 
-const LOCATION_UPDATE_INTERVAL_MS =
-  10_000;
-
-const LOCATION_UPDATE_DISTANCE_M =
-  10;
-
-const LAST_KNOWN_MAX_AGE_MS =
-  60_000;
-
-const LAST_KNOWN_REQUIRED_ACCURACY_M =
-  500;
-
 const MIN_TOUCH_TARGET =
   48;
 
@@ -270,10 +259,8 @@ const showAccessibleAlert = (
     `${title}. ${message}`,
   );
 
-  Alert.alert(
-    title,
-    message,
-  );
+  if (Platform.OS === 'web' && typeof window !== 'undefined') window.alert(`${title}\n\n${message}`);
+  else Alert.alert(title, message);
 };
 
 // Keeps development diagnostics out of production logs.
@@ -364,11 +351,10 @@ const calculateHaversineDistance = (
     2 *
     Math.atan2(
       Math.sqrt(
-        value,
+        Math.min(1, Math.max(0, value)),
       ),
       Math.sqrt(
-        1 -
-          value,
+        Math.max(0, 1 - value),
       ),
     )
   );
@@ -379,9 +365,9 @@ const parseCoordinate = (
   value: string,
 ): number | null => {
   const trimmed =
-    value.trim();
+    value.trim().replace(',', '.');
 
-  if (!trimmed) {
+  if (!/^[+-]?(?:\d+\.?\d*|\.\d+)$/.test(trimmed)) {
     return null;
   }
 
@@ -399,10 +385,10 @@ const parseCoordinate = (
 
 // Provides a safe display name for activity records.
 const getSafeCreatorName = (
-  value?: string,
+  value?: unknown,
 ): string => {
   const trimmed =
-    value?.trim();
+    typeof value === 'string' ? value.trim() : '';
 
   return (
     trimmed ||
@@ -444,6 +430,9 @@ const getFriendlyFirestoreError = (
 
     case 'ALREADY_ARCHIVED':
       return 'This cache has already been archived.';
+
+    case 'ARCHIVE_BEFORE_DELETE':
+      return 'Archive this cache before permanently deleting it.';
 
     case 'NOT_ARCHIVED':
       return 'This cache is already active.';
@@ -499,32 +488,8 @@ const buildTreasureRecord = (
   data:
     Partial<TreasureDocument>,
 ): TreasureRecord | null => {
-  if (
-    !data.location ||
-    !isValidCoordinate(
-      data.location.latitude,
-      data.location.longitude,
-    ) ||
-    typeof data.creatorId !==
-      'string' ||
-    !data.creatorId ||
-    typeof data.title !==
-      'string'
-  ) {
-    return null;
-  }
-
-  return {
-    id,
-
-    data: {
-      ...data,
-
-      treasureId:
-        data.treasureId ||
-        id,
-    } as TreasureDocument,
-  };
+  const treasure = readDashboardTreasure(id, data as Record<string, unknown>);
+  return treasure && treasure.creatorId ? { id, data: treasure } : null;
 };
 
 // Uses Expo vector icons consistently across native and web.
@@ -635,12 +600,34 @@ export const InventoryScreen:
       NavigationTab =
       'INVENTORY';
 
-    const currentUser =
-      auth.currentUser;
+    const [currentUser, setCurrentUser] = useState(auth.currentUser);
+    useEffect(() => onAuthStateChanged(auth, setCurrentUser), []);
 
     const currentUserId =
       currentUser?.uid ??
       null;
+    const accountRef = useRef({ uid: currentUserId });
+    if (accountRef.current.uid !== currentUserId) accountRef.current = { uid: currentUserId };
+    const currentAccount = accountRef.current;
+    const crudLockRef = useRef<symbol | null>(null);
+    const selectedIdRef = useRef<string | null>(null);
+    const confirmationTargetRef = useRef<{ id: string; account: object } | null>(null);
+    const beginCrud = useCallback((targetId?: string) => {
+      if (!isMountedRef.current) return null;
+      if (!auth.currentUser) {
+        showAccessibleAlert('Authentication Required', 'Sign in again before changing Inventory.');
+        return null;
+      }
+      if (auth.currentUser.uid !== currentAccount.uid ||
+          accountRef.current !== currentAccount || crudLockRef.current ||
+          (targetId && selectedIdRef.current !== targetId)) return null;
+      const token = Symbol('inventory-write');
+      crudLockRef.current = token;
+      return {
+        isCurrent: () => isMountedRef.current && accountRef.current === currentAccount && auth.currentUser?.uid === currentAccount.uid,
+        release: () => { if (crudLockRef.current === token) crudLockRef.current = null; },
+      };
+    }, [currentAccount]);
 
     /* ---------------------------------------------------------------------- */
     /* Initial stamped coordinates                                            */
@@ -687,33 +674,11 @@ export const InventoryScreen:
     const isMountedRef =
       useRef(true);
 
-    const locationSubscriptionRef =
-      useRef<
-        Location.LocationSubscription | null
-      >(null);
-
-    const locationRequestSequenceRef =
-      useRef(0);
-
     const coordinateInputsTouchedRef =
       useRef(
         Boolean(
           initialCoordinates,
         ),
-      );
-
-    const userCoordsRef =
-      useRef<
-        Coordinates | null
-      >(
-        initialCoordinates,
-      );
-
-    const locationSourceRef =
-      useRef<LocationSource>(
-        initialCoordinates
-          ? 'stamped'
-          : 'none',
       );
 
     /* ---------------------------------------------------------------------- */
@@ -760,51 +725,30 @@ export const InventoryScreen:
           : 'none',
       );
 
-    const [
-      locationStatus,
-      setLocationStatus,
-    ] =
-      useState<InventoryLocationStatus>(
-        initialCoordinates
-          ? 'READY'
-          : 'CHECKING',
-      );
-
-    const [
-      locationPermissionStatus,
-      setLocationPermissionStatus,
-    ] =
-      useState<
-        Location.PermissionStatus | null
-      >(null);
-
-    const [
-      canAskLocationAgain,
-      setCanAskLocationAgain,
-    ] =
-      useState(true);
-
-    const [
-      locationServicesEnabled,
-      setLocationServicesEnabled,
-    ] =
-      useState<
-        boolean | null
-      >(null);
-
-    const [
-      locationError,
-      setLocationError,
-    ] =
-      useState<
-        string | null
-      >(null);
-
-    const [
-      isRefreshingLocation,
-      setIsRefreshingLocation,
-    ] =
-      useState(false);
+    const gps = useDashboardLocation();
+    const latestGpsRef = useRef(gps);
+    latestGpsRef.current = gps;
+    const { locationPermissionStatus, canAskLocationAgain, locationServicesEnabled,
+      locationError, startLocationService } = gps;
+    const isRefreshingLocation = gps.isInitialisingLocation;
+    const locationStatus: InventoryLocationStatus = gps.isInitialisingLocation ? 'CHECKING'
+      : locationServicesEnabled === false ? 'SERVICES_OFF'
+        : locationPermissionStatus === Location.PermissionStatus.DENIED ? 'DENIED'
+          : locationPermissionStatus !== Location.PermissionStatus.GRANTED ? 'PERMISSION_REQUIRED'
+            : locationError ? 'ERROR' : userCoords ? 'READY' : 'CHECKING';
+    const canUseCurrentPosition = Boolean(gps.userLocation && gps.locationFixSource === 'live' &&
+      !gps.locationError && !gps.isInitialisingLocation && isFreshLocation(gps.userLocation));
+    useEffect(() => {
+      if (!gps.userLocation) return;
+      const coordinates = { latitude: gps.userLocation.coords.latitude, longitude: gps.userLocation.coords.longitude };
+      const source = gps.locationFixSource === 'live' ? 'live' : 'last-known';
+      setUserCoords(coordinates);
+      setLocationSource(source);
+      if (!coordinateInputsTouchedRef.current && source === 'live') {
+        setNewLat(coordinates.latitude.toFixed(6));
+        setNewLng(coordinates.longitude.toFixed(6));
+      }
+    }, [gps.userLocation, gps.locationFixSource]);
 
     /* ---------------------------------------------------------------------- */
     /* Read state                                                             */
@@ -1033,6 +977,20 @@ export const InventoryScreen:
       crudOperation !==
       null;
 
+    const previousAccountRef = useRef(currentAccount);
+    useEffect(() => {
+      if (previousAccountRef.current === currentAccount) return;
+      previousAccountRef.current = currentAccount;
+      crudLockRef.current = null;
+      confirmationTargetRef.current = null;
+      setCurrentProfile(null); setProfileError(null);
+      setActiveTreasureRecords([]); setOwnerTreasureRecords([]); setDiscoveredTreasureIds(new Set());
+      setSelectedId(null); setIsEditing(false); setIsBurying(false); setCrudOperation(null); setConfirmationAction(null);
+      setNewTitle(''); setNewHint(''); setNewPayload(''); setNewLat(''); setNewLng(''); setFieldErrors({});
+      setEditTitle(''); setEditHint(''); setEditPayload(''); setEditLat(''); setEditLng(''); setEditErrors({});
+      coordinateInputsTouchedRef.current = false;
+    }, [currentAccount]);
+
     /* ---------------------------------------------------------------------- */
     /* Lifecycle                                                              */
     /* ---------------------------------------------------------------------- */
@@ -1045,17 +1003,6 @@ export const InventoryScreen:
         isMountedRef.current =
           false;
 
-        locationRequestSequenceRef.current +=
-          1;
-
-        try {
-          locationSubscriptionRef.current?.remove();
-        } catch {
-          // The watcher may already have been removed.
-        }
-
-        locationSubscriptionRef.current =
-          null;
       };
     }, []);
 
@@ -1066,7 +1013,7 @@ export const InventoryScreen:
     useEffect(() => {
       if (
         initialParams?.mode !==
-        'create'
+        'create' || crudLockRef.current
       ) {
         return;
       }
@@ -1096,22 +1043,12 @@ export const InventoryScreen:
       coordinateInputsTouchedRef.current =
         true;
 
-      userCoordsRef.current =
-        initialCoordinates;
-
-      locationSourceRef.current =
-        'stamped';
-
       setUserCoords(
         initialCoordinates,
       );
 
       setLocationSource(
         'stamped',
-      );
-
-      setLocationStatus(
-        'READY',
       );
 
       setNewLat(
@@ -1135,6 +1072,7 @@ export const InventoryScreen:
     /* ---------------------------------------------------------------------- */
 
     useEffect(() => {
+      let active = true;
       if (
         !currentUserId
       ) {
@@ -1164,12 +1102,12 @@ export const InventoryScreen:
           (
             snapshot,
           ) => {
+            if (!active || accountRef.current !== currentAccount) return;
             if (
               snapshot.exists()
             ) {
               setCurrentProfile(
-                snapshot.data() as
-                  UserDocument,
+                readDashboardProfile(snapshot.data()),
               );
 
               setProfileError(
@@ -1191,6 +1129,7 @@ export const InventoryScreen:
           (
             error,
           ) => {
+            if (!active || accountRef.current !== currentAccount) return;
             logDevelopmentWarning(
               '[Treasi Inventory] Profile subscription failed:',
               error,
@@ -1202,518 +1141,11 @@ export const InventoryScreen:
           },
         );
 
-      return unsubscribe;
+      return () => { active = false; unsubscribe(); };
     }, [
       currentUserId,
+      currentAccount,
       retryKey,
-    ]);
-
-    /* ---------------------------------------------------------------------- */
-    /* Location helpers                                                       */
-    /* ---------------------------------------------------------------------- */
-
-    const stopLocationSubscription =
-      useCallback(
-        (): void => {
-          try {
-            locationSubscriptionRef.current?.remove();
-          } catch {
-            // The watcher may already have been removed.
-          }
-
-          locationSubscriptionRef.current =
-            null;
-        },
-        [],
-      );
-
-    const applyCoordinates =
-      useCallback(
-        (
-          coordinates:
-            Coordinates,
-          source:
-            LocationSource,
-        ): void => {
-          if (
-            !isValidCoordinate(
-              coordinates.latitude,
-              coordinates.longitude,
-            )
-          ) {
-            return;
-          }
-
-          userCoordsRef.current =
-            coordinates;
-
-          locationSourceRef.current =
-            source;
-
-          setUserCoords(
-            coordinates,
-          );
-
-          setLocationSource(
-            source,
-          );
-        },
-        [],
-      );
-
-    const applyLiveLocation =
-      useCallback(
-        (
-          location:
-            Location.LocationObject,
-        ): void => {
-          if (
-            !isMountedRef.current
-          ) {
-            return;
-          }
-
-          const coordinates:
-            Coordinates = {
-              latitude:
-                location.coords
-                  .latitude,
-
-              longitude:
-                location.coords
-                  .longitude,
-            };
-
-          if (
-            !isValidCoordinate(
-              coordinates.latitude,
-              coordinates.longitude,
-            )
-          ) {
-            return;
-          }
-
-          applyCoordinates(
-            coordinates,
-            'live',
-          );
-
-          setLocationStatus(
-            'READY',
-          );
-
-          setLocationError(
-            null,
-          );
-
-          if (
-            !coordinateInputsTouchedRef.current
-          ) {
-            setNewLat(
-              coordinates
-                .latitude
-                .toFixed(6),
-            );
-
-            setNewLng(
-              coordinates
-                .longitude
-                .toFixed(6),
-            );
-          }
-        },
-        [
-          applyCoordinates,
-        ],
-      );
-
-    /* ---------------------------------------------------------------------- */
-    /* Location service                                                       */
-    /* ---------------------------------------------------------------------- */
-
-    const startLocationService =
-      useCallback(
-        async (
-          requestPermission:
-            boolean,
-        ): Promise<void> => {
-          const requestSequence =
-            ++locationRequestSequenceRef.current;
-
-          stopLocationSubscription();
-
-          if (
-            !isMountedRef.current
-          ) {
-            return;
-          }
-
-          setIsRefreshingLocation(
-            true,
-          );
-
-          setLocationStatus(
-            'CHECKING',
-          );
-
-          setLocationError(
-            null,
-          );
-
-          try {
-            let permission =
-              await Location
-                .getForegroundPermissionsAsync();
-
-            if (
-              requestSequence !==
-                locationRequestSequenceRef.current ||
-              !isMountedRef.current
-            ) {
-              return;
-            }
-
-            setLocationPermissionStatus(
-              permission.status,
-            );
-
-            setCanAskLocationAgain(
-              permission.canAskAgain,
-            );
-
-            /*
-             * Permission is only requested after a user action.
-             */
-            if (
-              permission.status !==
-                Location
-                  .PermissionStatus
-                  .GRANTED &&
-              requestPermission &&
-              permission.canAskAgain
-            ) {
-              permission =
-                await Location
-                  .requestForegroundPermissionsAsync();
-
-              if (
-                requestSequence !==
-                  locationRequestSequenceRef.current ||
-                !isMountedRef.current
-              ) {
-                return;
-              }
-
-              setLocationPermissionStatus(
-                permission.status,
-              );
-
-              setCanAskLocationAgain(
-                permission.canAskAgain,
-              );
-            }
-
-            if (
-              permission.status !==
-              Location
-                .PermissionStatus
-                .GRANTED
-            ) {
-              setLocationStatus(
-                permission.status ===
-                  Location
-                    .PermissionStatus
-                    .UNDETERMINED
-                  ? 'PERMISSION_REQUIRED'
-                  : 'DENIED',
-              );
-
-              setLocationError(
-                permission.status ===
-                  Location
-                    .PermissionStatus
-                    .UNDETERMINED
-                  ? 'LOCATION ACCESS IS NOT ENABLED. MANUAL COORDINATES REMAIN AVAILABLE.'
-                  : 'LOCATION ACCESS IS DENIED. MANUAL COORDINATES REMAIN AVAILABLE.',
-              );
-
-              return;
-            }
-
-            const servicesEnabled =
-              await Location
-                .hasServicesEnabledAsync();
-
-            if (
-              requestSequence !==
-                locationRequestSequenceRef.current ||
-              !isMountedRef.current
-            ) {
-              return;
-            }
-
-            setLocationServicesEnabled(
-              servicesEnabled,
-            );
-
-            if (
-              !servicesEnabled
-            ) {
-              setLocationStatus(
-                'SERVICES_OFF',
-              );
-
-              setLocationError(
-                'DEVICE LOCATION SERVICES ARE SWITCHED OFF. MANUAL COORDINATES REMAIN AVAILABLE.',
-              );
-
-              return;
-            }
-
-            /*
-             * A recent last-known position lets Inventory render quickly while
-             * a fresh position is being acquired.
-             */
-            try {
-              const lastKnownPosition =
-                await Location
-                  .getLastKnownPositionAsync(
-                    {
-                      maxAge:
-                        LAST_KNOWN_MAX_AGE_MS,
-
-                      requiredAccuracy:
-                        LAST_KNOWN_REQUIRED_ACCURACY_M,
-                    },
-                  );
-
-              if (
-                requestSequence ===
-                  locationRequestSequenceRef.current &&
-                lastKnownPosition &&
-                !userCoordsRef.current
-              ) {
-                const coordinates = {
-                  latitude:
-                    lastKnownPosition
-                      .coords
-                      .latitude,
-
-                  longitude:
-                    lastKnownPosition
-                      .coords
-                      .longitude,
-                };
-
-                if (
-                  isValidCoordinate(
-                    coordinates.latitude,
-                    coordinates.longitude,
-                  )
-                ) {
-                  applyCoordinates(
-                    coordinates,
-                    'last-known',
-                  );
-
-                  setLocationStatus(
-                    'READY',
-                  );
-                }
-              }
-            } catch (
-              error: unknown
-            ) {
-              logDevelopmentWarning(
-                '[Treasi Inventory] Last-known position unavailable:',
-                error,
-              );
-            }
-
-            try {
-              const position =
-                await Location
-                  .getCurrentPositionAsync(
-                    {
-                      accuracy:
-                        Location
-                          .Accuracy
-                          .Balanced,
-                    },
-                  );
-
-              if (
-                requestSequence ===
-                  locationRequestSequenceRef.current
-              ) {
-                applyLiveLocation(
-                  position,
-                );
-              }
-            } catch (
-              error: unknown
-            ) {
-              logDevelopmentWarning(
-                '[Treasi Inventory] Current location unavailable:',
-                error,
-              );
-            }
-
-            if (
-              requestSequence !==
-                locationRequestSequenceRef.current ||
-              !isMountedRef.current
-            ) {
-              return;
-            }
-
-            const subscription =
-              await Location
-                .watchPositionAsync(
-                  {
-                    accuracy:
-                      Location
-                        .Accuracy
-                        .Balanced,
-
-                    timeInterval:
-                      LOCATION_UPDATE_INTERVAL_MS,
-
-                    distanceInterval:
-                      LOCATION_UPDATE_DISTANCE_M,
-                  },
-
-                  applyLiveLocation,
-
-                  (
-                    message,
-                  ) => {
-                    if (
-                      !isMountedRef.current
-                    ) {
-                      return;
-                    }
-
-                    logDevelopmentWarning(
-                      '[Treasi Inventory] Location watcher error:',
-                      message,
-                    );
-
-                    setLocationStatus(
-                      'ERROR',
-                    );
-
-                    setLocationError(
-                      'LIVE LOCATION UPDATES WERE INTERRUPTED. RETRY LOCATION OR ENTER COORDINATES MANUALLY.',
-                    );
-                  },
-                );
-
-            if (
-              requestSequence !==
-                locationRequestSequenceRef.current ||
-              !isMountedRef.current
-            ) {
-              subscription.remove();
-
-              return;
-            }
-
-            locationSubscriptionRef.current =
-              subscription;
-          } catch (
-            error: unknown
-          ) {
-            logDevelopmentWarning(
-              '[Treasi Inventory] Location service failed:',
-              error,
-            );
-
-            if (
-              requestSequence !==
-                locationRequestSequenceRef.current ||
-              !isMountedRef.current
-            ) {
-              return;
-            }
-
-            setLocationStatus(
-              'ERROR',
-            );
-
-            setLocationError(
-              Platform.OS ===
-                'web'
-                ? 'BROWSER LOCATION IS UNAVAILABLE. USE LOCALHOST OR HTTPS, OR ENTER COORDINATES MANUALLY.'
-                : 'DEVICE LOCATION IS UNAVAILABLE. ENTER COORDINATES MANUALLY OR RETRY.',
-            );
-          } finally {
-            if (
-              requestSequence ===
-                locationRequestSequenceRef.current &&
-              isMountedRef.current
-            ) {
-              setIsRefreshingLocation(
-                false,
-              );
-            }
-          }
-        },
-        [
-          applyCoordinates,
-          applyLiveLocation,
-          stopLocationSubscription,
-        ],
-      );
-
-    /* ---------------------------------------------------------------------- */
-    /* Location lifecycle                                                     */
-    /* ---------------------------------------------------------------------- */
-
-    useEffect(() => {
-      void startLocationService(
-        false,
-      );
-
-      const handleAppStateChange =
-        (
-          state:
-            AppStateStatus,
-        ): void => {
-          if (
-            state ===
-            'active'
-          ) {
-            void startLocationService(
-              false,
-            );
-
-            return;
-          }
-
-          locationRequestSequenceRef.current +=
-            1;
-
-          stopLocationSubscription();
-        };
-
-      const subscription =
-        AppState.addEventListener(
-          'change',
-          handleAppStateChange,
-        );
-
-      return () => {
-        subscription.remove();
-
-        locationRequestSequenceRef.current +=
-          1;
-
-        stopLocationSubscription();
-      };
-    }, [
-      startLocationService,
-      stopLocationSubscription,
     ]);
 
     /* ---------------------------------------------------------------------- */
@@ -1799,6 +1231,7 @@ export const InventoryScreen:
     /* ---------------------------------------------------------------------- */
 
     useEffect(() => {
+      let active = true;
       if (
         !currentUserId
       ) {
@@ -1846,6 +1279,7 @@ export const InventoryScreen:
           (
             snapshot,
           ) => {
+            if (!active || accountRef.current !== currentAccount) return;
             const records =
               snapshot.docs
                 .map(
@@ -1882,6 +1316,7 @@ export const InventoryScreen:
           (
             error,
           ) => {
+            if (!active || accountRef.current !== currentAccount) return;
             logDevelopmentWarning(
               '[Treasi Inventory] Active treasure subscription failed:',
               error,
@@ -1900,9 +1335,10 @@ export const InventoryScreen:
           },
         );
 
-      return unsubscribe;
+      return () => { active = false; unsubscribe(); };
     }, [
       currentUserId,
+      currentAccount,
       retryKey,
     ]);
 
@@ -1911,6 +1347,7 @@ export const InventoryScreen:
     /* ---------------------------------------------------------------------- */
 
     useEffect(() => {
+      let active = true;
       if (
         !currentUserId
       ) {
@@ -1962,6 +1399,7 @@ export const InventoryScreen:
           (
             snapshot,
           ) => {
+            if (!active || accountRef.current !== currentAccount) return;
             const records =
               snapshot.docs
                 .map(
@@ -1998,6 +1436,7 @@ export const InventoryScreen:
           (
             error,
           ) => {
+            if (!active || accountRef.current !== currentAccount) return;
             logDevelopmentWarning(
               '[Treasi Inventory] Owner treasure subscription failed:',
               error,
@@ -2016,9 +1455,10 @@ export const InventoryScreen:
           },
         );
 
-      return unsubscribe;
+      return () => { active = false; unsubscribe(); };
     }, [
       currentUserId,
+      currentAccount,
       retryKey,
     ]);
 
@@ -2027,6 +1467,7 @@ export const InventoryScreen:
     /* ---------------------------------------------------------------------- */
 
     useEffect(() => {
+      let active = true;
       if (
         !currentUserId
       ) {
@@ -2066,6 +1507,7 @@ export const InventoryScreen:
           (
             snapshot,
           ) => {
+            if (!active || accountRef.current !== currentAccount) return;
             const treasureIds =
               new Set<string>();
 
@@ -2073,6 +1515,7 @@ export const InventoryScreen:
               (
                 snapshotDocument,
               ) => {
+            if (!active || accountRef.current !== currentAccount) return;
                 const treasureId =
                   snapshotDocument
                     .data()
@@ -2102,6 +1545,7 @@ export const InventoryScreen:
           (
             error,
           ) => {
+            if (!active || accountRef.current !== currentAccount) return;
             logDevelopmentWarning(
               '[Treasi Inventory] Discovery subscription failed:',
               error,
@@ -2120,9 +1564,10 @@ export const InventoryScreen:
           },
         );
 
-      return unsubscribe;
+      return () => { active = false; unsubscribe(); };
     }, [
       currentUserId,
+      currentAccount,
       retryKey,
     ]);
 
@@ -2461,6 +1906,8 @@ export const InventoryScreen:
       selectedId,
     ]);
 
+    selectedIdRef.current = selectedId;
+
     const selectedItem =
       useMemo(
         () =>
@@ -2478,6 +1925,28 @@ export const InventoryScreen:
           selectedId,
         ],
       );
+
+    const requestConfirmation = useCallback((action: ConfirmationAction) => {
+      if (!selectedItem || selectedItem.creatorId !== currentUserId || crudLockRef.current) return;
+      confirmationTargetRef.current = { id: selectedItem.id, account: currentAccount };
+      setConfirmationAction(action);
+    }, [selectedItem, currentAccount, currentUserId]);
+    useEffect(() => {
+      if (confirmationTargetRef.current?.id !== selectedId || confirmationTargetRef.current?.account !== currentAccount) {
+        setConfirmationAction(null);
+      }
+    }, [selectedId, currentAccount]);
+
+    const applyCommittedRecord = useCallback((id: string, data: TreasureDocument | null) => {
+      const update = (records: TreasureRecord[], include: boolean) => {
+        if (!data || !include) return records.filter(record => record.id !== id);
+        const record = buildTreasureRecord(id, data);
+        if (!record) return records;
+        return [...records.filter(previous => previous.id !== id), record];
+      };
+      setOwnerTreasureRecords(records => update(records, data?.creatorId === currentUserId));
+      setActiveTreasureRecords(records => update(records, Boolean(data && !data.isArchived)));
+    }, [currentUserId]);
 
     const canRevealSelectedPayload =
       Boolean(
@@ -2534,6 +2003,7 @@ export const InventoryScreen:
     const openCreateMode =
       useCallback(
         (): void => {
+          if (crudLockRef.current) return;
           setIsBurying(
             true,
           );
@@ -2582,7 +2052,7 @@ export const InventoryScreen:
       useCallback(
         (): void => {
           if (
-            isSubmitting
+            isSubmitting || crudLockRef.current
           ) {
             return;
           }
@@ -2606,8 +2076,12 @@ export const InventoryScreen:
     const useCurrentPosition =
       useCallback(
         (): void => {
+          const liveGps = latestGpsRef.current;
+          const livePosition = liveGps.userLocation;
+          const coordinates = livePosition?.coords;
           if (
-            !userCoords
+            !livePosition || !coordinates || liveGps.locationFixSource !== 'live' ||
+            liveGps.locationError || liveGps.isInitialisingLocation || !isFreshLocation(livePosition)
           ) {
             showAccessibleAlert(
               'Position Unavailable',
@@ -2621,13 +2095,13 @@ export const InventoryScreen:
             true;
 
           setNewLat(
-            userCoords
+            coordinates
               .latitude
               .toFixed(6),
           );
 
           setNewLng(
-            userCoords
+            coordinates
               .longitude
               .toFixed(6),
           );
@@ -2652,6 +2126,7 @@ export const InventoryScreen:
         },
         [
           userCoords,
+          canUseCurrentPosition,
         ],
       );
 
@@ -2669,7 +2144,7 @@ export const InventoryScreen:
             > = {};
 
           const title =
-            newTitle.trim();
+            newTitle.trim().toUpperCase();
 
           const hint =
             newHint.trim();
@@ -2780,102 +2255,103 @@ export const InventoryScreen:
     const handleBuryCache =
       useCallback(
         async (): Promise<void> => {
-          const user =
-            auth.currentUser;
+          const operation = beginCrud();
+          if (!operation) return;
+          try {
+            const user =
+              auth.currentUser;
 
-          if (!user) {
-            showAccessibleAlert(
-              'Authentication Required',
-              'No active Explorer session was found.',
-            );
+            if (!user) {
+              showAccessibleAlert(
+                'Authentication Required',
+                'No active Explorer session was found.',
+              );
 
-            return;
-          }
+              return;
+            }
 
-          if (
-            isSubmitting ||
-            !validateCreateForm()
-          ) {
-            return;
-          }
+            if (
+              isSubmitting ||
+              !validateCreateForm()
+            ) {
+              return;
+            }
 
-          const latitude =
-            parseCoordinate(
-              newLat,
-            );
+            const latitude =
+              parseCoordinate(
+                newLat,
+              );
 
-          const longitude =
-            parseCoordinate(
-              newLng,
-            );
+            const longitude =
+              parseCoordinate(
+                newLng,
+              );
 
-          if (
-            latitude ===
+            if (
+              latitude ===
               null ||
-            longitude ===
+              longitude ===
               null
-          ) {
-            return;
-          }
+            ) {
+              return;
+            }
 
-          const title =
-            newTitle
-              .trim()
-              .toUpperCase();
+            const title =
+              newTitle
+                .trim()
+                .toUpperCase();
 
-          const hint =
-            newHint.trim();
+            const hint =
+              newHint.trim();
 
-          const payloadText =
-            newPayload.trim();
+            const payloadText =
+              newPayload.trim();
 
-          const creatorName =
-            getSafeCreatorName(
-              currentProfile
-                ?.username ||
+            const creatorName =
+              getSafeCreatorName(
+                currentProfile
+                  ?.username ||
                 user.displayName ||
                 user.email
                   ?.split(
                     '@',
                   )[0],
-            ).slice(
-              0,
-              100,
+              ).slice(
+                0,
+                100,
+              );
+
+            setCrudOperation(
+              'create',
             );
 
-          setCrudOperation(
-            'create',
-          );
+            try {
+              const treasureReference =
+                doc(
+                  collection(
+                    db,
+                    'treasures',
+                  ),
+                );
 
-          try {
-            const treasureReference =
-              doc(
-                collection(
+              const activityReference =
+                doc(
+                  collection(
+                    db,
+                    'activity_feed',
+                  ),
+                );
+
+              /*
+               * Treasure creation and its activity signal succeed or fail
+               * together so the field feed never reports a missing cache.
+               */
+              const batch =
+                writeBatch(
                   db,
-                  'treasures',
-                ),
-              );
+                );
 
-            const activityReference =
-              doc(
-                collection(
-                  db,
-                  'activity_feed',
-                ),
-              );
-
-            /*
-             * Treasure creation and its activity signal succeed or fail
-             * together so the field feed never reports a missing cache.
-             */
-            const batch =
-              writeBatch(
-                db,
-              );
-
-            batch.set(
-              treasureReference,
-              {
+              const createdData = {
                 treasureId:
                   treasureReference.id,
 
@@ -2904,87 +2380,96 @@ export const InventoryScreen:
 
                 updatedAt:
                   serverTimestamp(),
-              },
-            );
-
-            batch.set(
-              activityReference,
-              {
-                activityId:
-                  activityReference.id,
-
-                userId:
-                  user.uid,
-
-                username:
-                  creatorName,
-
-                type:
-                  'TREASURE_HIDDEN',
-
-                message:
-                  `PLANTED CACHE: ${title}`,
-
-                targetId:
-                  treasureReference.id,
-
-                createdAt:
-                  serverTimestamp(),
-              },
-            );
-
-            await batch.commit();
-
-            if (
-              !isMountedRef.current
-            ) {
-              return;
-            }
-
-            setIsBurying(
-              false,
-            );
-
-            setIsEditing(
-              false,
-            );
-
-            setSelectedId(
-              treasureReference.id,
-            );
-
-            resetCreateForm();
-
-            showAccessibleAlert(
-              'Cache Anchored',
-              `${title} has been sealed into the field network.`,
-            );
-          } catch (
-            error: unknown
-          ) {
-            logDevelopmentWarning(
-              '[Treasi Inventory] Cache creation failed:',
-              error,
-            );
-
-            showAccessibleAlert(
-              'Creation Error',
-              getFriendlyFirestoreError(
-                error,
-                'Treasi could not create the cache record.',
-              ),
-            );
-          } finally {
-            if (
-              isMountedRef.current
-            ) {
-              setCrudOperation(
-                null,
+              };
+              batch.set(
+                treasureReference,
+                createdData,
               );
+
+              batch.set(
+                activityReference,
+                {
+                  activityId:
+                    activityReference.id,
+
+                  userId:
+                    user.uid,
+
+                  username:
+                    creatorName,
+
+                  type:
+                    'TREASURE_HIDDEN',
+
+                  message:
+                    `PLANTED CACHE: ${title}`,
+
+                  targetId:
+                    treasureReference.id,
+
+                  createdAt:
+                    serverTimestamp(),
+                },
+              );
+
+              await batch.commit();
+
+              if (
+                !operation.isCurrent()
+              ) {
+                return;
+              }
+              applyCommittedRecord(treasureReference.id, createdData as unknown as TreasureDocument);
+
+              setIsBurying(
+                false,
+              );
+
+              setIsEditing(
+                false,
+              );
+
+              setSelectedId(
+                treasureReference.id,
+              );
+
+              resetCreateForm();
+
+              showAccessibleAlert(
+                'Cache Anchored',
+                `${title} has been sealed into the field network.`,
+              );
+            } catch (
+            error: unknown
+            ) {
+              if (!operation.isCurrent()) return;
+              logDevelopmentWarning(
+                '[Treasi Inventory] Cache creation failed:',
+                error,
+              );
+
+              showAccessibleAlert(
+                'Creation Error',
+                getFriendlyFirestoreError(
+                  error,
+                  'Treasi could not create the cache record.',
+                ),
+              );
+            } finally {
+              if (
+                operation.isCurrent()
+              ) {
+                setCrudOperation(
+                  null,
+                );
+              }
             }
-          }
+
+          } finally { operation.release(); }
         },
         [
+          applyCommittedRecord,
+          beginCrud,
           currentProfile
             ?.username,
           isSubmitting,
@@ -3005,6 +2490,7 @@ export const InventoryScreen:
     const beginEditing =
       useCallback(
         (): void => {
+          if (crudLockRef.current) return;
           if (
             !selectedItem
           ) {
@@ -3064,8 +2550,12 @@ export const InventoryScreen:
     const useCurrentPositionForEdit =
       useCallback(
         (): void => {
+          const liveGps = latestGpsRef.current;
+          const livePosition = liveGps.userLocation;
+          const coordinates = livePosition?.coords;
           if (
-            !userCoords
+            !livePosition || !coordinates || liveGps.locationFixSource !== 'live' ||
+            liveGps.locationError || liveGps.isInitialisingLocation || !isFreshLocation(livePosition)
           ) {
             showAccessibleAlert(
               'Position Unavailable',
@@ -3076,13 +2566,13 @@ export const InventoryScreen:
           }
 
           setEditLat(
-            userCoords
+            coordinates
               .latitude
               .toFixed(6),
           );
 
           setEditLng(
-            userCoords
+            coordinates
               .longitude
               .toFixed(6),
           );
@@ -3107,6 +2597,7 @@ export const InventoryScreen:
         },
         [
           userCoords,
+          canUseCurrentPosition,
         ],
       );
 
@@ -3124,7 +2615,7 @@ export const InventoryScreen:
             > = {};
 
           const title =
-            editTitle.trim();
+            editTitle.trim().toUpperCase();
 
           const hint =
             editHint.trim();
@@ -3235,170 +2726,182 @@ export const InventoryScreen:
     const handleUpdateCache =
       useCallback(
         async (): Promise<void> => {
-          if (
-            !selectedItem ||
-            !currentUserId ||
-            isSubmitting
-          ) {
-            return;
-          }
-
-          if (
-            selectedItem.creatorId !==
-            currentUserId
-          ) {
-            showAccessibleAlert(
-              'Permission Error',
-              'Only the cache creator can edit this record.',
-            );
-
-            return;
-          }
-
-          if (
-            !validateEditForm()
-          ) {
-            return;
-          }
-
-          const latitude =
-            parseCoordinate(
-              editLat,
-            );
-
-          const longitude =
-            parseCoordinate(
-              editLng,
-            );
-
-          if (
-            latitude ===
-              null ||
-            longitude ===
-              null
-          ) {
-            return;
-          }
-
-          setCrudOperation(
-            'update',
-          );
-
+          const operation = beginCrud(selectedItem?.id);
+          if (!operation) return;
           try {
-            const treasureReference =
-              doc(
-                db,
-                'treasures',
-                selectedItem.id,
-              );
-
-            /*
-             * Re-reading inside the transaction ensures that ownership still
-             * matches the signed-in Explorer when the update is committed.
-             */
-            await runTransaction(
-              db,
-
-              async (
-                transaction,
-              ) => {
-                const snapshot =
-                  await transaction.get(
-                    treasureReference,
-                  );
-
-                if (
-                  !snapshot.exists()
-                ) {
-                  throw new Error(
-                    'TREASURE_NOT_FOUND',
-                  );
-                }
-
-                const liveTreasure =
-                  snapshot.data() as
-                    TreasureDocument;
-
-                if (
-                  liveTreasure.creatorId !==
-                  currentUserId
-                ) {
-                  throw new Error(
-                    'NOT_CACHE_OWNER',
-                  );
-                }
-
-                transaction.update(
-                  treasureReference,
-                  {
-                    title:
-                      editTitle
-                        .trim()
-                        .toUpperCase(),
-
-                    hint:
-                      editHint.trim(),
-
-                    payloadText:
-                      editPayload.trim(),
-
-                    location:
-                      new GeoPoint(
-                        latitude,
-                        longitude,
-                      ),
-
-                    updatedAt:
-                      serverTimestamp(),
-                  },
-                );
-              },
-            );
-
             if (
-              !isMountedRef.current
+              !selectedItem ||
+              !currentUserId ||
+              isSubmitting
             ) {
               return;
             }
 
-            setIsEditing(
-              false,
-            );
-
-            setEditErrors(
-              {},
-            );
-
-            showAccessibleAlert(
-              'Record Updated',
-              'Cache title, clue, payload and location have been updated.',
-            );
-          } catch (
-            error: unknown
-          ) {
-            logDevelopmentWarning(
-              '[Treasi Inventory] Cache update failed:',
-              error,
-            );
-
-            showAccessibleAlert(
-              'Update Error',
-              getFriendlyFirestoreError(
-                error,
-                'Treasi could not save the cache changes.',
-              ),
-            );
-          } finally {
             if (
-              isMountedRef.current
+              selectedItem.creatorId !==
+              currentUserId
             ) {
-              setCrudOperation(
-                null,
+              showAccessibleAlert(
+                'Permission Error',
+                'Only the cache creator can edit this record.',
               );
+
+              return;
             }
-          }
+
+            if (
+              !validateEditForm()
+            ) {
+              return;
+            }
+
+            const latitude =
+              parseCoordinate(
+                editLat,
+              );
+
+            const longitude =
+              parseCoordinate(
+                editLng,
+              );
+
+            if (
+              latitude ===
+              null ||
+              longitude ===
+              null
+            ) {
+              return;
+            }
+
+            setCrudOperation(
+              'update',
+            );
+
+            try {
+              const treasureReference =
+                doc(
+                  db,
+                  'treasures',
+                  selectedItem.id,
+                );
+
+              /*
+               * Re-reading inside the transaction ensures that ownership still
+               * matches the signed-in Explorer when the update is committed.
+               */
+              const committedRecord = await runTransaction(
+                db,
+
+                async (
+                  transaction,
+                ) => {
+                  const snapshot =
+                    await transaction.get(
+                      treasureReference,
+                    );
+                  if (!operation.isCurrent()) throw new Error('INVENTORY_OPERATION_CANCELLED');
+
+                  if (
+                    !snapshot.exists()
+                  ) {
+                    throw new Error(
+                      'TREASURE_NOT_FOUND',
+                    );
+                  }
+
+                  const liveTreasure =
+                    snapshot.data() as
+                    TreasureDocument;
+
+                  if (
+                    liveTreasure.creatorId !==
+                    currentUserId
+                  ) {
+                    throw new Error(
+                      'NOT_CACHE_OWNER',
+                    );
+                  }
+
+                  transaction.update(
+                    treasureReference,
+                    {
+                      title:
+                        editTitle
+                          .trim()
+                          .toUpperCase(),
+
+                      hint:
+                        editHint.trim(),
+
+                      payloadText:
+                        editPayload.trim(),
+
+                      location:
+                        new GeoPoint(
+                          latitude,
+                          longitude,
+                        ),
+
+                      updatedAt:
+                        serverTimestamp(),
+                    },
+                  );
+
+                  return { ...liveTreasure, title: editTitle.trim().toUpperCase(), hint: editHint.trim(), payloadText: editPayload.trim(), location: new GeoPoint(latitude, longitude) };
+                },
+              );
+
+              if (
+                !operation.isCurrent()
+              ) {
+                return;
+              }
+              applyCommittedRecord(selectedItem.id, committedRecord);
+
+              setIsEditing(
+                false,
+              );
+
+              setEditErrors(
+                {},
+              );
+
+              showAccessibleAlert(
+                'Record Updated',
+                'Cache title, clue, payload and location have been updated.',
+              );
+            } catch (
+            error: unknown
+            ) {
+              if (!operation.isCurrent()) return;
+              logDevelopmentWarning(
+                '[Treasi Inventory] Cache update failed:',
+                error,
+              );
+
+              showAccessibleAlert(
+                'Update Error',
+                getFriendlyFirestoreError(
+                  error,
+                  'Treasi could not save the cache changes.',
+                ),
+              );
+            } finally {
+              if (
+                operation.isCurrent()
+              ) {
+                setCrudOperation(
+                  null,
+                );
+              }
+            }
+
+          } finally { operation.release(); }
         },
         [
+          applyCommittedRecord,
+          beginCrud,
           currentUserId,
           editHint,
           editLat,
@@ -3418,178 +2921,190 @@ export const InventoryScreen:
     const executeArchiveCache =
       useCallback(
         async (): Promise<void> => {
-          const item =
-            selectedItem;
-
-          const user =
-            auth.currentUser;
-
-          if (
-            !item ||
-            !user ||
-            isSubmitting
-          ) {
-            return;
-          }
-
-          setConfirmationAction(
-            null,
-          );
-
-          setCrudOperation(
-            'archive',
-          );
-
+          const operation = beginCrud(selectedItem?.id);
+          if (!operation) return;
           try {
-            const treasureReference =
-              doc(
-                db,
-                'treasures',
-                item.id,
-              );
+            const item =
+              selectedItem;
 
-            const activityReference =
-              doc(
-                collection(
+            const user =
+              auth.currentUser;
+
+            if (
+              !item ||
+              !user ||
+              isSubmitting
+            ) {
+              return;
+            }
+
+            setConfirmationAction(
+              null,
+            );
+
+            setCrudOperation(
+              'archive',
+            );
+
+            try {
+              const treasureReference =
+                doc(
                   db,
-                  'activity_feed',
-                ),
-              );
+                  'treasures',
+                  item.id,
+                );
 
-            const creatorName =
-              getSafeCreatorName(
-                currentProfile
-                  ?.username ||
+              const activityReference =
+                doc(
+                  collection(
+                    db,
+                    'activity_feed',
+                  ),
+                );
+
+              const creatorName =
+                getSafeCreatorName(
+                  currentProfile
+                    ?.username ||
                   user.displayName ||
                   item.creatorName ||
                   user.email
                     ?.split(
                       '@',
                     )[0],
-              ).slice(
-                0,
-                100,
-              );
+                ).slice(
+                  0,
+                  100,
+                );
 
-            await runTransaction(
-              db,
+              const committedRecord = await runTransaction(
+                db,
 
-              async (
-                transaction,
-              ) => {
-                const snapshot =
-                  await transaction.get(
-                    treasureReference,
-                  );
+                async (
+                  transaction,
+                ) => {
+                  const snapshot =
+                    await transaction.get(
+                      treasureReference,
+                    );
+                  if (!operation.isCurrent()) throw new Error('INVENTORY_OPERATION_CANCELLED');
 
-                if (
-                  !snapshot.exists()
-                ) {
-                  throw new Error(
-                    'TREASURE_NOT_FOUND',
-                  );
-                }
+                  if (
+                    !snapshot.exists()
+                  ) {
+                    throw new Error(
+                      'TREASURE_NOT_FOUND',
+                    );
+                  }
 
-                const liveTreasure =
-                  snapshot.data() as
+                  const liveTreasure =
+                    snapshot.data() as
                     TreasureDocument;
 
-                if (
-                  liveTreasure.creatorId !==
-                  user.uid
-                ) {
-                  throw new Error(
-                    'NOT_CACHE_OWNER',
+                  if (
+                    liveTreasure.creatorId !==
+                    user.uid
+                  ) {
+                    throw new Error(
+                      'NOT_CACHE_OWNER',
+                    );
+                  }
+
+                  if (
+                    liveTreasure.isArchived
+                  ) {
+                    throw new Error(
+                      'ALREADY_ARCHIVED',
+                    );
+                  }
+
+                  transaction.update(
+                    treasureReference,
+                    {
+                      isArchived:
+                        true,
+
+                      updatedAt:
+                        serverTimestamp(),
+                    },
                   );
-                }
 
-                if (
-                  liveTreasure.isArchived
-                ) {
-                  throw new Error(
-                    'ALREADY_ARCHIVED',
+                  transaction.set(
+                    activityReference,
+                    {
+                      activityId:
+                        activityReference.id,
+
+                      userId:
+                        user.uid,
+
+                      username:
+                        creatorName,
+
+                      type:
+                        'TREASURE_ARCHIVED',
+
+                      message:
+                        `ARCHIVED CACHE: ${item.title}`,
+
+                      targetId:
+                        item.id,
+
+                      createdAt:
+                        serverTimestamp(),
+                    },
                   );
-                }
 
-                transaction.update(
-                  treasureReference,
-                  {
-                    isArchived:
-                      true,
-
-                    updatedAt:
-                      serverTimestamp(),
-                  },
-                );
-
-                transaction.set(
-                  activityReference,
-                  {
-                    activityId:
-                      activityReference.id,
-
-                    userId:
-                      user.uid,
-
-                    username:
-                      creatorName,
-
-                    type:
-                      'TREASURE_ARCHIVED',
-
-                    message:
-                      `ARCHIVED CACHE: ${item.title}`,
-
-                    targetId:
-                      item.id,
-
-                    createdAt:
-                      serverTimestamp(),
-                  },
-                );
-              },
-            );
-
-            if (
-              !isMountedRef.current
-            ) {
-              return;
-            }
-
-            setIsEditing(
-              false,
-            );
-
-            showAccessibleAlert(
-              'Cache Archived',
-              'The cache has been removed from active field lists. It remains available in your Inventory for restore or deletion.',
-            );
-          } catch (
-            error: unknown
-          ) {
-            logDevelopmentWarning(
-              '[Treasi Inventory] Cache archive failed:',
-              error,
-            );
-
-            showAccessibleAlert(
-              'Archive Error',
-              getFriendlyFirestoreError(
-                error,
-                'Treasi could not archive this cache.',
-              ),
-            );
-          } finally {
-            if (
-              isMountedRef.current
-            ) {
-              setCrudOperation(
-                null,
+                  return { ...liveTreasure, isArchived: true };
+                },
               );
+
+              if (
+                !operation.isCurrent()
+              ) {
+                return;
+              }
+              applyCommittedRecord(item.id, committedRecord);
+
+              setIsEditing(
+                false,
+              );
+
+              showAccessibleAlert(
+                'Cache Archived',
+                'The cache has been removed from active field lists. It remains available in your Inventory for restore or deletion.',
+              );
+            } catch (
+            error: unknown
+            ) {
+              if (!operation.isCurrent()) return;
+              logDevelopmentWarning(
+                '[Treasi Inventory] Cache archive failed:',
+                error,
+              );
+
+              showAccessibleAlert(
+                'Archive Error',
+                getFriendlyFirestoreError(
+                  error,
+                  'Treasi could not archive this cache.',
+                ),
+              );
+            } finally {
+              if (
+                operation.isCurrent()
+              ) {
+                setCrudOperation(
+                  null,
+                );
+              }
             }
-          }
+
+          } finally { operation.release(); }
         },
         [
+          applyCommittedRecord,
+          beginCrud,
           currentProfile
             ?.username,
           isSubmitting,
@@ -3604,125 +3119,137 @@ export const InventoryScreen:
     const executeRestoreCache =
       useCallback(
         async (): Promise<void> => {
-          const item =
-            selectedItem;
-
-          const user =
-            auth.currentUser;
-
-          if (
-            !item ||
-            !user ||
-            isSubmitting
-          ) {
-            return;
-          }
-
-          setConfirmationAction(
-            null,
-          );
-
-          setCrudOperation(
-            'restore',
-          );
-
+          const operation = beginCrud(selectedItem?.id);
+          if (!operation) return;
           try {
-            const treasureReference =
-              doc(
-                db,
-                'treasures',
-                item.id,
-              );
+            const item =
+              selectedItem;
 
-            await runTransaction(
-              db,
-
-              async (
-                transaction,
-              ) => {
-                const snapshot =
-                  await transaction.get(
-                    treasureReference,
-                  );
-
-                if (
-                  !snapshot.exists()
-                ) {
-                  throw new Error(
-                    'TREASURE_NOT_FOUND',
-                  );
-                }
-
-                const liveTreasure =
-                  snapshot.data() as
-                    TreasureDocument;
-
-                if (
-                  liveTreasure.creatorId !==
-                  user.uid
-                ) {
-                  throw new Error(
-                    'NOT_CACHE_OWNER',
-                  );
-                }
-
-                if (
-                  !liveTreasure.isArchived
-                ) {
-                  throw new Error(
-                    'NOT_ARCHIVED',
-                  );
-                }
-
-                transaction.update(
-                  treasureReference,
-                  {
-                    isArchived:
-                      false,
-
-                    updatedAt:
-                      serverTimestamp(),
-                  },
-                );
-              },
-            );
+            const user =
+              auth.currentUser;
 
             if (
-              !isMountedRef.current
+              !item ||
+              !user ||
+              isSubmitting
             ) {
               return;
             }
 
-            showAccessibleAlert(
-              'Cache Restored',
-              'The cache is active again and may appear on field maps and hunting lists.',
-            );
-          } catch (
-            error: unknown
-          ) {
-            logDevelopmentWarning(
-              '[Treasi Inventory] Cache restore failed:',
-              error,
+            setConfirmationAction(
+              null,
             );
 
-            showAccessibleAlert(
-              'Restore Error',
-              getFriendlyFirestoreError(
-                error,
-                'Treasi could not restore this cache.',
-              ),
+            setCrudOperation(
+              'restore',
             );
-          } finally {
-            if (
-              isMountedRef.current
-            ) {
-              setCrudOperation(
-                null,
+
+            try {
+              const treasureReference =
+                doc(
+                  db,
+                  'treasures',
+                  item.id,
+                );
+
+              const committedRecord = await runTransaction(
+                db,
+
+                async (
+                  transaction,
+                ) => {
+                  const snapshot =
+                    await transaction.get(
+                      treasureReference,
+                    );
+                  if (!operation.isCurrent()) throw new Error('INVENTORY_OPERATION_CANCELLED');
+
+                  if (
+                    !snapshot.exists()
+                  ) {
+                    throw new Error(
+                      'TREASURE_NOT_FOUND',
+                    );
+                  }
+
+                  const liveTreasure =
+                    snapshot.data() as
+                    TreasureDocument;
+
+                  if (
+                    liveTreasure.creatorId !==
+                    user.uid
+                  ) {
+                    throw new Error(
+                      'NOT_CACHE_OWNER',
+                    );
+                  }
+
+                  if (
+                    !liveTreasure.isArchived
+                  ) {
+                    throw new Error(
+                      'NOT_ARCHIVED',
+                    );
+                  }
+
+                  transaction.update(
+                    treasureReference,
+                    {
+                      isArchived:
+                        false,
+
+                      updatedAt:
+                        serverTimestamp(),
+                    },
+                  );
+
+                  return { ...liveTreasure, isArchived: false };
+                },
               );
+
+              if (
+                !operation.isCurrent()
+              ) {
+                return;
+              }
+              applyCommittedRecord(item.id, committedRecord);
+
+              showAccessibleAlert(
+                'Cache Restored',
+                'The cache is active again and may appear on field maps and hunting lists.',
+              );
+            } catch (
+            error: unknown
+            ) {
+              if (!operation.isCurrent()) return;
+              logDevelopmentWarning(
+                '[Treasi Inventory] Cache restore failed:',
+                error,
+              );
+
+              showAccessibleAlert(
+                'Restore Error',
+                getFriendlyFirestoreError(
+                  error,
+                  'Treasi could not restore this cache.',
+                ),
+              );
+            } finally {
+              if (
+                operation.isCurrent()
+              ) {
+                setCrudOperation(
+                  null,
+                );
+              }
             }
-          }
+
+          } finally { operation.release(); }
         },
         [
+          applyCommittedRecord,
+          beginCrud,
           isSubmitting,
           selectedItem,
         ],
@@ -3735,125 +3262,136 @@ export const InventoryScreen:
     const executeDeleteCache =
       useCallback(
         async (): Promise<void> => {
-          const item =
-            selectedItem;
-
-          const user =
-            auth.currentUser;
-
-          if (
-            !item ||
-            !user ||
-            isSubmitting
-          ) {
-            return;
-          }
-
-          setConfirmationAction(
-            null,
-          );
-
-          setCrudOperation(
-            'delete',
-          );
-
+          const operation = beginCrud(selectedItem?.id);
+          if (!operation) return;
           try {
-            const treasureReference =
-              doc(
-                db,
-                'treasures',
-                item.id,
-              );
+            const item =
+              selectedItem;
 
-            /*
-             * Discoveries are intentionally not cascade-deleted here.
-             *
-             * Current Firestore rules only allow a discovery document to be
-             * deleted by that discovery's hunter. A treasure owner cannot
-             * delete discovery records created by other Explorers.
-             */
-            await runTransaction(
-              db,
-
-              async (
-                transaction,
-              ) => {
-                const snapshot =
-                  await transaction.get(
-                    treasureReference,
-                  );
-
-                if (
-                  !snapshot.exists()
-                ) {
-                  throw new Error(
-                    'TREASURE_NOT_FOUND',
-                  );
-                }
-
-                const liveTreasure =
-                  snapshot.data() as
-                    TreasureDocument;
-
-                if (
-                  liveTreasure.creatorId !==
-                  user.uid
-                ) {
-                  throw new Error(
-                    'NOT_CACHE_OWNER',
-                  );
-                }
-
-                transaction.delete(
-                  treasureReference,
-                );
-              },
-            );
+            const user =
+              auth.currentUser;
 
             if (
-              !isMountedRef.current
+              !item ||
+              !user ||
+              isSubmitting
             ) {
               return;
             }
 
-            setSelectedId(
+            setConfirmationAction(
               null,
             );
 
-            setIsEditing(
-              false,
+            setCrudOperation(
+              'delete',
             );
 
-            showAccessibleAlert(
-              'Cache Deleted',
-              'The treasure record was permanently deleted. Existing discovery and activity history is retained.',
-            );
-          } catch (
-            error: unknown
-          ) {
-            logDevelopmentWarning(
-              '[Treasi Inventory] Cache deletion failed:',
-              error,
-            );
+            try {
+              const treasureReference =
+                doc(
+                  db,
+                  'treasures',
+                  item.id,
+                );
 
-            showAccessibleAlert(
-              'Deletion Error',
-              getFriendlyFirestoreError(
-                error,
-                'Treasi could not permanently delete this cache.',
-              ),
-            );
-          } finally {
-            if (
-              isMountedRef.current
-            ) {
-              setCrudOperation(
+              /*
+               * Discoveries are intentionally not cascade-deleted here.
+               *
+               * Current Firestore rules only allow a discovery document to be
+               * deleted by that discovery's hunter. A treasure owner cannot
+               * delete discovery records created by other Explorers.
+               */
+              await runTransaction(
+                db,
+
+                async (
+                  transaction,
+                ) => {
+                  const snapshot =
+                    await transaction.get(
+                      treasureReference,
+                    );
+                  if (!operation.isCurrent()) throw new Error('INVENTORY_OPERATION_CANCELLED');
+
+                  if (
+                    !snapshot.exists()
+                  ) {
+                    throw new Error(
+                      'TREASURE_NOT_FOUND',
+                    );
+                  }
+
+                  const liveTreasure =
+                    snapshot.data() as
+                    TreasureDocument;
+
+                  if (
+                    liveTreasure.creatorId !==
+                    user.uid
+                  ) {
+                    throw new Error(
+                      'NOT_CACHE_OWNER',
+                    );
+                  }
+
+                  if (!liveTreasure.isArchived) throw new Error('ARCHIVE_BEFORE_DELETE');
+                  transaction.delete(
+                    treasureReference,
+                  );
+                },
+              );
+
+              if (
+                !operation.isCurrent()
+              ) {
+                return;
+              }
+              applyCommittedRecord(item.id, null);
+
+              setSelectedId(
                 null,
               );
+
+              setIsEditing(
+                false,
+              );
+
+              showAccessibleAlert(
+                'Cache Deleted',
+                'The treasure record was permanently deleted. Existing discovery and activity history is retained.',
+              );
+            } catch (
+            error: unknown
+            ) {
+              if (!operation.isCurrent()) return;
+              logDevelopmentWarning(
+                '[Treasi Inventory] Cache deletion failed:',
+                error,
+              );
+
+              showAccessibleAlert(
+                'Deletion Error',
+                getFriendlyFirestoreError(
+                  error,
+                  'Treasi could not permanently delete this cache.',
+                ),
+              );
+            } finally {
+              if (
+                operation.isCurrent()
+              ) {
+                setCrudOperation(
+                  null,
+                );
+              }
             }
-          }
+
+          } finally { operation.release(); }
         },
         [
+          applyCommittedRecord,
+          beginCrud,
           isSubmitting,
           selectedItem,
         ],
@@ -3934,6 +3472,8 @@ export const InventoryScreen:
     const handleConfirmAction =
       useCallback(
         (): void => {
+          if (!selectedItem || confirmationTargetRef.current?.id !== selectedItem.id ||
+              selectedIdRef.current !== selectedItem.id || confirmationTargetRef.current?.account !== currentAccount) return;
           switch (
             confirmationAction
           ) {
@@ -3955,6 +3495,8 @@ export const InventoryScreen:
         },
         [
           confirmationAction,
+          selectedItem,
+          currentAccount,
           executeArchiveCache,
           executeDeleteCache,
           executeRestoreCache,
@@ -3968,6 +3510,8 @@ export const InventoryScreen:
     const handleTrackSelectedCache =
       useCallback(
         (): void => {
+          if (!isMountedRef.current || accountRef.current !== currentAccount ||
+              auth.currentUser?.uid !== currentUserId || crudLockRef.current) return;
           if (
             !selectedItem ||
             !onNavigate
@@ -4016,6 +3560,7 @@ export const InventoryScreen:
           );
         },
         [
+          currentAccount,
           currentUserId,
           onNavigate,
           selectedItem,
@@ -4374,7 +3919,6 @@ export const InventoryScreen:
             {/* -------------------------------------------------------------- */}
 
             <View
-              accessible
               accessibilityLabel={`${locationStatusText}. ${
                 locationError ??
                 ''
@@ -4384,10 +3928,8 @@ export const InventoryScreen:
               }
             >
               <View
-                accessible={
-                  false
-                }
-                importantForAccessibility="no-hide-descendants"
+                accessible
+                accessibilityLabel={`${locationStatusText}. ${locationError ?? ''}`}
                 style={
                   styles.positionIdentity
                 }
@@ -4783,11 +4325,11 @@ export const InventoryScreen:
                     accessibilityLabel="Use current position for cache"
                     accessibilityState={{
                       disabled:
-                        !userCoords ||
+                        !canUseCurrentPosition ||
                         isSubmitting,
                     }}
                     disabled={
-                      !userCoords ||
+                      !canUseCurrentPosition ||
                       isSubmitting
                     }
                     onPress={
@@ -4799,7 +4341,7 @@ export const InventoryScreen:
                       styles.usePositionButton,
 
                       (
-                        !userCoords ||
+                        !canUseCurrentPosition ||
                         isSubmitting
                       ) &&
                         styles.disabledButton,
@@ -5068,7 +4610,6 @@ export const InventoryScreen:
               </ScrollView>
             ) : activeTreasuresError ? (
               <View
-                accessible
                 accessibilityRole="alert"
                 style={
                   styles.stateContainer
@@ -5259,7 +4800,9 @@ export const InventoryScreen:
                               selected:
                                 isSelected,
                             }}
+                            disabled={isSubmitting}
                             onPress={() => {
+                              if (crudLockRef.current) return;
                               setSelectedId(
                                 item.id,
                               );
@@ -5462,7 +5005,6 @@ export const InventoryScreen:
 
             {syncWarningText ? (
               <View
-                accessible
                 accessibilityRole="alert"
                 style={
                   styles.syncWarningCard
@@ -5715,11 +5257,11 @@ export const InventoryScreen:
                         accessibilityLabel="Use current position for edited cache"
                         accessibilityState={{
                           disabled:
-                            !userCoords ||
+                            !canUseCurrentPosition ||
                             isSubmitting,
                         }}
                         disabled={
-                          !userCoords ||
+                          !canUseCurrentPosition ||
                           isSubmitting
                         }
                         onPress={
@@ -5731,7 +5273,7 @@ export const InventoryScreen:
                           styles.editUsePositionButton,
 
                           (
-                            !userCoords ||
+                            !canUseCurrentPosition ||
                             isSubmitting
                           ) &&
                             styles.disabledButton,
@@ -6417,9 +5959,7 @@ export const InventoryScreen:
                           isSubmitting
                         }
                         onPress={() =>
-                          setConfirmationAction(
-                            'restore',
-                          )
+                          requestConfirmation('restore')
                         }
                         style={({
                           pressed,
@@ -6459,9 +5999,7 @@ export const InventoryScreen:
                           isSubmitting
                         }
                         onPress={() =>
-                          setConfirmationAction(
-                            'delete',
-                          )
+                          requestConfirmation('delete')
                         }
                         style={({
                           pressed,
@@ -6502,9 +6040,7 @@ export const InventoryScreen:
                         isSubmitting
                       }
                       onPress={() =>
-                        setConfirmationAction(
-                          'archive',
-                        )
+                        requestConfirmation('archive')
                       }
                       style={({
                         pressed,
@@ -6618,6 +6154,8 @@ export const InventoryScreen:
         {/* ================================================================== */}
 
         <Modal
+          testID="inventory-confirmation-modal"
+          supportedOrientations={['portrait', 'portrait-upside-down', 'landscape-left', 'landscape-right']}
           transparent
           visible={
             Boolean(
@@ -6642,7 +6180,6 @@ export const InventoryScreen:
             }
           >
             <View
-              accessible
               accessibilityViewIsModal
               accessibilityLabel={
                 confirmationContent
