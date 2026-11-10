@@ -1,3 +1,6 @@
+import { useKeyboardEditing } from '../../hooks/useKeyboardEditing';
+import { KeyboardEditingBar } from '../../components/KeyboardEditingBar';
+import { FormScrollView } from '../../components/FormScrollView';
 import React, {
   useCallback,
   useEffect,
@@ -384,6 +387,8 @@ export const LoginScreen:
     onNavigateSignUp,
     onLoginSuccess,
   }) => {
+    const keyboardVisible = useKeyboardEditing();
+
     const {
       width,
       height,
@@ -1190,6 +1195,8 @@ export const LoginScreen:
         }
         keyboardVerticalOffset={0}
       >
+        {keyboardVisible && <KeyboardEditingBar title="ACCOUNT DETAILS" />}
+
         <Animated.View
           style={[
             styles.animatedScreen,
@@ -1200,7 +1207,7 @@ export const LoginScreen:
             },
           ]}
         >
-          <ScrollView
+          <FormScrollView
             style={
               styles.scrollView
             }
@@ -1226,11 +1233,7 @@ export const LoginScreen:
                     16,
                   ),
 
-                paddingBottom:
-                  Math.max(
-                    insets.bottom,
-                    16,
-                  ),
+                paddingBottom: keyboardVisible ? 4 : Math.max(insets.bottom, 16),
               },
             ]}
             keyboardShouldPersistTaps="handled"
@@ -1265,13 +1268,13 @@ export const LoginScreen:
               {/* ============================================================ */}
 
               <View
-                style={[
+                style={[[
                   styles.parchmentCard,
 
                   isLandscape
                     ? styles.leftLandscape
                     : styles.fullWidthCard,
-                ]}
+                ], keyboardVisible && { flex: 1, width: '100%' }]}
               >
                 <View
                   style={
@@ -1279,9 +1282,7 @@ export const LoginScreen:
                   }
                 >
                   <View
-                    style={
-                      styles.ticketHeader
-                    }
+                    style={[styles.ticketHeader, keyboardVisible && { display: 'none' }]}
                   >
                     <Text
                       maxFontSizeMultiplier={
@@ -1307,9 +1308,7 @@ export const LoginScreen:
                   </View>
 
                   <View
-                    style={
-                      styles.brandHeader
-                    }
+                    style={[styles.brandHeader, keyboardVisible && { display: 'none' }]}
                   >
                     <Text
                       accessibilityRole="header"
@@ -1918,13 +1917,13 @@ export const LoginScreen:
               {/* ============================================================ */}
 
               <View
-                style={[
+                style={[[
                   styles.consoleCard,
 
                   isLandscape
                     ? styles.rightLandscape
                     : styles.fullWidthCard,
-                ]}
+                ], keyboardVisible && { display: 'none' }]}
               >
                 <Text
                   accessibilityRole="header"
@@ -2205,7 +2204,7 @@ export const LoginScreen:
                 </View>
               </View>
             </View>
-          </ScrollView>
+          </FormScrollView>
         </Animated.View>
       </KeyboardAvoidingView>
     );

@@ -1,3 +1,6 @@
+import { useKeyboardEditing } from '../hooks/useKeyboardEditing';
+import { KeyboardEditingBar } from '../components/KeyboardEditingBar';
+import { FormScrollView, FormTextInput } from '../components/FormScrollView';
 import { useAuthenticatedUser, useAccountSession } from '../hooks/useAccountSession';
 import { isFreshLocation, useDashboardLocation } from '../hooks/useDashboardLocation';
 import type { User } from 'firebase/auth';
@@ -216,6 +219,8 @@ export const SocialScreen: React.FC<Props> = props => {
     return <SocialContent key={user?.uid ?? 'signed-out'} {...props} currentUser={user} />;
 };
 const SocialContent: React.FC<Props & { currentUser: User | null }> = ({ onNavigate, currentUser }) => {
+    const keyboardVisible = useKeyboardEditing();
+
     const { width, height, } = useWindowDimensions();
     const insets = useSafeAreaInsets();
     const isLandscape = width > height;
@@ -1322,7 +1327,7 @@ const renderExplorerActions =
     /* ---------------------------------------------------------------------- */
 
     return (
-      <KeyboardAvoidingView
+      <KeyboardAvoidingView enabled={!friendModalVisible}
         style={
           styles.keyboardContainer
         }
@@ -1333,6 +1338,8 @@ const renderExplorerActions =
             : undefined
         }
       >
+        {keyboardVisible && !friendModalVisible && <KeyboardEditingBar title="TELEGRAM" />}
+
         <View
           style={[
             styles.screen,
@@ -1355,11 +1362,7 @@ const renderExplorerActions =
                   10,
                 ),
 
-              paddingBottom:
-                Math.max(
-                  insets.bottom,
-                  10,
-                ),
+              paddingBottom: keyboardVisible ? 4 : Math.max(insets.bottom, 10),
             },
           ]}
         >
@@ -1379,19 +1382,15 @@ const renderExplorerActions =
             {/* 60% — TELEGRAM FIELD DESK                                    */}
             {/* ============================================================= */}
 
-            <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={{ flexGrow: 1 }}
-              style={
-                styles.telegramPanel
-              }
+            <FormScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={{ flexGrow: 1 }}
+              style={[styles.telegramPanel, (keyboardVisible && !friendModalVisible) && { flex: 1 }]}
             >
               {/* ------------------------------------------------------------ */}
               {/* Header                                                       */}
               {/* ------------------------------------------------------------ */}
 
               <View
-                style={
-                  styles.lightPanelHeader
-                }
+                style={[styles.lightPanelHeader, (keyboardVisible && !friendModalVisible) && { display: 'none' }]}
               >
                 <View
                   style={
@@ -1522,14 +1521,12 @@ const renderExplorerActions =
                   maxFontSizeMultiplier={
                     1.7
                   }
-                  style={
-                    styles.composerDescription
-                  }
+                  style={[styles.composerDescription, (keyboardVisible && !friendModalVisible) && { display: 'none' }]}
                 >
                   Public dispatches are visible to authenticated Treasi Explorers. Do not include private or sensitive information.
                 </Text>
 
-                <TextInput
+                <FormTextInput
                   accessibilityLabel="Telegram broadcast message"
                   accessibilityHint="Enter a public message of up to 500 characters."
                   editable={
@@ -1630,9 +1627,7 @@ const renderExplorerActions =
               {/* ------------------------------------------------------------ */}
 
               <View
-                style={
-                  styles.dispatchFeedSection
-                }
+                style={[styles.dispatchFeedSection, (keyboardVisible && !friendModalVisible) && { display: 'none' }]}
               >
                 <View
                   style={
@@ -1898,9 +1893,7 @@ const renderExplorerActions =
               </View>
 
               <View
-                style={
-                  styles.lightPanelFooter
-                }
+                style={[styles.lightPanelFooter, (keyboardVisible && !friendModalVisible) && { display: 'none' }]}
               >
                 <Text
                   maxFontSizeMultiplier={
@@ -1913,16 +1906,14 @@ const renderExplorerActions =
                   TELEGRAMS ARE ASYNCHRONOUS PUBLIC FIELD SIGNALS
                 </Text>
               </View>
-            </ScrollView>
+            </FormScrollView>
 
             {/* ============================================================= */}
             {/* 40% — EXPLORER NETWORK                                       */}
             {/* ============================================================= */}
 
             <View
-              style={
-                styles.networkPanel
-              }
+              style={[styles.networkPanel, (keyboardVisible && !friendModalVisible) && { display: 'none' }]}
             >
               <ScrollView
                 style={
@@ -2977,14 +2968,14 @@ const renderExplorerActions =
               {/* Navigation                                                   */}
               {/* ------------------------------------------------------------ */}
 
-              <FieldNavBar
+              {!keyboardVisible && (<FieldNavBar
                 currentTab={
                   currentTab
                 }
                 onNavigate={
                   onNavigate
                 }
-              />
+              />)}
             </View>
           </View>
 
@@ -3014,7 +3005,7 @@ const renderExplorerActions =
               }
             }}
           >
-            <KeyboardAvoidingView
+            <KeyboardAvoidingView accessibilityViewIsModal
               style={
                 styles.modalOverlay
               }
@@ -3025,6 +3016,8 @@ const renderExplorerActions =
                   : undefined
               }
             >
+        {keyboardVisible && <KeyboardEditingBar title="EDITING" />}
+
               <Pressable
                 accessible={
                   false
@@ -3045,8 +3038,8 @@ const renderExplorerActions =
                 }}
               />
 
-              <ScrollView keyboardShouldPersistTaps="handled" bounces={false}
-                accessibilityViewIsModal
+              <FormScrollView keyboardShouldPersistTaps="handled" bounces={false}
+
                 accessibilityLabel="Link a new Explorer"
                 onAccessibilityEscape={() => {
                   if (
@@ -3290,7 +3283,7 @@ const renderExplorerActions =
                       : 'SEND LINK REQUEST'}
                   </Text>
                 </Pressable>
-              </ScrollView>
+              </FormScrollView>
             </KeyboardAvoidingView>
           </Modal>
         </View>

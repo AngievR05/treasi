@@ -1,3 +1,4 @@
+import { observeKeyboard } from './helpers/keyboard';
 import React from 'react';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react-native';
 import { AccessibilityInfo, Alert, AppState, Linking } from 'react-native';
@@ -337,4 +338,14 @@ test('a completed old sign-out does not redirect a newer authenticated session',
   await act(() => { mockAuth.currentUser = { uid: 'other' }; mockAuthChange(mockAuth.currentUser); });
   await act(() => finish());
   expect(onSignOut).not.toHaveBeenCalled();
+});
+
+test('keyboard editing keeps the callsign draft visible and temporarily hides the settings pane', async () => {
+  const keyboard = observeKeyboard(); await mount(); await press('Edit Explorer identity');
+  await fireEvent.changeText(screen.getByLabelText('Explorer callsign'), 'VISIBLE_DRAFT'); await keyboard(true);
+  expect(screen.getByLabelText('Explorer callsign')).toHaveProp('value', 'VISIBLE_DRAFT');
+  expect(screen.queryByRole('switch', { name: 'HAPTIC FEEDBACK' })).toBeNull();
+  await press('Done typing'); await keyboard(false);
+  expect(screen.getByRole('switch', { name: 'HAPTIC FEEDBACK' })).toBeTruthy();
+  expect(screen.getByLabelText('Explorer callsign')).toHaveProp('value', 'VISIBLE_DRAFT');
 });

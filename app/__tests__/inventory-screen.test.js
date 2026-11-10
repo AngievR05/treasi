@@ -1,6 +1,7 @@
+import { observeKeyboard } from './helpers/keyboard';
 import React from 'react';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react-native';
-import { AccessibilityInfo, Alert, Linking } from 'react-native';
+import { AccessibilityInfo, Alert, Keyboard, Linking } from 'react-native';
 import { auth as mockAuth } from '../src/config/firebase';
 import { runTransaction } from 'firebase/firestore';
 import { useDashboardLocation } from '../src/hooks/useDashboardLocation';
@@ -358,4 +359,21 @@ test('an account change during transaction reads prevents all writes', async () 
   });
   await mount(); await press('Archive OWN CACHE'); await press('ARCHIVE CACHE');
   expect(mockTransaction.update).not.toHaveBeenCalled(); expect(mockTransaction.set).not.toHaveBeenCalled();
+});
+
+test('keyboard editing gives the create form room and restores Inventory without losing the draft', async () => {
+  const keyboard = observeKeyboard(); await mount(); await openCreate(); await change('Cache title', 'Visible draft');
+  await keyboard(true);
+  expect(screen.getByLabelText('Cache title')).toHaveProp('value', 'Visible draft');
+  expect(screen.queryByText('FIELD CACHE INVENTORY')).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Return to field map' })).toBeNull();
+  await press('Done typing'); expect(Keyboard.dismiss).toHaveBeenCalledTimes(1); await keyboard(false);
+  expect(screen.getByText('FIELD CACHE INVENTORY')).toBeTruthy();
+  expect(screen.getByLabelText('Cache title')).toHaveProp('value', 'Visible draft');
+});
+test('keyboard editing keeps the edit fields mounted while hiding the cache browser', async () => {
+  const keyboard = observeKeyboard(); await mount(); await press('Edit OWN CACHE'); await change('Edit cache title', 'Edit in progress');
+  await keyboard(true); expect(screen.getByLabelText('Edit cache title')).toHaveProp('value', 'Edit in progress');
+  expect(screen.queryByRole('button', { name: 'Bury a new cache' })).toBeNull(); await keyboard(false);
+  expect(screen.getByLabelText('Edit cache title')).toHaveProp('value', 'Edit in progress');
 });

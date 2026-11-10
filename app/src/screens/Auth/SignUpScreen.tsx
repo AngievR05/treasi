@@ -1,3 +1,6 @@
+import { useKeyboardEditing } from '../../hooks/useKeyboardEditing';
+import { KeyboardEditingBar } from '../../components/KeyboardEditingBar';
+import { FormScrollView } from '../../components/FormScrollView';
 import React, {
   useEffect,
   useMemo,
@@ -235,6 +238,8 @@ export const SignUpScreen:
     onNavigateLogin,
     onSignUpSuccess,
   }) => {
+    const keyboardVisible = useKeyboardEditing();
+
     const {
       width,
       height,
@@ -1190,6 +1195,8 @@ export const SignUpScreen:
             : undefined
         }
       >
+        {keyboardVisible && <KeyboardEditingBar title="ACCOUNT DETAILS" />}
+
         <Animated.View
           style={[
             styles.screenWrapper,
@@ -1220,11 +1227,7 @@ export const SignUpScreen:
                   0,
                 ),
 
-              paddingBottom:
-                Math.max(
-                  insets.bottom,
-                  0,
-                ),
+              paddingBottom: keyboardVisible ? 4 : Math.max(insets.bottom, 0),
             },
           ]}
         >
@@ -1233,14 +1236,14 @@ export const SignUpScreen:
           {/* ---------------------------------------------------------------- */}
 
           <View
-            style={[
+            style={[[
               styles.leftViewport,
 
               !isLandscape &&
                 styles.fullWidthViewport,
-            ]}
+            ], keyboardVisible && { flex: 1, width: '100%' }]}
           >
-            <ScrollView
+            <FormScrollView
               contentContainerStyle={[
                 styles.formScrollContent,
 
@@ -1263,9 +1266,7 @@ export const SignUpScreen:
               }
             >
               <View
-                style={
-                  styles.headerBlock
-                }
+                style={[styles.headerBlock, keyboardVisible && { display: 'none' }]}
               >
                 <Text
                   maxFontSizeMultiplier={
@@ -1361,7 +1362,7 @@ export const SignUpScreen:
                     ref={
                       callsignInputRef
                     }
-                    accessibilityLabelledBy="signup-callsign-label"
+                    accessibilityLabel="Explorer callsign"
                     accessibilityHint="Enter 3 to 24 letters, numbers, underscores or hyphens."
                     autoCapitalize="characters"
                     autoComplete="off"
@@ -1454,7 +1455,7 @@ export const SignUpScreen:
                     ref={
                       emailInputRef
                     }
-                    accessibilityLabelledBy="signup-email-label"
+                    accessibilityLabel="Explorer email"
                     accessibilityHint="Enter the email address you will use to sign in."
                     autoCapitalize="none"
                     autoComplete="email"
@@ -1535,7 +1536,7 @@ export const SignUpScreen:
                     ref={
                       passwordInputRef
                     }
-                    accessibilityLabelledBy="signup-password-label"
+                    accessibilityLabel="Passcode"
                     accessibilityHint={`Enter at least ${MIN_PASSWORD_LENGTH} characters containing a letter and a number.`}
                     autoCapitalize="none"
                     autoComplete="new-password"
@@ -1667,7 +1668,7 @@ export const SignUpScreen:
                     ref={
                       confirmPasswordInputRef
                     }
-                    accessibilityLabelledBy="signup-confirm-password-label"
+                    accessibilityLabel="Confirm passcode"
                     accessibilityHint="Enter the same passcode again."
                     autoCapitalize="none"
                     autoComplete="new-password"
@@ -1830,7 +1831,7 @@ export const SignUpScreen:
                   </Text>
                 )}
               </Pressable>
-            </ScrollView>
+            </FormScrollView>
           </View>
 
           {/* ---------------------------------------------------------------- */}
@@ -1838,12 +1839,12 @@ export const SignUpScreen:
           {/* ---------------------------------------------------------------- */}
 
           <View
-            style={[
+            style={[[
               styles.rightViewport,
 
               !isLandscape &&
                 styles.fullWidthViewport,
-            ]}
+            ], keyboardVisible && { display: 'none' }]}
           >
             <ScrollView
               contentContainerStyle={[

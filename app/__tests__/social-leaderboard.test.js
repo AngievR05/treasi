@@ -1,3 +1,4 @@
+import { observeKeyboard } from './helpers/keyboard';
 import React from 'react';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react-native';
 import { AccessibilityInfo, Alert, Linking } from 'react-native';
@@ -242,4 +243,19 @@ test('Social reports a missing feed index without falsely claiming a connection 
 });
 test('Leaderboard shows an empty state for an empty manifest and a missing-profile error', async () => {
   await mountLeaderboard([]); await emit('users/me', snap(null)); expect(screen.getByLabelText('No Explorers are currently available in the leaderboard.')).toBeTruthy(); expect(screen.getAllByText(/EXPLORER PROFILE NOT FOUND/).length).toBeGreaterThan(0);
+});
+
+test('keyboard editing expands Telegram composition without losing the draft', async () => {
+  const keyboard = observeKeyboard(); await mountSocial(); await change('Telegram broadcast message', 'Visible telegram'); await keyboard(true);
+  expect(screen.getByLabelText('Telegram broadcast message')).toHaveProp('value', 'Visible telegram');
+  expect(screen.queryByRole('button', { name: 'Link a new Explorer' })).toBeNull();
+  await press('Done typing'); await keyboard(false);
+  expect(screen.getByRole('button', { name: 'Link a new Explorer' })).toBeTruthy();
+  expect(screen.getByLabelText('Telegram broadcast message')).toHaveProp('value', 'Visible telegram');
+});
+test('callsign modal shows one keyboard toolbar and preserves the search text', async () => {
+  const keyboard = observeKeyboard(); await mountSocial(); await press('Link a new Explorer'); await change('Explorer callsign', 'OTHER'); await keyboard(true);
+  expect(screen.getAllByRole('button', { name: 'Done typing' })).toHaveLength(1);
+  expect(screen.getByLabelText('Explorer callsign')).toHaveProp('value', 'OTHER');
+  await press('Done typing'); await keyboard(false); expect(screen.getByLabelText('Explorer callsign')).toHaveProp('value', 'OTHER');
 });

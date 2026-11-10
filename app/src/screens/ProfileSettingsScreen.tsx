@@ -1,3 +1,6 @@
+import { useKeyboardEditing } from '../hooks/useKeyboardEditing';
+import { KeyboardEditingBar } from '../components/KeyboardEditingBar';
+import { FormScrollView } from '../components/FormScrollView';
 import React, {
   useCallback,
   useEffect,
@@ -514,6 +517,8 @@ export const ProfileSettingsScreen:
     onUpdateUserSettings,
     onDeleteAccount,
   }) => {
+    const keyboardVisible = useKeyboardEditing();
+
     const insets =
       useSafeAreaInsets();
 
@@ -2760,7 +2765,7 @@ export const ProfileSettingsScreen:
     /* ---------------------------------------------------------------------- */
 
     return (
-      <KeyboardAvoidingView
+      <KeyboardAvoidingView enabled={!deleteModalVisible}
         style={
           styles.screen
         }
@@ -2771,6 +2776,8 @@ export const ProfileSettingsScreen:
             : undefined
         }
       >
+        {keyboardVisible && !deleteModalVisible && <KeyboardEditingBar title="PROFILE DETAILS" />}
+
         <View
           style={[
             styles.splitWrapper,
@@ -2799,11 +2806,7 @@ export const ProfileSettingsScreen:
                   10,
                 ),
 
-              paddingBottom:
-                Math.max(
-                  insets.bottom,
-                  10,
-                ),
+              paddingBottom: keyboardVisible ? 4 : Math.max(insets.bottom, 10),
             },
           ]}
         >
@@ -2813,13 +2816,13 @@ export const ProfileSettingsScreen:
 
           <View
             testID="settings-panel"
-            style={[
+            style={[[
               styles.settingsPanel,
 
               isLandscape
                 ? styles.settingsPanelLandscape
                 : styles.panelPortrait,
-            ]}
+            ], (keyboardVisible && !deleteModalVisible) && { display: 'none' }]}
           >
             <View
               style={
@@ -4031,15 +4034,15 @@ export const ProfileSettingsScreen:
           {/* ================================================================ */}
 
           <View
-            style={[
+            style={[[
               styles.profilePanel,
 
               isLandscape
                 ? styles.profilePanelLandscape
                 : styles.panelPortrait,
-            ]}
+            ], (keyboardVisible && !deleteModalVisible) && { flex: 1 }]}
           >
-            <ScrollView
+            <FormScrollView
               style={
                 styles.profileScroll
               }
@@ -4840,9 +4843,9 @@ export const ProfileSettingsScreen:
                   Treasi only claims settings that are actually stored in the current profile schema. Unsupported preferences are not presented as fake working controls.
                 </Text>
               </View>
-            </ScrollView>
+            </FormScrollView>
 
-            <FieldNavBar
+            {!keyboardVisible && (<FieldNavBar
               currentTab={
                 currentTab
               }
@@ -4853,7 +4856,7 @@ export const ProfileSettingsScreen:
                   tab,
                 )
               }
-            />
+            />)}
           </View>
         </View>
 
@@ -4974,7 +4977,7 @@ export const ProfileSettingsScreen:
             }
           }}
         >
-          <KeyboardAvoidingView
+          <KeyboardAvoidingView accessibilityViewIsModal
             style={
               styles.deleteModalOverlay
             }
@@ -4985,11 +4988,13 @@ export const ProfileSettingsScreen:
                 : undefined
             }
           >
-            <ScrollView style={styles.deleteModalScroll}
+        {keyboardVisible && <KeyboardEditingBar title="EDITING" />}
+
+            <FormScrollView style={styles.deleteModalScroll}
               contentContainerStyle={styles.deleteModalScrollContent}
               keyboardShouldPersistTaps="handled">
             <View
-              accessibilityViewIsModal
+
               accessibilityLabel="Delete Treasi account confirmation"
               onAccessibilityEscape={() => {
                 if (
@@ -5238,7 +5243,7 @@ export const ProfileSettingsScreen:
                 </Pressable>
               </View>
             </View>
-            </ScrollView>
+            </FormScrollView>
           </KeyboardAvoidingView>
         </Modal>
       </KeyboardAvoidingView>

@@ -1,3 +1,6 @@
+import { useKeyboardEditing } from '../hooks/useKeyboardEditing';
+import { KeyboardEditingBar } from '../components/KeyboardEditingBar';
+import { FormScrollView, FormTextInput } from '../components/FormScrollView';
 import React, {
   useCallback,
   useEffect,
@@ -584,6 +587,8 @@ export const InventoryScreen:
     onNavigate,
     initialParams,
   }) => {
+    const keyboardVisible = useKeyboardEditing();
+
     const {
       width,
       height,
@@ -3757,6 +3762,8 @@ export const InventoryScreen:
             : undefined
         }
       >
+        {keyboardVisible && <KeyboardEditingBar title="CACHE DETAILS" />}
+
         <View
           style={[
             styles.splitWrapper,
@@ -3785,11 +3792,7 @@ export const InventoryScreen:
                   10,
                 ),
 
-              paddingBottom:
-                Math.max(
-                  insets.bottom,
-                  10,
-                ),
+              paddingBottom: keyboardVisible ? 4 : Math.max(insets.bottom, 10),
             },
           ]}
         >
@@ -3798,18 +3801,16 @@ export const InventoryScreen:
           {/* ================================================================ */}
 
           <View
-            style={[
+            style={[[
               styles.leftViewport,
 
               isLandscape
                 ? styles.leftViewportLandscape
                 : styles.leftViewportPortrait,
-            ]}
+            ], keyboardVisible && { flex: 1 }, keyboardVisible && isEditing && { display: 'none' }]}
           >
             <View
-              style={
-                styles.workspaceHeader
-              }
+              style={[styles.workspaceHeader, keyboardVisible && { display: 'none' }]}
             >
               <View
                 style={
@@ -3923,9 +3924,7 @@ export const InventoryScreen:
                 locationError ??
                 ''
               }`}
-              style={
-                styles.positionBar
-              }
+              style={[styles.positionBar, keyboardVisible && { display: 'none' }]}
             >
               <View
                 accessible
@@ -4041,7 +4040,7 @@ export const InventoryScreen:
             {/* -------------------------------------------------------------- */}
 
             {isBurying ? (
-              <ScrollView
+              <FormScrollView
                 style={
                   styles.formContainer
                 }
@@ -4149,7 +4148,7 @@ export const InventoryScreen:
                   CLUE / RIDDLE HINT
                 </Text>
 
-                <TextInput
+                <FormTextInput
                   accessibilityLabel="Cache clue"
                   editable={
                     !isSubmitting
@@ -4232,7 +4231,7 @@ export const InventoryScreen:
                   SECRET PAYLOAD CONTENT
                 </Text>
 
-                <TextInput
+                <FormTextInput
                   accessibilityLabel="Secret payload"
                   editable={
                     !isSubmitting
@@ -4607,7 +4606,7 @@ export const InventoryScreen:
                       : 'SEAL & BURY CACHE'}
                   </Text>
                 </Pressable>
-              </ScrollView>
+              </FormScrollView>
             ) : activeTreasuresError ? (
               <View
                 accessibilityRole="alert"
@@ -4924,18 +4923,16 @@ export const InventoryScreen:
           {/* ================================================================ */}
 
           <View
-            style={[
+            style={[[
               styles.rightViewport,
 
               isLandscape
                 ? styles.rightViewportLandscape
                 : styles.rightViewportPortrait,
-            ]}
+            ], keyboardVisible && { flex: 1 }, keyboardVisible && isBurying && { display: 'none' }]}
           >
             <View
-              style={
-                styles.consoleHeader
-              }
+              style={[styles.consoleHeader, keyboardVisible && { display: 'none' }]}
             >
               <View
                 style={
@@ -5086,7 +5083,7 @@ export const InventoryScreen:
                 </View>
               ) : selectedItem ? (
                 isEditing ? (
-                  <ScrollView
+                  <FormScrollView
                     style={
                       styles.editScroll
                     }
@@ -5181,7 +5178,7 @@ export const InventoryScreen:
                       HINT / CLUE
                     </Text>
 
-                    <TextInput
+                    <FormTextInput
                       accessibilityLabel="Edit cache clue"
                       editable={
                         !isSubmitting
@@ -5214,7 +5211,7 @@ export const InventoryScreen:
                       SECRET PAYLOAD
                     </Text>
 
-                    <TextInput
+                    <FormTextInput
                       accessibilityLabel="Edit secret payload"
                       editable={
                         !isSubmitting
@@ -5567,7 +5564,7 @@ export const InventoryScreen:
                         </Text>
                       </Pressable>
                     </View>
-                  </ScrollView>
+                  </FormScrollView>
                 ) : (
                   <ScrollView
                     key={
@@ -6134,7 +6131,7 @@ export const InventoryScreen:
               )
             ) : null}
 
-            <FieldNavBar
+            {!keyboardVisible && (<FieldNavBar
               currentTab={
                 currentTab
               }
@@ -6145,7 +6142,7 @@ export const InventoryScreen:
                   screen,
                 )
               }
-            />
+            />)}
           </View>
         </View>
 
