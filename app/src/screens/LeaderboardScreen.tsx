@@ -1,722 +1,262 @@
-import React, {
-  useCallback,
-  useEffect,
-  useMemo,
-  useState,
-} from 'react';
-
-import {
-  AccessibilityInfo,
-  ActivityIndicator,
-  Platform,
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  Text,
-  useWindowDimensions,
-  View,
-} from 'react-native';
-
+import { useAuthenticatedUser, useAccountSession } from '../hooks/useAccountSession';
+import type { User } from 'firebase/auth';
+import React, { useCallback, useEffect, useMemo, useState, } from 'react';
+import { AccessibilityInfo, ActivityIndicator, Platform, Pressable, ScrollView, StyleSheet, Text, useWindowDimensions, View, } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-
-import {
-  Ionicons,
-  MaterialCommunityIcons,
-} from '@expo/vector-icons';
-
-import {
-  collection,
-  doc,
-  limit,
-  onSnapshot,
-  orderBy,
-  query,
-} from 'firebase/firestore';
-
-import {
-  auth,
-  db,
-} from '../config/firebase';
-
-import {
-  FieldNavBar,
-  type NavigationTab,
-} from '../components/FieldNavBar';
-
-import type {
-  UserDocument,
-} from '../types/firestore';
-
-/* -------------------------------------------------------------------------- */
-/* Types                                                                      */
-/* -------------------------------------------------------------------------- */
-
+import { Ionicons, MaterialCommunityIcons, } from '@expo/vector-icons';
+import { collection, doc, limit, orderBy, query, } from 'firebase/firestore';
+import { db, } from '../config/firebase';
+import { FieldNavBar, type NavigationTab, } from '../components/FieldNavBar';
+import type { UserDocument, } from '../types/firestore';
 interface ExplorerEntry {
-  uid: string;
-  rank: number;
-  username: string;
-  points: number;
-  isCurrentUser: boolean;
+    uid: string;
+    rank: number;
+    username: string;
+    points: number;
+    isCurrentUser: boolean;
 }
-
 interface Props {
-  onBack?: () => void;
-
-  onNavigate?: (
-    tab: string,
-  ) => void;
+    onBack?: () => void;
+    onNavigate?: (tab: string) => void;
 }
-
-/* -------------------------------------------------------------------------- */
-/* Constants                                                                  */
-/* -------------------------------------------------------------------------- */
-
-const MAX_LEADERBOARD_ENTRIES =
-  50;
-
+const MAX_LEADERBOARD_ENTRIES = 50;
 const COLOURS = {
-  forest950: '#172018',
-  forest900: '#1C261D',
-  forest800: '#2C3B2E',
-  forest700: '#3D503F',
-
-  parchment100: '#F6EFD9',
-  parchment200: '#E8DCC0',
-
-  ink900: '#2A2420',
-  ink700: '#514A40',
-
-  bronze700: '#5F4B32',
-  bronze600: '#6B563A',
-  bronze500: '#B08D57',
-  bronze400: '#C3A06A',
-
-  rust800: '#71301C',
-  rust700: '#7F321B',
-  rust600: '#8C3A20',
-
-  success700: '#3E6546',
-  success300: '#BFE3C0',
-
-  warning300: '#E6C580',
-  danger300: '#FFB4A2',
+    forest950: '#172018',
+    forest900: '#1C261D',
+    forest800: '#2C3B2E',
+    forest700: '#3D503F',
+    parchment100: '#F6EFD9',
+    parchment200: '#E8DCC0',
+    ink900: '#2A2420',
+    ink700: '#514A40',
+    bronze700: '#5F4B32',
+    bronze600: '#6B563A',
+    bronze500: '#B08D57',
+    bronze400: '#C3A06A',
+    rust800: '#71301C',
+    rust700: '#7F321B',
+    rust600: '#8C3A20',
+    success700: '#3E6546',
+    success300: '#BFE3C0',
+    warning300: '#E6C580',
+    danger300: '#FFB4A2',
 } as const;
-
-const MONO_FONT =
-  Platform.OS === 'ios'
+const MONO_FONT = Platform.OS === 'ios'
     ? 'Courier'
     : 'monospace';
-
-const MONO_BOLD_FONT =
-  Platform.OS === 'ios'
+const MONO_BOLD_FONT = Platform.OS === 'ios'
     ? 'Courier-Bold'
     : 'monospace';
-
-/* -------------------------------------------------------------------------- */
-/* Helpers                                                                    */
-/* -------------------------------------------------------------------------- */
-
-// Keeps development diagnostics out of production console output.
-const logDevelopmentWarning = (
-  message: string,
-  error?: unknown,
-): void => {
-  if (__DEV__) {
-    console.warn(
-      message,
-      error ?? '',
-    );
-  }
+const logDevelopmentWarning = (message: string, error?: unknown): void => {
+    if (__DEV__) {
+        console.warn(message, error ?? '');
+    }
 };
-
-// Safely converts an Explorer name into the field-interface format.
-const normaliseUsername = (
-  value: unknown,
-  fallback =
-    'EXPLORER',
-): string => {
-  if (
-    typeof value !==
-    'string'
-  ) {
-    return fallback;
-  }
-
-  const trimmed =
-    value.trim();
-
-  return trimmed
-    ? trimmed.toUpperCase()
-    : fallback;
+const normaliseUsername = (value: unknown, fallback = 'EXPLORER'): string => {
+    if (typeof value !==
+        'string') {
+        return fallback;
+    }
+    const trimmed = value.trim();
+    return trimmed
+        ? trimmed.toUpperCase()
+        : fallback;
 };
-
-// Protects the leaderboard from malformed point values.
-const normalisePoints = (
-  value: unknown,
-): number => {
-  if (
-    typeof value !==
-      'number' ||
-    !Number.isFinite(
-      value,
-    ) ||
-    value < 0
-  ) {
-    return 0;
-  }
-
-  return Math.floor(
-    value,
-  );
+const normalisePoints = (value: unknown): number => {
+    if (typeof value !==
+        'number' ||
+        !Number.isFinite(value) ||
+        value < 0) {
+        return 0;
+    }
+    return Math.min(Number.MAX_SAFE_INTEGER, Math.floor(value));
 };
-
-// Formats points consistently across the field interface.
-const formatPoints = (
-  points: number,
-): string =>
-  points.toLocaleString();
-
-// Uses the same rank thresholds as Dashboard.
-const getRankTitle = (
-  points: number,
-): string => {
-  if (
-    points >=
-    3000
-  ) {
-    return 'MASTER EXPLORER';
-  }
-
-  if (
-    points >=
-    1500
-  ) {
-    return 'TRAILBLAZER III';
-  }
-
-  if (
-    points >=
-    500
-  ) {
-    return 'PATHFINDER II';
-  }
-
-  return 'NOVICE SCOUT I';
+const formatPoints = (points: number): string => points.toLocaleString();
+const getRankTitle = (points: number): string => {
+    if (points >=
+        3000) {
+        return 'MASTER EXPLORER';
+    }
+    if (points >=
+        1500) {
+        return 'TRAILBLAZER III';
+    }
+    if (points >=
+        500) {
+        return 'PATHFINDER II';
+    }
+    return 'NOVICE SCOUT I';
 };
-
-// Provides readable podium labels without inventing additional ranks.
-const getPodiumLabel = (
-  rank: number,
-): string => {
-  switch (rank) {
-    case 1:
-      return 'FIRST';
-
-    case 2:
-      return 'SECOND';
-
-    case 3:
-      return 'THIRD';
-
-    default:
-      return `#${rank}`;
-  }
+const getPodiumLabel = (rank: number): string => {
+    switch (rank) {
+        case 1:
+            return 'FIRST';
+        case 2:
+            return 'SECOND';
+        case 3:
+            return 'THIRD';
+        default:
+            return `#${rank}`;
+    }
 };
-
-/* -------------------------------------------------------------------------- */
-/* Leaderboard                                                               */
-/* -------------------------------------------------------------------------- */
-
-export const LeaderboardScreen:
-  React.FC<Props> = ({
-    onBack,
-    onNavigate,
-  }) => {
-    const {
-      width,
-      height,
-    } =
-      useWindowDimensions();
-
-    const insets =
-      useSafeAreaInsets();
-
-    const isLandscape =
-      width > height;
-
-    const currentTab:
-      NavigationTab =
-      'LEADERBOARD';
-
-    const currentUser =
-      auth.currentUser;
-
-    const currentUserId =
-      currentUser?.uid ??
-      '';
-
-    /* ---------------------------------------------------------------------- */
-    /* Firestore state                                                       */
-    /* ---------------------------------------------------------------------- */
-
-    const [
-      manifest,
-      setManifest,
-    ] =
-      useState<
-        ExplorerEntry[]
-      >([]);
-
-    const [
-      currentUserProfile,
-      setCurrentUserProfile,
-    ] =
-      useState<UserDocument | null>(
-        null,
-      );
-
-    const [
-      loadingManifest,
-      setLoadingManifest,
-    ] =
-      useState(true);
-
-    const [
-      loadingProfile,
-      setLoadingProfile,
-    ] =
-      useState(true);
-
-    const [
-      manifestError,
-      setManifestError,
-    ] =
-      useState<
-        string | null
-      >(null);
-
-    const [
-      profileError,
-      setProfileError,
-    ] =
-      useState<
-        string | null
-      >(null);
-
-    const [
-      retryKey,
-      setRetryKey,
-    ] =
-      useState(0);
-
-    /* ---------------------------------------------------------------------- */
-    /* Firestore subscriptions                                               */
-    /* ---------------------------------------------------------------------- */
-
+export const LeaderboardScreen: React.FC<Props> = props => {
+    const user = useAuthenticatedUser();
+    return <LeaderboardContent key={user?.uid ?? 'signed-out'} {...props} currentUser={user} />;
+};
+const LeaderboardContent: React.FC<Props & { currentUser: User | null }> = ({ onBack, onNavigate, currentUser }) => {
+    const { width, height, } = useWindowDimensions();
+    const insets = useSafeAreaInsets();
+    const isLandscape = width > height;
+    const currentTab: NavigationTab = 'LEADERBOARD';
+    const currentUserId = currentUser?.uid ??
+        '';
+    const { onSnapshot } = useAccountSession(currentUserId);
+    const [manifest, setManifest,] = useState<ExplorerEntry[]>([]);
+    const [currentUserProfile, setCurrentUserProfile,] = useState<UserDocument | null>(null);
+    const [loadingManifest, setLoadingManifest,] = useState(true);
+    const [loadingProfile, setLoadingProfile,] = useState(true);
+    const [manifestError, setManifestError,] = useState<string | null>(null);
+    const [profileError, setProfileError,] = useState<string | null>(null);
+    const [retryKey, setRetryKey,] = useState(0);
     useEffect(() => {
-      if (
-        !currentUserId
-      ) {
-        setManifest(
-          [],
-        );
-
-        setCurrentUserProfile(
-          null,
-        );
-
-        setLoadingManifest(
-          false,
-        );
-
-        setLoadingProfile(
-          false,
-        );
-
-        setManifestError(
-          'EXPLORER SESSION REQUIRED',
-        );
-
-        setProfileError(
-          'PROFILE UNAVAILABLE',
-        );
-
-        return;
-      }
-
-      setLoadingManifest(
-        true,
-      );
-
-      setLoadingProfile(
-        true,
-      );
-
-      setManifestError(
-        null,
-      );
-
-      setProfileError(
-        null,
-      );
-
-      /* -------------------------------------------------------------------- */
-      /* Top explorers                                                        */
-      /* -------------------------------------------------------------------- */
-
-      const leaderboardQuery =
-        query(
-          collection(
-            db,
-            'users',
-          ),
-
-          orderBy(
-            'totalPoints',
-            'desc',
-          ),
-
-          limit(
-            MAX_LEADERBOARD_ENTRIES,
-          ),
-        );
-
-      const unsubscribeLeaderboard =
-        onSnapshot(
-          leaderboardQuery,
-
-          (
-            snapshot,
-          ) => {
-            const entries:
-              ExplorerEntry[] =
-              snapshot.docs.map(
-                (
-                  documentSnapshot,
-                  index,
-                ) => {
-                  const data =
-                    documentSnapshot.data() as
-                      UserDocument;
-
-                  return {
-                    uid:
-                      documentSnapshot.id,
-
-                    rank:
-                      index + 1,
-
-                    username:
-                      normaliseUsername(
-                        data.username,
-                      ),
-
-                    points:
-                      normalisePoints(
-                        data.totalPoints,
-                      ),
-
-                    isCurrentUser:
-                      documentSnapshot.id ===
-                      currentUserId,
-                  };
-                },
-              );
-
-            setManifest(
-              entries,
-            );
-
-            setManifestError(
-              null,
-            );
-
-            setLoadingManifest(
-              false,
-            );
-          },
-
-          (
-            error,
-          ) => {
-            logDevelopmentWarning(
-              '[Treasi Leaderboard] Manifest subscription failed:',
-              error,
-            );
-
-            /*
-             * Existing data remains visible if the live listener temporarily
-             * fails instead of replacing the screen with mock information.
-             */
-            setManifestError(
-              'EXPLORER MANIFEST SYNC OFFLINE',
-            );
-
-            setLoadingManifest(
-              false,
-            );
-          },
-        );
-
-      /* -------------------------------------------------------------------- */
-      /* Current Explorer profile                                             */
-      /* -------------------------------------------------------------------- */
-
-      const userReference =
-        doc(
-          db,
-          'users',
-          currentUserId,
-        );
-
-      const unsubscribeProfile =
-        onSnapshot(
-          userReference,
-
-          (
-            snapshot,
-          ) => {
-            if (
-              snapshot.exists()
-            ) {
-              setCurrentUserProfile(
-                snapshot.data() as
-                  UserDocument,
-              );
-
-              setProfileError(
-                null,
-              );
-            } else {
-              setCurrentUserProfile(
-                null,
-              );
-
-              setProfileError(
-                'EXPLORER PROFILE NOT FOUND',
-              );
+        if (!currentUserId) {
+            setManifest([]);
+            setCurrentUserProfile(null);
+            setLoadingManifest(false);
+            setLoadingProfile(false);
+            setManifestError('EXPLORER SESSION REQUIRED');
+            setProfileError('PROFILE UNAVAILABLE');
+            return;
+        }
+        setLoadingManifest(true);
+        setLoadingProfile(true);
+        setManifestError(null);
+        setProfileError(null);
+        const leaderboardQuery = query(collection(db, 'users'), orderBy('totalPoints', 'desc'), limit(MAX_LEADERBOARD_ENTRIES));
+        const unsubscribeLeaderboard = onSnapshot(leaderboardQuery, (snapshot) => {
+            const entries: ExplorerEntry[] = snapshot.docs.map((documentSnapshot, index) => {
+                const data = documentSnapshot.data() as UserDocument;
+                return {
+                    uid: documentSnapshot.id,
+                    rank: 0,
+                    username: normaliseUsername(data.username),
+                    points: normalisePoints(data.totalPoints),
+                    isCurrentUser: documentSnapshot.id ===
+                        currentUserId,
+                };
+            });
+            // Keep Firestore's document-ID tie order, including ties at the top-50 boundary.
+            entries.sort((a, b) => b.points - a.points);
+            entries.forEach((entry, index) => { entry.rank = index + 1; });
+            setManifest(entries);
+            setManifestError(null);
+            setLoadingManifest(false);
+        }, (error) => {
+            logDevelopmentWarning('[Treasi Leaderboard] Manifest subscription failed:', error);
+            setManifestError('EXPLORER MANIFEST SYNC OFFLINE');
+            setLoadingManifest(false);
+        });
+        const userReference = doc(db, 'users', currentUserId);
+        const unsubscribeProfile = onSnapshot(userReference, (snapshot) => {
+            if (snapshot.exists()) {
+                setCurrentUserProfile(snapshot.data() as UserDocument);
+                setProfileError(null);
             }
-
-            setLoadingProfile(
-              false,
-            );
-          },
-
-          (
-            error,
-          ) => {
-            logDevelopmentWarning(
-              '[Treasi Leaderboard] Profile subscription failed:',
-              error,
-            );
-
-            setProfileError(
-              'EXPLORER PROFILE SYNC OFFLINE',
-            );
-
-            setLoadingProfile(
-              false,
-            );
-          },
-        );
-
-      return () => {
-        unsubscribeLeaderboard();
-        unsubscribeProfile();
-      };
+            else {
+                setCurrentUserProfile(null);
+                setProfileError('EXPLORER PROFILE NOT FOUND');
+            }
+            setLoadingProfile(false);
+        }, (error) => {
+            logDevelopmentWarning('[Treasi Leaderboard] Profile subscription failed:', error);
+            setProfileError('EXPLORER PROFILE SYNC OFFLINE');
+            setLoadingProfile(false);
+        });
+        return () => {
+            unsubscribeLeaderboard();
+            unsubscribeProfile();
+        };
     }, [
-      currentUserId,
-      retryKey,
+        currentUserId,
+        retryKey,
+        onSnapshot,
     ]);
-
-    /* ---------------------------------------------------------------------- */
-    /* Derived leaderboard data                                              */
-    /* ---------------------------------------------------------------------- */
-
-    const topThree =
-      useMemo(
-        () =>
-          manifest.slice(
-            0,
-            3,
-          ),
-        [
-          manifest,
-        ],
-      );
-
-    const currentManifestEntry =
-      useMemo(
-        () =>
-          manifest.find(
-            (
-              entry,
-            ) =>
-              entry.uid ===
-              currentUserId,
-          ) ??
-          null,
-        [
-          currentUserId,
-          manifest,
-        ],
-      );
-
-    const currentPoints =
-      normalisePoints(
-        currentUserProfile
-          ?.totalPoints ??
-          currentManifestEntry
+    const topThree = useMemo(() => manifest.slice(0, 3), [
+        manifest,
+    ]);
+    const currentManifestEntry = useMemo(() => manifest.find((entry) => entry.uid ===
+        currentUserId) ??
+        null, [
+        currentUserId,
+        manifest,
+    ]);
+    const currentPoints = normalisePoints(currentUserProfile
+        ?.totalPoints ??
+        currentManifestEntry
             ?.points ??
-          0,
-      );
-
-    const currentUsername =
-      normaliseUsername(
-        currentUserProfile
-          ?.username ??
-          currentManifestEntry
+        0);
+    const currentUsername = normaliseUsername(currentUserProfile
+        ?.username ??
+        currentManifestEntry
             ?.username ??
-          currentUser
+        currentUser
             ?.displayName ??
-          currentUser
+        currentUser
             ?.email
-            ?.split('@')[0],
-        'EXPLORER',
-      );
-
-    const currentRankText =
-      useMemo(
-        () => {
-          if (
-            loadingManifest
-          ) {
+            ?.split('@')[0], 'EXPLORER');
+    const currentRankText = useMemo(() => {
+        if (loadingManifest) {
             return 'CHECKING';
-          }
-
-          if (
-            currentManifestEntry
-          ) {
+        }
+        if (manifestError && !manifest.length) return 'UNAVAILABLE';
+        if (currentManifestEntry) {
             return `#${currentManifestEntry.rank}`;
-          }
-
-          if (
-            manifest.length >=
-            MAX_LEADERBOARD_ENTRIES
-          ) {
+        }
+        if (manifest.length >=
+            MAX_LEADERBOARD_ENTRIES) {
             return `OUTSIDE TOP ${MAX_LEADERBOARD_ENTRIES}`;
-          }
-
-          return 'NOT RANKED';
-        },
-        [
-          currentManifestEntry,
-          loadingManifest,
-          manifest.length,
-        ],
-      );
-
-    const syncErrorText =
-      useMemo(
-        () =>
-          [
-            manifestError,
-            profileError,
-          ]
-            .filter(
-              (
-                value,
-              ): value is string =>
-                Boolean(
-                  value,
-                ),
-            )
-            .join(
-              ' · ',
-            ),
-        [
-          manifestError,
-          profileError,
-        ],
-      );
-
-    /* ---------------------------------------------------------------------- */
-    /* Navigation                                                            */
-    /* ---------------------------------------------------------------------- */
-
-    const navigateToSocial =
-      useCallback(
-        (): void => {
-          onNavigate?.(
-            'SOCIAL',
-          );
-        },
-        [
-          onNavigate,
-        ],
-      );
-
-    const handleReturnToMap =
-      useCallback(
-        (): void => {
-          if (onBack) {
+        }
+        return 'NOT RANKED';
+    }, [
+        currentManifestEntry,
+        loadingManifest,
+        manifest.length,
+        manifestError,
+    ]);
+    const syncErrorText = useMemo(() => [
+        manifestError,
+        profileError,
+    ]
+        .filter((value): value is string => Boolean(value))
+        .join(' · '), [
+        manifestError,
+        profileError,
+    ]);
+    const navigateToSocial = useCallback((): void => {
+        onNavigate?.('SOCIAL');
+    }, [
+        onNavigate,
+    ]);
+    const handleReturnToMap = useCallback((): void => {
+        if (onBack) {
             onBack();
             return;
-          }
-
-          onNavigate?.(
-            'MAP',
-          );
-        },
-        [
-          onBack,
-          onNavigate,
-        ],
-      );
-
-    /* ---------------------------------------------------------------------- */
-    /* Retry                                                                 */
-    /* ---------------------------------------------------------------------- */
-
-    const handleRetry =
-      useCallback(
-        (): void => {
-          setManifestError(
-            null,
-          );
-
-          setProfileError(
-            null,
-          );
-
-          setLoadingManifest(
-            true,
-          );
-
-          setLoadingProfile(
-            true,
-          );
-
-          setRetryKey(
-            (
-              current,
-            ) =>
-              current + 1,
-          );
-
-          AccessibilityInfo
-            .announceForAccessibility(
-              'Retrying Explorer manifest synchronisation.',
-            );
-        },
-        [],
-      );
-
-    /* ---------------------------------------------------------------------- */
-    /* Render                                                                */
-    /* ---------------------------------------------------------------------- */
-
-    return (
+        }
+        onNavigate?.('MAP');
+    }, [
+        onBack,
+        onNavigate,
+    ]);
+    const handleRetry = useCallback((): void => {
+        setManifestError(null);
+        setProfileError(null);
+        setLoadingManifest(true);
+        setLoadingProfile(true);
+        setRetryKey((current) => current + 1);
+        AccessibilityInfo
+            .announceForAccessibility('Retrying Explorer manifest synchronisation.');
+    }, []);
+return (
       <View
         style={[
           styles.screen,
@@ -843,9 +383,7 @@ export const LeaderboardScreen:
             {/* -------------------------------------------------------------- */}
 
             {manifestError ? (
-              <View
-                accessible
-                accessibilityRole="alert"
+              <View accessibilityRole="alert"
                 accessibilityLiveRegion="polite"
                 style={
                   styles.syncWarning
@@ -977,7 +515,7 @@ export const LeaderboardScreen:
             ) : manifest.length ===
               0 ? (
               <View
-                accessible
+
                 accessibilityLabel="No Explorers are currently available in the leaderboard."
                 style={
                   styles.loadingBox
@@ -1743,9 +1281,7 @@ export const LeaderboardScreen:
 
               {syncErrorText &&
               !manifestError ? (
-                <View
-                  accessible
-                  accessibilityRole="alert"
+                <View accessibilityRole="alert"
                   style={
                     styles.commandWarning
                   }

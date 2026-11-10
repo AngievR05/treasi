@@ -1,3330 +1,978 @@
-import React, {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from 'react';
-
-import {
-  AccessibilityInfo,
-  ActivityIndicator,
-  Alert,
-  AppState,
-  type AppStateStatus,
-  KeyboardAvoidingView,
-  Linking,
-  Modal,
-  Platform,
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TextInput,
-  useWindowDimensions,
-  View,
-} from 'react-native';
-
+import { useAuthenticatedUser, useAccountSession } from '../hooks/useAccountSession';
+import { isFreshLocation, useDashboardLocation } from '../hooks/useDashboardLocation';
+import type { User } from 'firebase/auth';
+import React, { useCallback, useEffect, useMemo, useRef, useState, } from 'react';
+import { AccessibilityInfo, ActivityIndicator, Alert, KeyboardAvoidingView, Linking, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, useWindowDimensions, View, } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-
 import * as Location from 'expo-location';
-
-import {
-  Ionicons,
-  MaterialCommunityIcons,
-} from '@expo/vector-icons';
-
-import {
-  collection,
-  deleteDoc,
-  deleteField,
-  doc,
-  GeoPoint,
-  getDocs,
-  limit,
-  onSnapshot,
-  query,
-  serverTimestamp,
-  updateDoc,
-  where,
-  writeBatch,
-  type Timestamp,
-} from 'firebase/firestore';
-
-import {
-  auth,
-  db,
-} from '../config/firebase';
-
-import {
-  FieldNavBar,
-  type NavigationTab,
-} from '../components/FieldNavBar';
-
-import type {
-  FriendshipDocument,
-  FriendshipStatus,
-  MessageDocument,
-  UserDocument,
-} from '../types/firestore';
-
-/* -------------------------------------------------------------------------- */
-/* Types                                                                      */
-/* -------------------------------------------------------------------------- */
-
+import { Ionicons, MaterialCommunityIcons, } from '@expo/vector-icons';
+import { collection, deleteField, doc, GeoPoint, getDocs, limit, orderBy, runTransaction, query, serverTimestamp, where, writeBatch, type Timestamp, } from 'firebase/firestore';
+import { db, } from '../config/firebase';
+import { FieldNavBar, type NavigationTab, } from '../components/FieldNavBar';
+import type { FriendshipDocument, FriendshipStatus, MessageDocument, UserDocument, } from '../types/firestore';
 interface UserCoordinates {
-  latitude: number;
-  longitude: number;
+    latitude: number;
+    longitude: number;
 }
-
 interface DirectoryExplorer {
-  uid: string;
-  name: string;
-  initial: string;
-  telemetryEnabled: boolean;
-  location: UserCoordinates | null;
+    uid: string;
+    name: string;
+    initial: string;
+    telemetryEnabled: boolean;
+    location: UserCoordinates | null;
 }
-
 interface FriendshipMeta {
-  docId: string;
-  targetUid: string;
-  status: FriendshipStatus;
-  isRequester: boolean;
+    docId: string;
+    targetUid: string;
+    status: FriendshipStatus;
+    isRequester: boolean;
 }
-
 interface NearbyExplorer {
-  uid: string;
-  name: string;
-  initial: string;
-  distanceKm: number;
-  distanceFormatted: string;
-  friendMeta?: FriendshipMeta;
+    uid: string;
+    name: string;
+    initial: string;
+    distanceKm: number;
+    distanceFormatted: string;
+    friendMeta?: FriendshipMeta;
 }
-
 interface GlobalDispatch {
-  messageId: string;
-  senderId: string;
-  senderName: string;
-  text: string;
-  createdAt: Timestamp | null;
+    messageId: string;
+    senderId: string;
+    senderName: string;
+    text: string;
+    createdAt: Timestamp | null;
 }
-
 interface FriendshipErrors {
-  outgoing: string | null;
-  incoming: string | null;
+    outgoing: string | null;
+    incoming: string | null;
 }
-
-type SocialLocationStatus =
-  | 'CHECKING'
-  | 'READY'
-  | 'PERMISSION_REQUIRED'
-  | 'DENIED'
-  | 'SERVICES_OFF'
-  | 'ERROR';
-
+type SocialLocationStatus = 'CHECKING' | 'READY' | 'PERMISSION_REQUIRED' | 'DENIED' | 'SERVICES_OFF' | 'ERROR';
 interface Props {
-  onNavigate?: (
-    tab: string,
-  ) => void;
-
-  /*
-   * Coordinates supplied by App.tsx are used immediately when available.
-   * Social can also obtain its own fresh location if this value is null.
-   */
-  userCoordinates?: UserCoordinates | null;
+    onNavigate?: (tab: string) => void;
+    userCoordinates?: UserCoordinates | null;
 }
-
-/* -------------------------------------------------------------------------- */
-/* Constants                                                                  */
-/* -------------------------------------------------------------------------- */
-
 const RADIUS_KM = 20;
-
 const MAX_EXPLORERS = 100;
-
 const MAX_GLOBAL_MESSAGES = 40;
-
 const MAX_TELEGRAM_LENGTH = 500;
-
 const MAX_CALLSIGN_LENGTH = 24;
-
-const LOCATION_PUBLISH_DISTANCE_KM =
-  0.02;
-
+const LOCATION_PUBLISH_DISTANCE_KM = 0.02;
 const COLOURS = {
-  forest950: '#172018',
-  forest900: '#1C261D',
-  forest800: '#2C3B2E',
-  forest700: '#3D503F',
-
-  parchment100: '#F6EFD9',
-  parchment200: '#E8DCC0',
-
-  ink900: '#2A2420',
-  ink700: '#514A40',
-
-  bronze700: '#5F4B32',
-  bronze600: '#6B563A',
-  bronze500: '#B08D57',
-  bronze400: '#C3A06A',
-
-  rust800: '#71301C',
-  rust700: '#7F321B',
-  rust600: '#8C3A20',
-
-  success700: '#3E6546',
-  success300: '#BFE3C0',
-
-  warning300: '#E6C580',
-  danger300: '#FFB4A2',
-
-  white: '#FFFFFF',
-
-  overlay:
-    'rgba(10, 16, 11, 0.86)',
+    forest950: '#172018',
+    forest900: '#1C261D',
+    forest800: '#2C3B2E',
+    forest700: '#3D503F',
+    parchment100: '#F6EFD9',
+    parchment200: '#E8DCC0',
+    ink900: '#2A2420',
+    ink700: '#514A40',
+    bronze700: '#5F4B32',
+    bronze600: '#6B563A',
+    bronze500: '#B08D57',
+    bronze400: '#C3A06A',
+    rust800: '#71301C',
+    rust700: '#7F321B',
+    rust600: '#8C3A20',
+    success700: '#3E6546',
+    success300: '#BFE3C0',
+    warning300: '#E6C580',
+    danger300: '#FFB4A2',
+    white: '#FFFFFF',
+    overlay: 'rgba(10, 16, 11, 0.86)',
 } as const;
-
-const MONO_FONT =
-  Platform.OS === 'ios'
+const MONO_FONT = Platform.OS === 'ios'
     ? 'Courier'
     : 'monospace';
-
-const MONO_BOLD_FONT =
-  Platform.OS === 'ios'
+const MONO_BOLD_FONT = Platform.OS === 'ios'
     ? 'Courier-Bold'
     : 'monospace';
-
-/* -------------------------------------------------------------------------- */
-/* Helpers                                                                    */
-/* -------------------------------------------------------------------------- */
-
-// Keeps development diagnostics out of production console output.
-const logDevelopmentWarning = (
-  message: string,
-  error?: unknown,
-): void => {
-  if (__DEV__) {
-    console.warn(
-      message,
-      error ?? '',
-    );
-  }
+const logDevelopmentWarning = (message: string, error?: unknown): void => {
+    if (__DEV__) {
+        console.warn(message, error ?? '');
+    }
 };
-
-// Validates coordinates before any range calculation or Firestore write.
-const isValidCoordinate = (
-  latitude: unknown,
-  longitude: unknown,
-): boolean =>
-  typeof latitude ===
+const isValidCoordinate = (latitude: unknown, longitude: unknown): boolean => typeof latitude ===
     'number' &&
-  typeof longitude ===
-    'number' &&
-  Number.isFinite(
-    latitude,
-  ) &&
-  Number.isFinite(
-    longitude,
-  ) &&
-  latitude >= -90 &&
-  latitude <= 90 &&
-  longitude >= -180 &&
-  longitude <= 180;
-
-// Safely extracts coordinates from a Firestore GeoPoint-like value.
-const extractCoordinates = (
-  value: unknown,
-): UserCoordinates | null => {
-  if (
-    !value ||
-    typeof value !==
-      'object' ||
-    !(
-      'latitude' in value
-    ) ||
-    !(
-      'longitude' in value
-    )
-  ) {
-    return null;
-  }
-
-  const latitude =
-    Number(
-      value.latitude,
-    );
-
-  const longitude =
-    Number(
-      value.longitude,
-    );
-
-  if (
-    !isValidCoordinate(
-      latitude,
-      longitude,
-    )
-  ) {
-    return null;
-  }
-
-  return {
-    latitude,
-    longitude,
-  };
+    typeof longitude ===
+        'number' &&
+    Number.isFinite(latitude) &&
+    Number.isFinite(longitude) &&
+    latitude >= -90 &&
+    latitude <= 90 &&
+    longitude >= -180 &&
+    longitude <= 180;
+const extractCoordinates = (value: unknown): UserCoordinates | null => {
+    if (!value ||
+        typeof value !==
+            'object' ||
+        !('latitude' in value) ||
+        !('longitude' in value)) {
+        return null;
+    }
+    const latitude = value.latitude;
+    const longitude = value.longitude;
+    if (!isValidCoordinate(latitude, longitude)) {
+        return null;
+    }
+    return {
+        latitude: latitude as number,
+        longitude: longitude as number,
+    };
 };
-
-// Calculates straight-line geographic distance between two locations.
-const calculateHaversineDistanceKm = (
-  latitudeA: number,
-  longitudeA: number,
-  latitudeB: number,
-  longitudeB: number,
-): number => {
-  const earthRadiusKm =
-    6371;
-
-  const latitudeDifference =
-    ((latitudeB -
-      latitudeA) *
-      Math.PI) /
-    180;
-
-  const longitudeDifference =
-    ((longitudeB -
-      longitudeA) *
-      Math.PI) /
-    180;
-
-  const a =
-    Math.sin(
-      latitudeDifference /
-        2,
-    ) **
-      2 +
-    Math.cos(
-      (latitudeA *
+const calculateHaversineDistanceKm = (latitudeA: number, longitudeA: number, latitudeB: number, longitudeB: number): number => {
+    const earthRadiusKm = 6371;
+    const latitudeDifference = ((latitudeB -
+        latitudeA) *
         Math.PI) /
-        180,
-    ) *
-      Math.cos(
-        (latitudeB *
-          Math.PI) /
-          180,
-      ) *
-      Math.sin(
-        longitudeDifference /
-          2,
-      ) **
-        2;
-
-  return (
-    earthRadiusKm *
-    (
-      2 *
-      Math.atan2(
-        Math.sqrt(a),
-        Math.sqrt(
-          1 - a,
-        ),
-      )
-    )
-  );
+        180;
+    const longitudeDifference = ((longitudeB -
+        longitudeA) *
+        Math.PI) /
+        180;
+    const a = Math.sin(latitudeDifference /
+        2) **
+        2 +
+        Math.cos((latitudeA *
+            Math.PI) /
+            180) *
+            Math.cos((latitudeB *
+                Math.PI) /
+                180) *
+            Math.sin(longitudeDifference /
+                2) **
+                2;
+    return (earthRadiusKm *
+        (2 *
+            Math.atan2(Math.sqrt(Math.min(1, Math.max(0, a))), Math.sqrt(Math.max(0, 1 - a)))));
 };
-
-// Provides a compact distance for nearby Explorer cards.
-const formatDistance = (
-  distanceKm: number,
-): string => {
-  if (
-    distanceKm < 1
-  ) {
-    return `${Math.round(
-      distanceKm * 1000,
-    )} M`;
-  }
-
-  return `${distanceKm.toFixed(
-    1,
-  )} KM`;
+const formatDistance = (distanceKm: number): string => {
+    if (distanceKm < 1) {
+        return `${Math.round(distanceKm * 1000)} M`;
+    }
+    return `${distanceKm.toFixed(1)} KM`;
 };
-
-// Normalises callsigns for the field interface.
-const normaliseName = (
-  value: unknown,
-  fallback =
-    'EXPLORER',
-): string => {
-  const name =
-    typeof value ===
-    'string'
-      ? value.trim()
-      : '';
-
-  return name
-    ? name.toUpperCase()
-    : fallback;
+const normaliseName = (value: unknown, fallback = 'EXPLORER'): string => {
+    const name = typeof value ===
+        'string'
+        ? value.trim()
+        : '';
+    return name
+        ? name.toUpperCase()
+        : fallback;
 };
-
-// Creates one relationship ID regardless of who initiated the request.
-const getDeterministicFriendshipId = (
-  uidA: string,
-  uidB: string,
-): string =>
-  [
+const getDeterministicFriendshipId = (uidA: string, uidB: string): string => [
     uidA,
     uidB,
-  ]
+]
     .sort()
     .join('_');
-
-// Protects runtime friendship parsing from malformed Firestore values.
-const isFriendshipStatus = (
-  value: unknown,
-): value is FriendshipStatus =>
-  value ===
+const isFriendshipStatus = (value: unknown): value is FriendshipStatus => value ===
     'pending' ||
-  value ===
-    'accepted' ||
-  value ===
-    'declined' ||
-  value ===
-    'blocked';
-
-// Formats Telegram timestamps without inventing local activity.
-const formatRelativeTime = (
-  timestamp:
-    Timestamp | null,
-): string => {
-  if (!timestamp) {
-    return 'JUST NOW';
-  }
-
-  try {
-    const differenceSeconds =
-      Math.max(
-        0,
-        Math.floor(
-          (
-            Date.now() -
-            timestamp.toMillis()
-          ) /
-            1000,
-        ),
-      );
-
-    if (
-      differenceSeconds <
-      60
-    ) {
-      return 'JUST NOW';
-    }
-
-    if (
-      differenceSeconds <
-      3600
-    ) {
-      return `${Math.floor(
-        differenceSeconds /
-          60,
-      )}M AGO`;
-    }
-
-    if (
-      differenceSeconds <
-      86400
-    ) {
-      return `${Math.floor(
-        differenceSeconds /
-          3600,
-      )}H AGO`;
-    }
-
-    return `${Math.floor(
-      differenceSeconds /
-        86400,
-    )}D AGO`;
-  } catch {
-    return 'RECENT';
-  }
+    value ===
+        'accepted' ||
+    value ===
+        'declined' ||
+    value ===
+        'blocked';
+const safeTimestamp = (value: Timestamp | null): number => {
+    try { const time = value?.toMillis(); return typeof time === 'number' && Number.isFinite(time) ? time : 0; } catch { return 0; }
 };
-
-// Announces the same feedback that is shown in a native alert.
-const showAccessibleAlert = (
-  title: string,
-  message: string,
-): void => {
-  AccessibilityInfo
-    .announceForAccessibility(
-      `${title}. ${message}`,
-    );
-
-  Alert.alert(
-    title,
-    message,
-  );
+const formatRelativeTime = (timestamp: Timestamp | null): string => {
+    if (!timestamp) {
+        return 'JUST NOW';
+    }
+    try {
+        const differenceSeconds = Math.max(0, Math.floor((Date.now() -
+            safeTimestamp(timestamp)) /
+            1000));
+        if (differenceSeconds <
+            60) {
+            return 'JUST NOW';
+        }
+        if (differenceSeconds <
+            3600) {
+            return `${Math.floor(differenceSeconds /
+                60)}M AGO`;
+        }
+        if (differenceSeconds <
+            86400) {
+            return `${Math.floor(differenceSeconds /
+                3600)}H AGO`;
+        }
+        return `${Math.floor(differenceSeconds /
+            86400)}D AGO`;
+    }
+    catch {
+        return 'RECENT';
+    }
 };
-
-/* -------------------------------------------------------------------------- */
-/* Social Screen                                                              */
-/* -------------------------------------------------------------------------- */
-
-export const SocialScreen:
-  React.FC<Props> = ({
-    onNavigate,
-    userCoordinates =
-      null,
-  }) => {
-    const {
-      width,
-      height,
-    } =
-      useWindowDimensions();
-
-    const insets =
-      useSafeAreaInsets();
-
-    const isLandscape =
-      width > height;
-
-    /*
-     * Social is reached through the Leaderboard community area.
-     * FieldNavBar currently has no separate SOCIAL navigation tab.
-     */
-    const currentTab:
-      NavigationTab =
-      'LEADERBOARD';
-
-    const currentUser =
-      auth.currentUser;
-
-    const currentUserId =
-      currentUser?.uid ??
-      '';
-
-    const isMountedRef =
-      useRef(true);
-
-    const lastPublishedLocationRef =
-      useRef<string | null>(
-        null,
-      );
-
-    const isPublishingLocationRef =
-      useRef(false);
-
-    /* ---------------------------------------------------------------------- */
-    /* Accessibility                                                         */
-    /* ---------------------------------------------------------------------- */
-
-    const [
-      reduceMotionEnabled,
-      setReduceMotionEnabled,
-    ] =
-      useState(false);
-
-    /* ---------------------------------------------------------------------- */
-    /* Current Explorer                                                       */
-    /* ---------------------------------------------------------------------- */
-
-    const [
-      currentUserProfile,
-      setCurrentUserProfile,
-    ] =
-      useState<UserDocument | null>(
-        null,
-      );
-
-    const [
-      profileError,
-      setProfileError,
-    ] =
-      useState<string | null>(
-        null,
-      );
-
-    /* ---------------------------------------------------------------------- */
-    /* User directory                                                         */
-    /* ---------------------------------------------------------------------- */
-
-    const [
-      allUsers,
-      setAllUsers,
-    ] =
-      useState<
-        DirectoryExplorer[]
-      >([]);
-
-    const [
-      loadingExplorers,
-      setLoadingExplorers,
-    ] =
-      useState(true);
-
-    const [
-      explorerError,
-      setExplorerError,
-    ] =
-      useState<string | null>(
-        null,
-      );
-
-    /* ---------------------------------------------------------------------- */
-    /* Friendships                                                            */
-    /* ---------------------------------------------------------------------- */
-
-    const [
-      outgoingFriendships,
-      setOutgoingFriendships,
-    ] =
-      useState<
-        FriendshipMeta[]
-      >([]);
-
-    const [
-      incomingFriendships,
-      setIncomingFriendships,
-    ] =
-      useState<
-        FriendshipMeta[]
-      >([]);
-
-    const [
-      friendshipErrors,
-      setFriendshipErrors,
-    ] =
-      useState<FriendshipErrors>({
+const showAccessibleAlert = (title: string, message: string): void => {
+    AccessibilityInfo
+        .announceForAccessibility(`${title}. ${message}`);
+    Alert.alert(title, message);
+};
+export const SocialScreen: React.FC<Props> = props => {
+    const user = useAuthenticatedUser();
+    return <SocialContent key={user?.uid ?? 'signed-out'} {...props} currentUser={user} />;
+};
+const SocialContent: React.FC<Props & { currentUser: User | null }> = ({ onNavigate, currentUser }) => {
+    const { width, height, } = useWindowDimensions();
+    const insets = useSafeAreaInsets();
+    const isLandscape = width > height;
+    const currentTab: NavigationTab = 'LEADERBOARD';
+    const currentUserId = currentUser?.uid ??
+        '';
+    const { isCurrent, onSnapshot } = useAccountSession(currentUserId);
+    const friendLockRef = useRef(false);
+    const searchLockRef = useRef(false);
+    const telegramLockRef = useRef(false);
+    const lastPublishedLocationRef = useRef<string | null>(null);
+    const isPublishingLocationRef = useRef(false);
+    const [reduceMotionEnabled, setReduceMotionEnabled,] = useState(false);
+    const [currentUserProfile, setCurrentUserProfile,] = useState<UserDocument | null>(null);
+    const [profileError, setProfileError,] = useState<string | null>(null);
+    const [allUsers, setAllUsers,] = useState<DirectoryExplorer[]>([]);
+    const [loadingExplorers, setLoadingExplorers,] = useState(true);
+    const [explorerError, setExplorerError,] = useState<string | null>(null);
+    const [outgoingFriendships, setOutgoingFriendships,] = useState<FriendshipMeta[]>([]);
+    const [incomingFriendships, setIncomingFriendships,] = useState<FriendshipMeta[]>([]);
+    const [friendshipErrors, setFriendshipErrors,] = useState<FriendshipErrors>({
         outgoing: null,
         incoming: null,
-      });
-
-    const [
-      actionUid,
-      setActionUid,
-    ] =
-      useState<string | null>(
-        null,
-      );
-
-    /* ---------------------------------------------------------------------- */
-    /* Telegram                                                               */
-    /* ---------------------------------------------------------------------- */
-
-    const [
-      telegramText,
-      setTelegramText,
-    ] =
-      useState('');
-
-    const [
-      globalDispatches,
-      setGlobalDispatches,
-    ] =
-      useState<
-        GlobalDispatch[]
-      >([]);
-
-    const [
-      loadingDispatches,
-      setLoadingDispatches,
-    ] =
-      useState(true);
-
-    const [
-      telegramError,
-      setTelegramError,
-    ] =
-      useState<string | null>(
-        null,
-      );
-
-    const [
-      isTransmitting,
-      setIsTransmitting,
-    ] =
-      useState(false);
-
-    /* ---------------------------------------------------------------------- */
-    /* Location                                                               */
-    /* ---------------------------------------------------------------------- */
-
-    const [
-      currentCoordinates,
-      setCurrentCoordinates,
-    ] =
-      useState<UserCoordinates | null>(
-        isValidCoordinate(
-          userCoordinates
-            ?.latitude,
-          userCoordinates
-            ?.longitude,
-        )
-          ? {
-              latitude:
-                userCoordinates
-                  ?.latitude as number,
-
-              longitude:
-                userCoordinates
-                  ?.longitude as number,
-            }
-          : null,
-      );
-
-    const [
-      locationStatus,
-      setLocationStatus,
-    ] =
-      useState<SocialLocationStatus>(
-        isValidCoordinate(
-          userCoordinates
-            ?.latitude,
-          userCoordinates
-            ?.longitude,
-        )
-          ? 'READY'
-          : 'CHECKING',
-      );
-
-    const [
-      locationPermissionStatus,
-      setLocationPermissionStatus,
-    ] =
-      useState<Location.PermissionStatus | null>(
-        null,
-      );
-
-    const [
-      canAskLocationAgain,
-      setCanAskLocationAgain,
-    ] =
-      useState(true);
-
-    const [
-      locationServicesEnabled,
-      setLocationServicesEnabled,
-    ] =
-      useState<boolean | null>(
-        null,
-      );
-
-    const [
-      locationPublishError,
-      setLocationPublishError,
-    ] =
-      useState<string | null>(
-        null,
-      );
-
-    /* ---------------------------------------------------------------------- */
-    /* Friend search modal                                                    */
-    /* ---------------------------------------------------------------------- */
-
-    const [
-      friendModalVisible,
-      setFriendModalVisible,
-    ] =
-      useState(false);
-
-    const [
-      searchAgentTag,
-      setSearchAgentTag,
-    ] =
-      useState('');
-
-    const [
-      searchError,
-      setSearchError,
-    ] =
-      useState<string | null>(
-        null,
-      );
-
-    const [
-      isSearching,
-      setIsSearching,
-    ] =
-      useState(false);
-
-    /* ---------------------------------------------------------------------- */
-    /* Retry                                                                  */
-    /* ---------------------------------------------------------------------- */
-
-    const [
-      retryKey,
-      setRetryKey,
-    ] =
-      useState(0);
-
-    /* ---------------------------------------------------------------------- */
-    /* Lifecycle                                                              */
-    /* ---------------------------------------------------------------------- */
-
+    });
+    const [actionUid, setActionUid,] = useState<string | null>(null);
+    const [telegramText, setTelegramText,] = useState('');
+    const [globalDispatches, setGlobalDispatches,] = useState<GlobalDispatch[]>([]);
+    const [loadingDispatches, setLoadingDispatches,] = useState(true);
+    const [telegramError, setTelegramError,] = useState<string | null>(null);
+    const [isTransmitting, setIsTransmitting,] = useState(false);
+    const gps = useDashboardLocation(currentUserProfile?.batteryOptimizerEnabled === true);
+    const { locationPermissionStatus, canAskLocationAgain, locationServicesEnabled } = gps;
+    const livePosition = gps.userLocation && gps.locationFixSource === 'live' &&
+        !gps.locationError && isFreshLocation(gps.userLocation) ? gps.userLocation : null;
+    const latitude = livePosition?.coords.latitude;
+    const longitude = livePosition?.coords.longitude;
+    const currentCoordinates = useMemo(() => latitude != null && longitude != null ? { latitude, longitude } : null, [latitude, longitude]);
+    const locationStatus: SocialLocationStatus = gps.isInitialisingLocation ? 'CHECKING' :
+        locationPermissionStatus === 'undetermined' ? 'PERMISSION_REQUIRED' :
+        locationPermissionStatus === 'denied' ? 'DENIED' :
+        locationServicesEnabled === false ? 'SERVICES_OFF' :
+        livePosition ? 'READY' : 'ERROR';
+    const refreshCurrentLocation = gps.startLocationService;
+    const [locationPublishError, setLocationPublishError,] = useState<string | null>(null);
+    const [friendModalVisible, setFriendModalVisible,] = useState(false);
+    const [searchAgentTag, setSearchAgentTag,] = useState('');
+    const [searchError, setSearchError,] = useState<string | null>(null);
+    const [isSearching, setIsSearching,] = useState(false);
+    const [retryKey, setRetryKey,] = useState(0);
     useEffect(() => {
-      isMountedRef.current =
-        true;
-
-      return () => {
-        isMountedRef.current =
-          false;
-      };
-    }, []);
-
-    /* ---------------------------------------------------------------------- */
-    /* Reduce Motion                                                          */
-    /* ---------------------------------------------------------------------- */
-
-    useEffect(() => {
-      let mounted =
-        true;
-
-      AccessibilityInfo
-        .isReduceMotionEnabled()
-        .then(
-          (
-            enabled,
-          ) => {
-            if (
-              mounted
-            ) {
-              setReduceMotionEnabled(
-                enabled,
-              );
-            }
-          },
-        )
-        .catch(() => {
-          // Static behaviour remains safe if this preference is unavailable.
-        });
-
-      const subscription =
+        let mounted = true;
         AccessibilityInfo
-          .addEventListener(
-            'reduceMotionChanged',
-            setReduceMotionEnabled,
-          );
-
-      return () => {
-        mounted =
-          false;
-
-        subscription.remove();
-      };
-    }, []);
-
-    /* ---------------------------------------------------------------------- */
-    /* Coordinates supplied by App                                            */
-    /* ---------------------------------------------------------------------- */
-
-    useEffect(() => {
-      if (
-        !isValidCoordinate(
-          userCoordinates
-            ?.latitude,
-          userCoordinates
-            ?.longitude,
-        )
-      ) {
-        return;
-      }
-
-      setCurrentCoordinates({
-        latitude:
-          userCoordinates
-            ?.latitude as number,
-
-        longitude:
-          userCoordinates
-            ?.longitude as number,
-      });
-
-      setLocationStatus(
-        'READY',
-      );
-    }, [
-      userCoordinates
-        ?.latitude,
-      userCoordinates
-        ?.longitude,
-    ]);
-
-    /* ---------------------------------------------------------------------- */
-    /* Current profile                                                        */
-    /* ---------------------------------------------------------------------- */
-
-    useEffect(() => {
-      if (
-        !currentUserId
-      ) {
-        setCurrentUserProfile(
-          null,
-        );
-
-        setProfileError(
-          'EXPLORER SESSION REQUIRED',
-        );
-
-        return;
-      }
-
-      setProfileError(
-        null,
-      );
-
-      const reference =
-        doc(
-          db,
-          'users',
-          currentUserId,
-        );
-
-      const unsubscribe =
-        onSnapshot(
-          reference,
-
-          (
-            snapshot,
-          ) => {
-            if (
-              snapshot.exists()
-            ) {
-              setCurrentUserProfile(
-                snapshot.data() as
-                  UserDocument,
-              );
-
-              setProfileError(
-                null,
-              );
-            } else {
-              setCurrentUserProfile(
-                null,
-              );
-
-              setProfileError(
-                'EXPLORER PROFILE NOT FOUND',
-              );
+            .isReduceMotionEnabled()
+            .then((enabled) => {
+            if (mounted) {
+                setReduceMotionEnabled(enabled);
             }
-          },
-
-          (
-            error,
-          ) => {
-            logDevelopmentWarning(
-              '[Treasi Social] Profile subscription failed:',
-              error,
-            );
-
-            setProfileError(
-              'EXPLORER PROFILE SYNC OFFLINE',
-            );
-          },
-        );
-
-      return unsubscribe;
-    }, [
-      currentUserId,
-      retryKey,
-    ]);
-
-    /* ---------------------------------------------------------------------- */
-    /* Explorer directory                                                     */
-    /* ---------------------------------------------------------------------- */
-
-    useEffect(() => {
-      if (
-        !currentUserId
-      ) {
-        setAllUsers(
-          [],
-        );
-
-        setLoadingExplorers(
-          false,
-        );
-
-        return;
-      }
-
-      setLoadingExplorers(
-        true,
-      );
-
-      setExplorerError(
-        null,
-      );
-
-      /*
-       * This remains capped because the current schema does not yet contain
-       * geohashes for server-side radius queries.
-       */
-      const usersQuery =
-        query(
-          collection(
-            db,
-            'users',
-          ),
-          limit(
-            MAX_EXPLORERS,
-          ),
-        );
-
-      const unsubscribe =
-        onSnapshot(
-          usersQuery,
-
-          (
-            snapshot,
-          ) => {
-            const users:
-              DirectoryExplorer[] =
-              snapshot.docs
-                .filter(
-                  (
-                    documentSnapshot,
-                  ) =>
-                    documentSnapshot.id !==
-                    currentUserId,
-                )
-                .map(
-                  (
-                    documentSnapshot,
-                  ) => {
-                    const data =
-                      documentSnapshot.data() as
-                        UserDocument;
-
-                    const name =
-                      normaliseName(
-                        data.username,
-                      );
-
-                    return {
-                      uid:
-                        documentSnapshot.id,
-
-                      name,
-
-                      initial:
-                        name.charAt(
-                          0,
-                        ) ||
-                        'E',
-
-                      telemetryEnabled:
-                        data.telemetryEnabled ===
-                        true,
-
-                      location:
-                        extractCoordinates(
-                          data.location,
-                        ),
-                    };
-                  },
-                );
-
-            setAllUsers(
-              users,
-            );
-
-            setExplorerError(
-              null,
-            );
-
-            setLoadingExplorers(
-              false,
-            );
-          },
-
-          (
-            error,
-          ) => {
-            logDevelopmentWarning(
-              '[Treasi Social] Explorer directory subscription failed:',
-              error,
-            );
-
-            setExplorerError(
-              'EXPLORER DIRECTORY SYNC OFFLINE',
-            );
-
-            setLoadingExplorers(
-              false,
-            );
-          },
-        );
-
-      return unsubscribe;
-    }, [
-      currentUserId,
-      retryKey,
-    ]);
-
-    /* ---------------------------------------------------------------------- */
-    /* Friendship subscriptions                                               */
-    /* ---------------------------------------------------------------------- */
-
-    useEffect(() => {
-      if (
-        !currentUserId
-      ) {
-        setOutgoingFriendships(
-          [],
-        );
-
-        setIncomingFriendships(
-          [],
-        );
-
-        return;
-      }
-
-      setFriendshipErrors({
-        outgoing: null,
-        incoming: null,
-      });
-
-      const outgoingQuery =
-        query(
-          collection(
-            db,
-            'friendships',
-          ),
-
-          where(
-            'requesterId',
-            '==',
-            currentUserId,
-          ),
-        );
-
-      const incomingQuery =
-        query(
-          collection(
-            db,
-            'friendships',
-          ),
-
-          where(
-            'receiverId',
-            '==',
-            currentUserId,
-          ),
-        );
-
-      const unsubscribeOutgoing =
-        onSnapshot(
-          outgoingQuery,
-
-          (
-            snapshot,
-          ) => {
-            const relationships =
-              snapshot.docs
-                .map(
-                  (
-                    documentSnapshot,
-                  ):
-                    FriendshipMeta | null => {
-                    const data =
-                      documentSnapshot.data() as
-                        Partial<FriendshipDocument>;
-
-                    if (
-                      typeof data.receiverId !==
-                        'string' ||
-                      !isFriendshipStatus(
-                        data.status,
-                      )
-                    ) {
-                      return null;
-                    }
-
-                    return {
-                      docId:
-                        documentSnapshot.id,
-
-                      targetUid:
-                        data.receiverId,
-
-                      status:
-                        data.status,
-
-                      isRequester:
-                        true,
-                    };
-                  },
-                )
-                .filter(
-                  (
-                    item,
-                  ): item is FriendshipMeta =>
-                    item !==
-                    null,
-                );
-
-            setOutgoingFriendships(
-              relationships,
-            );
-
-            setFriendshipErrors(
-              (
-                current,
-              ) => ({
-                ...current,
-                outgoing:
-                  null,
-              }),
-            );
-          },
-
-          (
-            error,
-          ) => {
-            logDevelopmentWarning(
-              '[Treasi Social] Outgoing friendship subscription failed:',
-              error,
-            );
-
-            setFriendshipErrors(
-              (
-                current,
-              ) => ({
-                ...current,
-                outgoing:
-                  'OUTGOING LINK SYNC OFFLINE',
-              }),
-            );
-          },
-        );
-
-      const unsubscribeIncoming =
-        onSnapshot(
-          incomingQuery,
-
-          (
-            snapshot,
-          ) => {
-            const relationships =
-              snapshot.docs
-                .map(
-                  (
-                    documentSnapshot,
-                  ):
-                    FriendshipMeta | null => {
-                    const data =
-                      documentSnapshot.data() as
-                        Partial<FriendshipDocument>;
-
-                    if (
-                      typeof data.requesterId !==
-                        'string' ||
-                      !isFriendshipStatus(
-                        data.status,
-                      )
-                    ) {
-                      return null;
-                    }
-
-                    return {
-                      docId:
-                        documentSnapshot.id,
-
-                      targetUid:
-                        data.requesterId,
-
-                      status:
-                        data.status,
-
-                      isRequester:
-                        false,
-                    };
-                  },
-                )
-                .filter(
-                  (
-                    item,
-                  ): item is FriendshipMeta =>
-                    item !==
-                    null,
-                );
-
-            setIncomingFriendships(
-              relationships,
-            );
-
-            setFriendshipErrors(
-              (
-                current,
-              ) => ({
-                ...current,
-                incoming:
-                  null,
-              }),
-            );
-          },
-
-          (
-            error,
-          ) => {
-            logDevelopmentWarning(
-              '[Treasi Social] Incoming friendship subscription failed:',
-              error,
-            );
-
-            setFriendshipErrors(
-              (
-                current,
-              ) => ({
-                ...current,
-                incoming:
-                  'INCOMING LINK SYNC OFFLINE',
-              }),
-            );
-          },
-        );
-
-      return () => {
-        unsubscribeOutgoing();
-        unsubscribeIncoming();
-      };
-    }, [
-      currentUserId,
-      retryKey,
-    ]);
-
-    /* ---------------------------------------------------------------------- */
-    /* Global Telegram feed                                                   */
-    /* ---------------------------------------------------------------------- */
-
-    useEffect(() => {
-      if (
-        !currentUserId
-      ) {
-        setGlobalDispatches(
-          [],
-        );
-
-        setLoadingDispatches(
-          false,
-        );
-
-        return;
-      }
-
-      setLoadingDispatches(
-        true,
-      );
-
-      setTelegramError(
-        null,
-      );
-
-      /*
-       * The type constraint is important because Firestore security rules
-       * permit all authenticated users to read GLOBAL_DISPATCH messages but
-       * only participants may read PRIVATE messages.
-       */
-      const messagesQuery =
-        query(
-          collection(
-            db,
-            'messages',
-          ),
-
-          where(
-            'type',
-            '==',
-            'GLOBAL_DISPATCH',
-          ),
-
-          limit(
-            MAX_GLOBAL_MESSAGES,
-          ),
-        );
-
-      const unsubscribe =
-        onSnapshot(
-          messagesQuery,
-
-          (
-            snapshot,
-          ) => {
-            const dispatches:
-              GlobalDispatch[] =
-              snapshot.docs
-                .map(
-                  (
-                    documentSnapshot,
-                  ) => {
-                    const data =
-                      documentSnapshot.data() as
-                        MessageDocument;
-
-                    const senderName =
-                      normaliseName(
-                        data.senderName,
-                      );
-
-                    const text =
-                      typeof data.text ===
-                      'string'
-                        ? data.text.trim()
-                        : '';
-
-                    const createdAt =
-                      data.createdAt &&
-                      typeof data.createdAt
-                        .toMillis ===
-                        'function'
-                        ? data.createdAt
-                        : null;
-
-                    return {
-                      messageId:
-                        documentSnapshot.id,
-
-                      senderId:
-                        typeof data.senderId ===
-                          'string'
-                          ? data.senderId
-                          : '',
-
-                      senderName,
-
-                      text,
-
-                      createdAt,
-                    };
-                  },
-                )
-                .filter(
-                  (
-                    dispatch,
-                  ) =>
-                    Boolean(
-                      dispatch.senderId,
-                    ) &&
-                    Boolean(
-                      dispatch.text,
-                    ),
-                )
-                .sort(
-                  (
-                    itemA,
-                    itemB,
-                  ) => {
-                    const timeA =
-                      itemA.createdAt
-                        ?.toMillis() ??
-                      0;
-
-                    const timeB =
-                      itemB.createdAt
-                        ?.toMillis() ??
-                      0;
-
-                    return (
-                      timeB -
-                      timeA
-                    );
-                  },
-                );
-
-            setGlobalDispatches(
-              dispatches,
-            );
-
-            setTelegramError(
-              null,
-            );
-
-            setLoadingDispatches(
-              false,
-            );
-          },
-
-          (
-            error,
-          ) => {
-            logDevelopmentWarning(
-              '[Treasi Social] Telegram subscription failed:',
-              error,
-            );
-
-            setTelegramError(
-              'TELEGRAM FEED SYNC OFFLINE',
-            );
-
-            setLoadingDispatches(
-              false,
-            );
-          },
-        );
-
-      return unsubscribe;
-    }, [
-      currentUserId,
-      retryKey,
-    ]);
-
-    /* ---------------------------------------------------------------------- */
-    /* Friendship map                                                         */
-    /* ---------------------------------------------------------------------- */
-
-    const friendshipsMap =
-      useMemo<
-        Record<
-          string,
-          FriendshipMeta
-        >
-      >(
-        () => {
-          const map:
-            Record<
-              string,
-              FriendshipMeta
-            > = {};
-
-          for (
-            const friendship of
-            outgoingFriendships
-          ) {
-            map[
-              friendship.targetUid
-            ] =
-              friendship;
-          }
-
-          for (
-            const friendship of
-            incomingFriendships
-          ) {
-            const existing =
-              map[
-                friendship.targetUid
-              ];
-
-            /*
-             * Accepted relationships take priority if malformed duplicate
-             * relationship documents ever appear.
-             */
-            if (
-              !existing ||
-              (
-                existing.status !==
-                  'accepted' &&
-                friendship.status ===
-                  'accepted'
-              )
-            ) {
-              map[
-                friendship.targetUid
-              ] =
-                friendship;
-            }
-          }
-
-          return map;
-        },
-        [
-          incomingFriendships,
-          outgoingFriendships,
-        ],
-      );
-
-    /* ---------------------------------------------------------------------- */
-    /* User directory lookup                                                  */
-    /* ---------------------------------------------------------------------- */
-
-    const usersById =
-      useMemo<
-        Record<
-          string,
-          DirectoryExplorer
-        >
-      >(
-        () => {
-          const map:
-            Record<
-              string,
-              DirectoryExplorer
-            > = {};
-
-          for (
-            const explorer of
-            allUsers
-          ) {
-            map[
-              explorer.uid
-            ] =
-              explorer;
-          }
-
-          return map;
-        },
-        [
-          allUsers,
-        ],
-      );
-
-    /* ---------------------------------------------------------------------- */
-    /* Incoming requests                                                      */
-    /* ---------------------------------------------------------------------- */
-
-    const incomingRequests =
-      useMemo(
-        () =>
-          incomingFriendships
-            .filter(
-              (
-                friendship,
-              ) =>
-                friendship.status ===
-                'pending',
-            )
-            .map(
-              (
-                friendship,
-              ) => ({
-                friendship,
-
-                explorer:
-                  usersById[
-                    friendship.targetUid
-                  ],
-              }),
-            ),
-        [
-          incomingFriendships,
-          usersById,
-        ],
-      );
-
-    /* ---------------------------------------------------------------------- */
-    /* Active links                                                           */
-    /* ---------------------------------------------------------------------- */
-
-    const acceptedLinks =
-      useMemo(
-        () => {
-          const accepted =
-            [
-              ...outgoingFriendships,
-              ...incomingFriendships,
-            ].filter(
-              (
-                friendship,
-              ) =>
-                friendship.status ===
-                'accepted',
-            );
-
-          const seen =
-            new Set<string>();
-
-          return accepted
-            .filter(
-              (
-                friendship,
-              ) => {
-                if (
-                  seen.has(
-                    friendship.targetUid,
-                  )
-                ) {
-                  return false;
-                }
-
-                seen.add(
-                  friendship.targetUid,
-                );
-
-                return true;
-              },
-            )
-            .map(
-              (
-                friendship,
-              ) => ({
-                friendship,
-
-                explorer:
-                  usersById[
-                    friendship.targetUid
-                  ],
-              }),
-            );
-        },
-        [
-          incomingFriendships,
-          outgoingFriendships,
-          usersById,
-        ],
-      );
-
-    /* ---------------------------------------------------------------------- */
-    /* Nearby explorers                                                       */
-    /* ---------------------------------------------------------------------- */
-
-    const nearbyExplorers =
-      useMemo<
-        NearbyExplorer[]
-      >(
-        () => {
-          if (
-            !currentCoordinates ||
-            !isValidCoordinate(
-              currentCoordinates.latitude,
-              currentCoordinates.longitude,
-            )
-          ) {
-            return [];
-          }
-
-          const nearby:
-            NearbyExplorer[] =
-            [];
-
-          for (
-            const user of
-            allUsers
-          ) {
-            /*
-             * Privacy rule: a stored position is only surfaced while that
-             * Explorer has telemetry sharing enabled.
-             */
-            if (
-              !user.telemetryEnabled ||
-              !user.location
-            ) {
-              continue;
-            }
-
-            const distanceKm =
-              calculateHaversineDistanceKm(
-                currentCoordinates.latitude,
-                currentCoordinates.longitude,
-                user.location.latitude,
-                user.location.longitude,
-              );
-
-            if (
-              distanceKm >
-              RADIUS_KM
-            ) {
-              continue;
-            }
-
-            nearby.push({
-              uid:
-                user.uid,
-
-              name:
-                user.name,
-
-              initial:
-                user.initial,
-
-              distanceKm,
-
-              distanceFormatted:
-                formatDistance(
-                  distanceKm,
-                ),
-
-              friendMeta:
-                friendshipsMap[
-                  user.uid
-                ],
-            });
-          }
-
-          return nearby.sort(
-            (
-              explorerA,
-              explorerB,
-            ) =>
-              explorerA.distanceKm -
-              explorerB.distanceKm,
-          );
-        },
-        [
-          allUsers,
-          currentCoordinates,
-          friendshipsMap,
-        ],
-      );
-
-    /* ---------------------------------------------------------------------- */
-    /* Current username                                                       */
-    /* ---------------------------------------------------------------------- */
-
-    const currentUsername =
-      useMemo(
-        () =>
-          normaliseName(
-            currentUserProfile
-              ?.username ??
-              currentUser
-                ?.displayName ??
-              currentUser
-                ?.email
-                ?.split('@')[0],
-            'FIELD EXPLORER',
-          ),
-        [
-          currentUser
-            ?.displayName,
-          currentUser
-            ?.email,
-          currentUserProfile
-            ?.username,
-        ],
-      );
-
-    /* ---------------------------------------------------------------------- */
-    /* Location service                                                       */
-    /* ---------------------------------------------------------------------- */
-
-    const refreshCurrentLocation =
-      useCallback(
-        async (
-          requestPermission:
-            boolean,
-        ): Promise<void> => {
-          if (
-            !isMountedRef.current
-          ) {
-            return;
-          }
-
-          setLocationStatus(
-            'CHECKING',
-          );
-
-          try {
-            if (
-              Platform.OS ===
-                'web' &&
-              typeof window !==
-                'undefined' &&
-              !window.isSecureContext
-            ) {
-              setLocationStatus(
-                'ERROR',
-              );
-
-              return;
-            }
-
-            let permission =
-              await Location
-                .getForegroundPermissionsAsync();
-
-            if (
-              !isMountedRef.current
-            ) {
-              return;
-            }
-
-            setLocationPermissionStatus(
-              permission.status,
-            );
-
-            setCanAskLocationAgain(
-              permission.canAskAgain,
-            );
-
-            if (
-              permission.status !==
-                Location
-                  .PermissionStatus
-                  .GRANTED &&
-              requestPermission &&
-              permission.canAskAgain
-            ) {
-              permission =
-                await Location
-                  .requestForegroundPermissionsAsync();
-
-              if (
-                !isMountedRef.current
-              ) {
-                return;
-              }
-
-              setLocationPermissionStatus(
-                permission.status,
-              );
-
-              setCanAskLocationAgain(
-                permission.canAskAgain,
-              );
-            }
-
-            if (
-              permission.status !==
-              Location
-                .PermissionStatus
-                .GRANTED
-            ) {
-              setCurrentCoordinates(
-                null,
-              );
-
-              setLocationStatus(
-                permission.status ===
-                  Location
-                    .PermissionStatus
-                    .UNDETERMINED
-                  ? 'PERMISSION_REQUIRED'
-                  : 'DENIED',
-              );
-
-              return;
-            }
-
-            const servicesEnabled =
-              await Location
-                .hasServicesEnabledAsync();
-
-            if (
-              !isMountedRef.current
-            ) {
-              return;
-            }
-
-            setLocationServicesEnabled(
-              servicesEnabled,
-            );
-
-            if (
-              !servicesEnabled
-            ) {
-              setCurrentCoordinates(
-                null,
-              );
-
-              setLocationStatus(
-                'SERVICES_OFF',
-              );
-
-              return;
-            }
-
-            const location =
-              await Location
-                .getCurrentPositionAsync({
-                  accuracy:
-                    Location
-                      .Accuracy
-                      .Balanced,
-                });
-
-            if (
-              !isMountedRef.current
-            ) {
-              return;
-            }
-
-            const {
-              latitude,
-              longitude,
-            } =
-              location.coords;
-
-            if (
-              !isValidCoordinate(
-                latitude,
-                longitude,
-              )
-            ) {
-              setCurrentCoordinates(
-                null,
-              );
-
-              setLocationStatus(
-                'ERROR',
-              );
-
-              return;
-            }
-
-            setCurrentCoordinates({
-              latitude,
-              longitude,
-            });
-
-            setLocationStatus(
-              'READY',
-            );
-          } catch (
-            error: unknown
-          ) {
-            logDevelopmentWarning(
-              '[Treasi Social] Location refresh failed:',
-              error,
-            );
-
-            if (
-              isMountedRef.current
-            ) {
-              setLocationStatus(
-                'ERROR',
-              );
-            }
-          }
-        },
-        [],
-      );
-
-    /* ---------------------------------------------------------------------- */
-    /* Location lifecycle                                                     */
-    /* ---------------------------------------------------------------------- */
-
-    useEffect(() => {
-      /*
-       * Existing permission is used automatically.
-       * A new OS/browser permission prompt is never opened without a press.
-       */
-      void refreshCurrentLocation(
-        false,
-      );
-
-      const subscription =
-        AppState.addEventListener(
-          'change',
-          (
-            state:
-              AppStateStatus,
-          ) => {
-            if (
-              state ===
-              'active'
-            ) {
-              void refreshCurrentLocation(
-                false,
-              );
-            }
-          },
-        );
-
-      return () => {
-        subscription.remove();
-      };
-    }, [
-      refreshCurrentLocation,
-    ]);
-
-    /* ---------------------------------------------------------------------- */
-    /* Publish or clear shared location                                       */
-    /* ---------------------------------------------------------------------- */
-
-    useEffect(() => {
-      if (
-        !currentUserId ||
-        !currentUserProfile ||
-        isPublishingLocationRef.current
-      ) {
-        return;
-      }
-
-      const profileLocation =
-        extractCoordinates(
-          currentUserProfile.location,
-        );
-
-      /*
-       * Telemetry disabled means Social removes any previously stored
-       * location instead of continuing to expose a stale position.
-       */
-      if (
-        currentUserProfile.telemetryEnabled !==
-        true
-      ) {
-        if (
-          !profileLocation
-        ) {
-          lastPublishedLocationRef.current =
-            null;
-
-          return;
-        }
-
-        isPublishingLocationRef.current =
-          true;
-
-        setLocationPublishError(
-          null,
-        );
-
-        updateDoc(
-          doc(
-            db,
-            'users',
-            currentUserId,
-          ),
-          {
-            location:
-              deleteField(),
-
-            updatedAt:
-              serverTimestamp(),
-          },
-        )
-          .then(
-            () => {
-              lastPublishedLocationRef.current =
-                null;
-            },
-          )
-          .catch(
-            (
-              error: unknown,
-            ) => {
-              logDevelopmentWarning(
-                '[Treasi Social] Unable to clear shared location:',
-                error,
-              );
-
-              if (
-                isMountedRef.current
-              ) {
-                setLocationPublishError(
-                  'LOCATION SHARING COULD NOT BE CLEARED',
-                );
-              }
-            },
-          )
-          .finally(
-            () => {
-              isPublishingLocationRef.current =
+        })
+            .catch(() => {
+        });
+        const subscription = AccessibilityInfo
+            .addEventListener('reduceMotionChanged', setReduceMotionEnabled);
+        return () => {
+            mounted =
                 false;
-            },
-          );
-
-        return;
-      }
-
-      if (
-        !currentCoordinates
-      ) {
-        return;
-      }
-
-      const coordinateKey =
-        `${currentCoordinates.latitude.toFixed(
-          5,
-        )}:${currentCoordinates.longitude.toFixed(
-          5,
-        )}`;
-
-      if (
-        lastPublishedLocationRef.current ===
-        coordinateKey
-      ) {
-        return;
-      }
-
-      /*
-       * Avoid unnecessary Firestore writes when the previously shared point
-       * is already within roughly 20 metres of the current position.
-       */
-      if (
-        profileLocation
-      ) {
-        const movementKm =
-          calculateHaversineDistanceKm(
-            profileLocation.latitude,
-            profileLocation.longitude,
-            currentCoordinates.latitude,
-            currentCoordinates.longitude,
-          );
-
-        if (
-          movementKm <=
-          LOCATION_PUBLISH_DISTANCE_KM
-        ) {
-          lastPublishedLocationRef.current =
-            coordinateKey;
-
-          return;
+            subscription.remove();
+        };
+    }, []);
+    useEffect(() => {
+        if (!currentUserId) {
+            setCurrentUserProfile(null);
+            setProfileError('EXPLORER SESSION REQUIRED');
+            return;
         }
-      }
-
-      isPublishingLocationRef.current =
-        true;
-
-      lastPublishedLocationRef.current =
-        coordinateKey;
-
-      setLocationPublishError(
-        null,
-      );
-
-      updateDoc(
-        doc(
-          db,
-          'users',
-          currentUserId,
-        ),
-        {
-          location:
-            new GeoPoint(
-              currentCoordinates.latitude,
-              currentCoordinates.longitude,
-            ),
-
-          updatedAt:
-            serverTimestamp(),
-        },
-      )
-        .catch(
-          (
-            error: unknown,
-          ) => {
-            logDevelopmentWarning(
-              '[Treasi Social] Unable to publish shared location:',
-              error,
-            );
-
-            lastPublishedLocationRef.current =
-              null;
-
-            if (
-              isMountedRef.current
-            ) {
-              setLocationPublishError(
-                'LOCATION SHARING SYNC FAILED',
-              );
+        setProfileError(null);
+        const reference = doc(db, 'users', currentUserId);
+        const unsubscribe = onSnapshot(reference, (snapshot) => {
+            if (snapshot.exists()) {
+                setCurrentUserProfile(snapshot.data() as UserDocument);
+                setProfileError(null);
             }
-          },
-        )
-        .finally(
-          () => {
-            isPublishingLocationRef.current =
-              false;
-          },
-        );
+            else {
+                setCurrentUserProfile(null);
+                setProfileError('EXPLORER PROFILE NOT FOUND');
+            }
+        }, (error) => {
+            logDevelopmentWarning('[Treasi Social] Profile subscription failed:', error);
+            setProfileError('EXPLORER PROFILE SYNC OFFLINE');
+        });
+        return unsubscribe;
     }, [
-      currentCoordinates,
-      currentUserId,
-      currentUserProfile,
+        currentUserId,
+        retryKey,
+        onSnapshot,
+    ]);
+    useEffect(() => {
+        if (!currentUserId) {
+            setAllUsers([]);
+            setLoadingExplorers(false);
+            return;
+        }
+        setLoadingExplorers(true);
+        setExplorerError(null);
+        const usersQuery = query(collection(db, 'users'), limit(MAX_EXPLORERS));
+        const unsubscribe = onSnapshot(usersQuery, (snapshot) => {
+            const users: DirectoryExplorer[] = snapshot.docs
+                .filter((documentSnapshot) => documentSnapshot.id !==
+                currentUserId)
+                .map((documentSnapshot) => {
+                const data = documentSnapshot.data() as UserDocument;
+                const name = normaliseName(data.username);
+                return {
+                    uid: documentSnapshot.id,
+                    name,
+                    initial: name.charAt(0) ||
+                        'E',
+                    telemetryEnabled: data.telemetryEnabled ===
+                        true,
+                    location: extractCoordinates(data.location),
+                };
+            });
+            setAllUsers(users);
+            setExplorerError(null);
+            setLoadingExplorers(false);
+        }, (error) => {
+            logDevelopmentWarning('[Treasi Social] Explorer directory subscription failed:', error);
+            setExplorerError('EXPLORER DIRECTORY SYNC OFFLINE');
+            setLoadingExplorers(false);
+        });
+        return unsubscribe;
+    }, [
+        currentUserId,
+        retryKey,
+        onSnapshot,
+    ]);
+    useEffect(() => {
+        if (!currentUserId) {
+            setOutgoingFriendships([]);
+            setIncomingFriendships([]);
+            return;
+        }
+        setFriendshipErrors({
+            outgoing: null,
+            incoming: null,
+        });
+        const outgoingQuery = query(collection(db, 'friendships'), where('requesterId', '==', currentUserId));
+        const incomingQuery = query(collection(db, 'friendships'), where('receiverId', '==', currentUserId));
+        const unsubscribeOutgoing = onSnapshot(outgoingQuery, (snapshot) => {
+            const relationships = snapshot.docs
+                .map((documentSnapshot): FriendshipMeta | null => {
+                const data = documentSnapshot.data() as Partial<FriendshipDocument>;
+                if (data.requesterId !== currentUserId || data.receiverId === currentUserId || typeof data.receiverId !==
+                    'string' || !data.receiverId.trim() || data.receiverId.includes('/') ||
+                    !isFriendshipStatus(data.status)) {
+                    return null;
+                }
+                return {
+                    docId: documentSnapshot.id,
+                    targetUid: data.receiverId,
+                    status: data.status,
+                    isRequester: true,
+                };
+            })
+                .filter((item): item is FriendshipMeta => item !==
+                null);
+            setOutgoingFriendships(relationships);
+            setFriendshipErrors((current) => ({
+                ...current,
+                outgoing: null,
+            }));
+        }, (error) => {
+            logDevelopmentWarning('[Treasi Social] Outgoing friendship subscription failed:', error);
+            setFriendshipErrors((current) => ({
+                ...current,
+                outgoing: 'OUTGOING LINK SYNC OFFLINE',
+            }));
+        });
+        const unsubscribeIncoming = onSnapshot(incomingQuery, (snapshot) => {
+            const relationships = snapshot.docs
+                .map((documentSnapshot): FriendshipMeta | null => {
+                const data = documentSnapshot.data() as Partial<FriendshipDocument>;
+                if (data.receiverId !== currentUserId || data.requesterId === currentUserId || typeof data.requesterId !==
+                    'string' || !data.requesterId.trim() || data.requesterId.includes('/') ||
+                    !isFriendshipStatus(data.status)) {
+                    return null;
+                }
+                return {
+                    docId: documentSnapshot.id,
+                    targetUid: data.requesterId,
+                    status: data.status,
+                    isRequester: false,
+                };
+            })
+                .filter((item): item is FriendshipMeta => item !==
+                null);
+            setIncomingFriendships(relationships);
+            setFriendshipErrors((current) => ({
+                ...current,
+                incoming: null,
+            }));
+        }, (error) => {
+            logDevelopmentWarning('[Treasi Social] Incoming friendship subscription failed:', error);
+            setFriendshipErrors((current) => ({
+                ...current,
+                incoming: 'INCOMING LINK SYNC OFFLINE',
+            }));
+        });
+        return () => {
+            unsubscribeOutgoing();
+            unsubscribeIncoming();
+        };
+    }, [
+        currentUserId,
+        retryKey,
+        onSnapshot,
+    ]);
+    useEffect(() => {
+        if (!currentUserId) {
+            setGlobalDispatches([]);
+            setLoadingDispatches(false);
+            return;
+        }
+        setLoadingDispatches(true);
+        setTelegramError(null);
+        const messagesQuery = query(collection(db, 'messages'), where('type', '==', 'GLOBAL_DISPATCH'), orderBy('createdAt', 'desc'), limit(MAX_GLOBAL_MESSAGES));
+        const unsubscribe = onSnapshot(messagesQuery, (snapshot) => {
+            const dispatches: GlobalDispatch[] = snapshot.docs
+                .map((documentSnapshot) => {
+                const data = documentSnapshot.data() as MessageDocument;
+                const senderName = normaliseName(data.senderName);
+                const text = typeof data.text ===
+                    'string'
+                    ? data.text.trim()
+                    : '';
+                const createdAt = data.createdAt &&
+                    typeof data.createdAt.toMillis === 'function' && Number.isFinite(safeTimestamp(data.createdAt))
+                    ? data.createdAt
+                    : null;
+                return {
+                    messageId: documentSnapshot.id,
+                    senderId: typeof data.senderId ===
+                        'string'
+                        ? data.senderId
+                        : '',
+                    senderName,
+                    text,
+                    createdAt,
+                };
+            })
+                .filter((dispatch) => Boolean(dispatch.senderId) &&
+                Boolean(dispatch.text))
+                .sort((itemA, itemB) => {
+                return safeTimestamp(itemB.createdAt) - safeTimestamp(itemA.createdAt);
+            });
+            setGlobalDispatches(dispatches);
+            setTelegramError(null);
+            setLoadingDispatches(false);
+        }, (error) => {
+            logDevelopmentWarning('[Treasi Social] Telegram subscription failed:', error);
+            setTelegramError(error.code === 'failed-precondition' ? 'TELEGRAM FEED INDEX REQUIRED' : 'TELEGRAM FEED SYNC OFFLINE');
+            setLoadingDispatches(false);
+        });
+        return unsubscribe;
+    }, [
+        currentUserId,
+        retryKey,
+        onSnapshot,
+    ]);
+    const friendshipsMap = useMemo<Record<string, FriendshipMeta>>(() => {
+        const map: Record<string, FriendshipMeta> = Object.create(null);
+        for (const friendship of outgoingFriendships) {
+            map[friendship.targetUid] =
+                friendship;
+        }
+        for (const friendship of incomingFriendships) {
+            const existing = map[friendship.targetUid];
+            if (!existing ||
+                (existing.status !==
+                    'accepted' &&
+                    friendship.status ===
+                        'accepted')) {
+                map[friendship.targetUid] =
+                    friendship;
+            }
+        }
+        return map;
+    }, [
+        incomingFriendships,
+        outgoingFriendships,
+    ]);
+    const usersById = useMemo<Record<string, DirectoryExplorer>>(() => {
+        const map: Record<string, DirectoryExplorer> = Object.create(null);
+        for (const explorer of allUsers) {
+            map[explorer.uid] =
+                explorer;
+        }
+        return map;
+    }, [
+        allUsers,
+    ]);
+    const incomingRequests = useMemo(() => incomingFriendships
+        .filter((friendship) => friendship.status ===
+        'pending')
+        .map((friendship) => ({
+        friendship,
+        explorer: usersById[friendship.targetUid],
+    })), [
+        incomingFriendships,
+        usersById,
+    ]);
+    const acceptedLinks = useMemo(() => {
+        const accepted = [
+            ...outgoingFriendships,
+            ...incomingFriendships,
+        ].filter((friendship) => friendship.status ===
+            'accepted');
+        const seen = new Set<string>();
+        return accepted
+            .filter((friendship) => {
+            if (seen.has(friendship.targetUid)) {
+                return false;
+            }
+            seen.add(friendship.targetUid);
+            return true;
+        })
+            .map((friendship) => ({
+            friendship,
+            explorer: usersById[friendship.targetUid],
+        }));
+    }, [
+        incomingFriendships,
+        outgoingFriendships,
+        usersById,
+    ]);
+    const nearbyExplorers = useMemo<NearbyExplorer[]>(() => {
+        if (!currentCoordinates ||
+            !isValidCoordinate(currentCoordinates.latitude, currentCoordinates.longitude)) {
+            return [];
+        }
+        const nearby: NearbyExplorer[] = [];
+        for (const user of allUsers) {
+            if (!user.telemetryEnabled ||
+                !user.location) {
+                continue;
+            }
+            const distanceKm = calculateHaversineDistanceKm(currentCoordinates.latitude, currentCoordinates.longitude, user.location.latitude, user.location.longitude);
+            if (distanceKm >
+                RADIUS_KM) {
+                continue;
+            }
+            nearby.push({
+                uid: user.uid,
+                name: user.name,
+                initial: user.initial,
+                distanceKm,
+                distanceFormatted: formatDistance(distanceKm),
+                friendMeta: friendshipsMap[user.uid],
+            });
+        }
+        return nearby.sort((explorerA, explorerB) => explorerA.distanceKm -
+            explorerB.distanceKm);
+    }, [
+        allUsers,
+        currentCoordinates,
+        friendshipsMap,
+    ]);
+    const currentUsername = useMemo(() => normaliseName(currentUserProfile
+        ?.username ??
+        currentUser
+            ?.displayName ??
+        currentUser
+            ?.email
+            ?.split('@')[0], 'FIELD EXPLORER'), [
+        currentUser
+            ?.displayName,
+        currentUser
+            ?.email,
+        currentUserProfile
+            ?.username,
+    ]);
+    const [publishRevision, setPublishRevision] = useState(0);
+    useEffect(() => {
+        if (!isCurrent() || !currentUserProfile || isPublishingLocationRef.current) return;
+        const sharing = currentUserProfile.telemetryEnabled === true;
+        if (sharing && !livePosition) return;
+        if (!sharing && !currentUserProfile.location) return;
+        const key = sharing ? latitude + ':' + longitude : 'clear';
+        const attemptKey = retryKey + ':' + key;
+        if (lastPublishedLocationRef.current === attemptKey) return;
+        lastPublishedLocationRef.current = attemptKey;
+        isPublishingLocationRef.current = true;
+        setLocationPublishError(null);
+        void runTransaction(db, async transaction => {
+            const reference = doc(db, 'users', currentUserId);
+            const snapshot = await transaction.get(reference);
+            if (!isCurrent() || !snapshot.exists()) return;
+            const latest = snapshot.data();
+            if (latest.telemetryEnabled !== true) {
+                if (latest.location) transaction.update(reference, { location: deleteField(), updatedAt: serverTimestamp() });
+            } else if (sharing && livePosition && isFreshLocation(livePosition)) {
+                const old = extractCoordinates(latest.location);
+                if (!old || calculateHaversineDistanceKm(old.latitude, old.longitude, livePosition.coords.latitude, livePosition.coords.longitude) > LOCATION_PUBLISH_DISTANCE_KM) {
+                    transaction.update(reference, { location: new GeoPoint(livePosition.coords.latitude, livePosition.coords.longitude), updatedAt: serverTimestamp() });
+                }
+            }
+        }).catch(error => {
+            logDevelopmentWarning('[Treasi Social] Location sharing failed:', error);
+            if (isCurrent()) setLocationPublishError('LOCATION SHARING SYNC FAILED');
+        }).finally(() => {
+            isPublishingLocationRef.current = false;
+            if (isCurrent()) setPublishRevision(value => value + 1);
+        });
+    }, [currentUserId, currentUserProfile, latitude, longitude, livePosition, retryKey, publishRevision, isCurrent]);
+    const handleLocationAction = useCallback(async (): Promise<void> => {
+        if (locationStatus ===
+            'CHECKING') {
+            return;
+        }
+        if (Platform.OS !==
+            'web' &&
+            (locationServicesEnabled ===
+                false ||
+                (locationPermissionStatus ===
+                    Location
+                        .PermissionStatus
+                        .DENIED &&
+                    !canAskLocationAgain))) {
+            try {
+                await Linking.openSettings();
+            }
+            catch (error: unknown) {
+                logDevelopmentWarning('[Treasi Social] Unable to open device settings:', error);
+                showAccessibleAlert('Settings Unavailable', 'Open your device settings manually and enable foreground location access for Treasi.');
+            }
+            return;
+        }
+        if (Platform.OS ===
+            'web' &&
+            locationPermissionStatus ===
+                Location
+                    .PermissionStatus
+                    .DENIED &&
+            !canAskLocationAgain) {
+            showAccessibleAlert('Browser Location Blocked', 'Allow location for this site in your browser settings, then return to Treasi and retry the scan.');
+            return;
+        }
+        await refreshCurrentLocation(true);
+    }, [
+        canAskLocationAgain,
+        locationPermissionStatus,
+        locationServicesEnabled,
+        locationStatus,
+        refreshCurrentLocation,
     ]);
 
-    /* ---------------------------------------------------------------------- */
-    /* Location recovery                                                      */
-    /* ---------------------------------------------------------------------- */
-
-    const handleLocationAction =
-      useCallback(
-        async (): Promise<void> => {
-          if (
-            locationStatus ===
-            'CHECKING'
-          ) {
-            return;
-          }
-
-          if (
-            Platform.OS !==
-              'web' &&
-            (
-              locationServicesEnabled ===
-                false ||
-              (
-                locationPermissionStatus ===
-                  Location
-                    .PermissionStatus
-                    .DENIED &&
-                !canAskLocationAgain
-              )
-            )
-          ) {
-            try {
-              await Linking.openSettings();
-            } catch (
-              error: unknown
-            ) {
-              logDevelopmentWarning(
-                '[Treasi Social] Unable to open device settings:',
-                error,
-              );
-
-              showAccessibleAlert(
-                'Settings Unavailable',
-                'Open your device settings manually and enable foreground location access for Treasi.',
-              );
-            }
-
-            return;
-          }
-
-          if (
-            Platform.OS ===
-              'web' &&
-            locationPermissionStatus ===
-              Location
-                .PermissionStatus
-                .DENIED &&
-            !canAskLocationAgain
-          ) {
-            showAccessibleAlert(
-              'Browser Location Blocked',
-              'Allow location for this site in your browser settings, then return to Treasi and retry the scan.',
-            );
-
-            return;
-          }
-
-          await refreshCurrentLocation(
-            true,
-          );
-        },
-        [
-          canAskLocationAgain,
-          locationPermissionStatus,
-          locationServicesEnabled,
-          locationStatus,
-          refreshCurrentLocation,
-        ],
-      );
-
-    /* ---------------------------------------------------------------------- */
-    /* Friend request creation                                                */
-    /* ---------------------------------------------------------------------- */
-
-    const handleSendFriendRequest =
-      useCallback(
-        async (
-          targetUid: string,
-          targetName:
-            string,
-        ): Promise<boolean> => {
-          if (
-            !currentUserId ||
-            !targetUid ||
-            targetUid ===
-              currentUserId ||
-            actionUid
-          ) {
-            if (
-              targetUid ===
-              currentUserId
-            ) {
-              showAccessibleAlert(
-                'Cannot Link Self',
-                'You cannot create a friendship request with your own Explorer account.',
-              );
-            }
-
-            return false;
-          }
-
-          const existing =
-            friendshipsMap[
-              targetUid
-            ];
-
-          if (
-            existing?.status ===
-            'accepted'
-          ) {
-            showAccessibleAlert(
-              'Link Active',
-              `You are already linked with ${targetName}.`,
-            );
-
-            return false;
-          }
-
-          if (
-            existing?.status ===
-            'pending'
-          ) {
-            showAccessibleAlert(
-              'Request Active',
-              `A pending link request already exists with ${targetName}.`,
-            );
-
-            return false;
-          }
-
-          if (
-            existing?.status ===
-            'blocked'
-          ) {
-            showAccessibleAlert(
-              'Link Blocked',
-              'This Explorer relationship is currently blocked.',
-            );
-
-            return false;
-          }
-
-          setActionUid(
-            targetUid,
-          );
-
-          try {
-            /*
-             * A declined relationship may be cleared before issuing a fresh
-             * pending request using the deterministic participant ID.
-             */
-            if (
-              existing?.status ===
-              'declined'
-            ) {
-              await deleteDoc(
-                doc(
-                  db,
-                  'friendships',
-                  existing.docId,
-                ),
-              );
-            }
-
-            const friendshipId =
-              getDeterministicFriendshipId(
-                currentUserId,
-                targetUid,
-              );
-
-            const friendshipReference =
-              doc(
-                db,
-                'friendships',
-                friendshipId,
-              );
-
-            const activityReference =
-              doc(
-                collection(
-                  db,
-                  'activity_feed',
-                ),
-              );
-
-            const batch =
-              writeBatch(
-                db,
-              );
-
-            batch.set(
-              friendshipReference,
-              {
-                friendshipId,
-
-                requesterId:
-                  currentUserId,
-
-                receiverId:
-                  targetUid,
-
-                status:
-                  'pending',
-
-                createdAt:
-                  serverTimestamp(),
-
-                updatedAt:
-                  serverTimestamp(),
-              },
-            );
-
-            batch.set(
-              activityReference,
-              {
-                userId:
-                  currentUserId,
-
-                username:
-                  currentUsername,
-
-                type:
-                  'FRIEND_REQUEST',
-
-                message:
-                  `SENT LINK REQUEST TO ${normaliseName(
-                    targetName,
-                  )}`,
-
-                targetId:
-                  targetUid,
-
-                createdAt:
-                  serverTimestamp(),
-              },
-            );
-
-            await batch.commit();
-
-            showAccessibleAlert(
-              'Request Sent',
-              `A link request was sent to ${targetName}.`,
-            );
-
+    const applyFriendship = useCallback((friendship: FriendshipMeta | null, id: string) => {
+        const update = (items: FriendshipMeta[], requester: boolean) => {
+            const remaining = items.filter(item => item.docId !== id && item.targetUid !== friendship?.targetUid);
+            return friendship && friendship.isRequester === requester ? [...remaining, friendship] : remaining;
+        };
+        setOutgoingFriendships(items => update(items, true));
+        setIncomingFriendships(items => update(items, false));
+    }, []);
+    const handleSendFriendRequest = useCallback(async (targetUid: string, targetName: string): Promise<boolean> => {
+        if (!isCurrent() || friendLockRef.current || !targetUid || targetUid.includes('/') || targetUid === currentUserId) return false;
+        friendLockRef.current = true;
+        setActionUid(targetUid);
+        const existing = friendshipsMap[targetUid];
+        const id = getDeterministicFriendshipId(currentUserId, targetUid);
+        try {
+            await runTransaction(db, async transaction => {
+                const reference = doc(db, 'friendships', id);
+                const snapshot = await transaction.get(reference);
+                const legacy = existing && existing.docId !== id ? await transaction.get(doc(db, 'friendships', existing.docId)) : null;
+                const target = await transaction.get(doc(db, 'users', targetUid));
+                if (!isCurrent()) throw new Error('SESSION_CHANGED');
+                if (!target.exists()) throw new Error('EXPLORER_NOT_FOUND');
+                for (const record of [snapshot, legacy]) {
+                    if (!record?.exists()) continue;
+                    const data = record.data();
+                    if (!((data.requesterId === currentUserId && data.receiverId === targetUid) ||
+                        (data.receiverId === currentUserId && data.requesterId === targetUid))) throw new Error('LINK_CHANGED');
+                    if (data.status === 'blocked') throw new Error('LINK_BLOCKED');
+                    if (data.status === 'pending' || data.status === 'accepted') throw new Error('LINK_EXISTS');
+                    if (data.status !== 'declined') throw new Error('LINK_CHANGED');
+                }
+                if (legacy?.exists() && existing) transaction.delete(doc(db, 'friendships', existing.docId));
+                transaction.set(reference, { friendshipId: id, requesterId: currentUserId, receiverId: targetUid,
+                    status: 'pending', createdAt: serverTimestamp(), updatedAt: serverTimestamp() });
+                transaction.set(doc(collection(db, 'activity_feed')), { userId: currentUserId, username: currentUsername,
+                    type: 'FRIEND_REQUEST', message: 'SENT LINK REQUEST TO ' + normaliseName(targetName),
+                    targetId: targetUid, createdAt: serverTimestamp() });
+            });
+            if (!isCurrent()) return false;
+            applyFriendship({ docId: id, targetUid, status: 'pending', isRequester: true }, id);
+            showAccessibleAlert('Request Sent', 'A link request was sent to ' + targetName + '.');
             return true;
-          } catch (
-            error: unknown
-          ) {
-            logDevelopmentWarning(
-              '[Treasi Social] Friend request failed:',
-              error,
-            );
-
-            showAccessibleAlert(
-              'Transmission Error',
-              'Treasi could not issue the Explorer link request. Check your connection and try again.',
-            );
-
+        } catch (error) {
+            logDevelopmentWarning('[Treasi Social] Friend request failed:', error);
+            if (isCurrent()) showAccessibleAlert('Link Request Unavailable', error instanceof Error && error.message === 'LINK_BLOCKED'
+                ? 'This Explorer relationship is currently blocked.' : error instanceof Error && error.message === 'LINK_EXISTS'
+                ? 'An active link or pending request already exists. Refresh the network to see its current status.'
+                : 'Treasi could not issue this link request. Refresh the network and try again.');
             return false;
-          } finally {
-            if (
-              isMountedRef.current
-            ) {
-              setActionUid(
-                null,
-              );
-            }
-          }
-        },
-        [
-          actionUid,
-          currentUserId,
-          currentUsername,
-          friendshipsMap,
-        ],
-      );
+        } finally { friendLockRef.current = false; if (isCurrent()) setActionUid(null); }
+    }, [isCurrent, currentUserId, currentUsername, friendshipsMap, applyFriendship]);
 
-    /* ---------------------------------------------------------------------- */
-    /* Accept friend request                                                  */
-    /* ---------------------------------------------------------------------- */
-
-    const handleAcceptFriendRequest =
-      useCallback(
-        async (
-          friendship:
-            FriendshipMeta,
-          targetName:
-            string,
-        ): Promise<void> => {
-          if (
-            !currentUserId ||
-            actionUid ||
-            friendship.isRequester ||
-            friendship.status !==
-              'pending'
-          ) {
+    const changeFriendship = useCallback(async (friendship: FriendshipMeta, targetName: string, action: 'accepted' | 'declined' | 'remove') => {
+        if (!isCurrent() || friendLockRef.current) return;
+        friendLockRef.current = true;
+        setActionUid(friendship.docId);
+        try {
+            await runTransaction(db, async transaction => {
+                const reference = doc(db, 'friendships', friendship.docId);
+                const snapshot = await transaction.get(reference);
+                if (!isCurrent()) throw new Error('SESSION_CHANGED');
+                if (!snapshot.exists()) throw new Error('LINK_CHANGED');
+                const latest = snapshot.data();
+                const requester = latest.requesterId === currentUserId && latest.receiverId === friendship.targetUid;
+                const receiver = latest.receiverId === currentUserId && latest.requesterId === friendship.targetUid;
+                if ((!requester && !receiver) || latest.status !== friendship.status || requester !== friendship.isRequester || latest.status === 'blocked') throw new Error('LINK_CHANGED');
+                if (action !== 'remove' && (!receiver || latest.status !== 'pending')) throw new Error('LINK_CHANGED');
+                if (action === 'remove') transaction.delete(reference);
+                else transaction.update(reference, { status: action, updatedAt: serverTimestamp() });
+                if (action === 'accepted') transaction.set(doc(collection(db, 'activity_feed')), {
+                    userId: currentUserId, username: currentUsername, type: 'FRIEND_ACCEPTED',
+                    message: 'ACCEPTED LINK WITH ' + normaliseName(targetName), targetId: friendship.targetUid, createdAt: serverTimestamp() });
+            });
+            if (!isCurrent()) return;
+            applyFriendship(action === 'remove' ? null : { ...friendship, status: action }, friendship.docId);
+            AccessibilityInfo.announceForAccessibility(action === 'remove' ? 'Explorer link record removed.' : 'Explorer link ' + action + '.');
+        } catch (error) {
+            logDevelopmentWarning('[Treasi Social] Friendship update failed:', error);
+            if (isCurrent()) showAccessibleAlert('Link Error', 'This relationship could not be updated. Refresh the network and try again.');
+        } finally { friendLockRef.current = false; if (isCurrent()) setActionUid(null); }
+    }, [isCurrent, currentUserId, currentUsername, applyFriendship]);
+    const handleAcceptFriendRequest = useCallback((friendship: FriendshipMeta, name: string) => changeFriendship(friendship, name, 'accepted'), [changeFriendship]);
+    const handleDeclineFriendRequest = useCallback((friendship: FriendshipMeta, name: string) => changeFriendship(friendship, name, 'declined'), [changeFriendship]);
+    const handleRemoveFriendship = useCallback((friendship: FriendshipMeta, name: string) => {
+        if (!isCurrent() || friendLockRef.current) return;
+        const pending = friendship.status === 'pending';
+        Alert.alert(pending ? 'Cancel Request' : 'Terminate Link', pending ? 'Cancel the pending request to ' + name + '?' : 'Disconnect your Explorer link with ' + name + '?', [
+            { text: 'CANCEL', style: 'cancel' },
+            { text: pending ? 'CANCEL REQUEST' : 'UNLINK', style: 'destructive', onPress: () => { void changeFriendship(friendship, name, 'remove'); } },
+        ]);
+    }, [isCurrent, changeFriendship]);
+    const handleSearchAndLinkAgent = useCallback(async (): Promise<void> => {
+        if (!isCurrent() || searchLockRef.current || friendLockRef.current) {
             return;
-          }
-
-          setActionUid(
-            friendship.docId,
-          );
-
-          try {
-            const friendshipReference =
-              doc(
-                db,
-                'friendships',
-                friendship.docId,
-              );
-
-            const activityReference =
-              doc(
-                collection(
-                  db,
-                  'activity_feed',
-                ),
-              );
-
-            const batch =
-              writeBatch(
-                db,
-              );
-
-            batch.update(
-              friendshipReference,
-              {
-                status:
-                  'accepted',
-
-                updatedAt:
-                  serverTimestamp(),
-              },
-            );
-
-            batch.set(
-              activityReference,
-              {
-                userId:
-                  currentUserId,
-
-                username:
-                  currentUsername,
-
-                type:
-                  'FRIEND_ACCEPTED',
-
-                message:
-                  `ACCEPTED LINK WITH ${normaliseName(
-                    targetName,
-                  )}`,
-
-                targetId:
-                  friendship.targetUid,
-
-                createdAt:
-                  serverTimestamp(),
-              },
-            );
-
-            await batch.commit();
-
-            showAccessibleAlert(
-              'Link Established',
-              `You are now linked with ${targetName}.`,
-            );
-          } catch (
-            error: unknown
-          ) {
-            logDevelopmentWarning(
-              '[Treasi Social] Accept friendship failed:',
-              error,
-            );
-
-            showAccessibleAlert(
-              'Link Error',
-              'Treasi could not accept this Explorer request.',
-            );
-          } finally {
-            if (
-              isMountedRef.current
-            ) {
-              setActionUid(
-                null,
-              );
-            }
-          }
-        },
-        [
-          actionUid,
-          currentUserId,
-          currentUsername,
-        ],
-      );
-
-    /* ---------------------------------------------------------------------- */
-    /* Decline friend request                                                 */
-    /* ---------------------------------------------------------------------- */
-
-    const handleDeclineFriendRequest =
-      useCallback(
-        async (
-          friendship:
-            FriendshipMeta,
-          targetName:
-            string,
-        ): Promise<void> => {
-          if (
-            !currentUserId ||
-            actionUid ||
-            friendship.isRequester ||
-            friendship.status !==
-              'pending'
-          ) {
+        }
+        const searchTag = searchAgentTag
+            .trim()
+            .toUpperCase();
+        if (searchTag.length > MAX_CALLSIGN_LENGTH) { setSearchError('CALLSIGN MUST BE 24 CHARACTERS OR FEWER'); return; }
+        if (!searchTag) {
+            setSearchError('ENTER AN EXPLORER CALLSIGN');
             return;
-          }
-
-          setActionUid(
-            friendship.docId,
-          );
-
-          try {
-            await updateDoc(
-              doc(
-                db,
-                'friendships',
-                friendship.docId,
-              ),
-              {
-                status:
-                  'declined',
-
-                updatedAt:
-                  serverTimestamp(),
-              },
-            );
-
-            AccessibilityInfo
-              .announceForAccessibility(
-                `Link request from ${targetName} declined.`,
-              );
-          } catch (
-            error: unknown
-          ) {
-            logDevelopmentWarning(
-              '[Treasi Social] Decline friendship failed:',
-              error,
-            );
-
-            showAccessibleAlert(
-              'Link Error',
-              'Treasi could not decline this Explorer request.',
-            );
-          } finally {
-            if (
-              isMountedRef.current
-            ) {
-              setActionUid(
-                null,
-              );
+        }
+        setSearchError(null);
+        searchLockRef.current = true;
+        setIsSearching(true);
+        try {
+            const searchQuery = query(collection(db, 'users'), where('username', '==', searchTag), limit(3));
+            const snapshot = await getDocs(searchQuery);
+            if (!isCurrent()) return;
+            const candidates = snapshot.docs.filter((documentSnapshot) => documentSnapshot.id !==
+                currentUserId);
+            if (candidates.length ===
+                0) {
+                setSearchError('EXPLORER CALLSIGN NOT FOUND');
+                return;
             }
-          }
-        },
-        [
-          actionUid,
-          currentUserId,
-        ],
-      );
-
-    /* ---------------------------------------------------------------------- */
-    /* Remove friendship                                                      */
-    /* ---------------------------------------------------------------------- */
-
-    const handleRemoveFriendship =
-      useCallback(
-        (
-          friendship:
-            FriendshipMeta,
-          targetName:
-            string,
-        ): void => {
-          if (
-            !currentUserId ||
-            actionUid
-          ) {
-            return;
-          }
-
-          const isPendingRequest =
-            friendship.status ===
-              'pending' &&
-            friendship.isRequester;
-
-          const title =
-            isPendingRequest
-              ? 'Cancel Request'
-              : friendship.status ===
-                  'accepted'
-                ? 'Terminate Link'
-                : 'Clear Link Record';
-
-          const message =
-            isPendingRequest
-              ? `Cancel the pending link request to ${targetName}?`
-              : friendship.status ===
-                  'accepted'
-                ? `Disconnect your Explorer link with ${targetName}?`
-                : `Clear the relationship record with ${targetName}?`;
-
-          Alert.alert(
-            title,
-            message,
-            [
-              {
-                text:
-                  'CANCEL',
-
-                style:
-                  'cancel',
-              },
-
-              {
-                text:
-                  isPendingRequest
-                    ? 'CANCEL REQUEST'
-                    : friendship.status ===
-                        'accepted'
-                      ? 'UNLINK'
-                      : 'CLEAR',
-
-                style:
-                  'destructive',
-
-                onPress:
-                  () => {
-                    if (
-                      actionUid
-                    ) {
-                      return;
-                    }
-
-                    setActionUid(
-                      friendship.docId,
-                    );
-
-                    deleteDoc(
-                      doc(
-                        db,
-                        'friendships',
-                        friendship.docId,
-                      ),
-                    )
-                      .then(
-                        () => {
-                          AccessibilityInfo
-                            .announceForAccessibility(
-                              'Explorer link record removed.',
-                            );
-                        },
-                      )
-                      .catch(
-                        (
-                          error: unknown,
-                        ) => {
-                          logDevelopmentWarning(
-                            '[Treasi Social] Remove friendship failed:',
-                            error,
-                          );
-
-                          showAccessibleAlert(
-                            'Link Error',
-                            'Treasi could not update the Explorer relationship.',
-                          );
-                        },
-                      )
-                      .finally(
-                        () => {
-                          if (
-                            isMountedRef.current
-                          ) {
-                            setActionUid(
-                              null,
-                            );
-                          }
-                        },
-                      );
-                  },
-              },
-            ],
-          );
-        },
-        [
-          actionUid,
-          currentUserId,
-        ],
-      );
-
-    /* ---------------------------------------------------------------------- */
-    /* Callsign search                                                        */
-    /* ---------------------------------------------------------------------- */
-
-    const handleSearchAndLinkAgent =
-      useCallback(
-        async (): Promise<void> => {
-          if (
-            !currentUserId ||
-            isSearching ||
-            actionUid
-          ) {
-            return;
-          }
-
-          const searchTag =
-            searchAgentTag
-              .trim()
-              .toUpperCase();
-
-          if (
-            !searchTag
-          ) {
-            setSearchError(
-              'ENTER AN EXPLORER CALLSIGN',
-            );
-
-            return;
-          }
-
-          setSearchError(
-            null,
-          );
-
-          setIsSearching(
-            true,
-          );
-
-          try {
-            /*
-             * Search Firestore directly instead of searching the capped
-             * nearby-directory result set.
-             */
-            const searchQuery =
-              query(
-                collection(
-                  db,
-                  'users',
-                ),
-
-                where(
-                  'username',
-                  '==',
-                  searchTag,
-                ),
-
-                limit(3),
-              );
-
-            const snapshot =
-              await getDocs(
-                searchQuery,
-              );
-
-            const candidates =
-              snapshot.docs.filter(
-                (
-                  documentSnapshot,
-                ) =>
-                  documentSnapshot.id !==
-                  currentUserId,
-              );
-
-            if (
-              candidates.length ===
-              0
-            ) {
-              setSearchError(
-                'EXPLORER CALLSIGN NOT FOUND',
-              );
-
-              return;
+            if (candidates.length > 1) { setSearchError('MULTIPLE EXPLORERS USE THIS CALLSIGN'); return; }
+            const selected = candidates[0];
+            const data = selected.data() as UserDocument;
+            const targetName = normaliseName(data.username);
+            const sent = await handleSendFriendRequest(selected.id, targetName);
+            if (sent &&
+                isCurrent()) {
+                setFriendModalVisible(false);
+                setSearchAgentTag('');
             }
-
-            const selected =
-              candidates[0];
-
-            const data =
-              selected.data() as
-                UserDocument;
-
-            const targetName =
-              normaliseName(
-                data.username,
-              );
-
-            const sent =
-              await handleSendFriendRequest(
-                selected.id,
-                targetName,
-              );
-
-            if (
-              sent &&
-              isMountedRef.current
-            ) {
-              setFriendModalVisible(
-                false,
-              );
-
-              setSearchAgentTag(
-                '',
-              );
+        }
+        catch (error: unknown) {
+            logDevelopmentWarning('[Treasi Social] Callsign search failed:', error);
+            if (isCurrent()) {
+                setSearchError('CALLSIGN SEARCH FAILED');
             }
-          } catch (
-            error: unknown
-          ) {
-            logDevelopmentWarning(
-              '[Treasi Social] Callsign search failed:',
-              error,
-            );
-
-            if (
-              isMountedRef.current
-            ) {
-              setSearchError(
-                'CALLSIGN SEARCH FAILED',
-              );
+        }
+        finally {
+            searchLockRef.current = false;
+            if (isCurrent()) {
+                setIsSearching(false);
             }
-          } finally {
-            if (
-              isMountedRef.current
-            ) {
-              setIsSearching(
-                false,
-              );
-            }
-          }
-        },
-        [
-          actionUid,
-          currentUserId,
-          handleSendFriendRequest,
-          isSearching,
-          searchAgentTag,
-        ],
-      );
-
-    /* ---------------------------------------------------------------------- */
-    /* Telegram dispatch                                                      */
-    /* ---------------------------------------------------------------------- */
-
-    const handleDispatchTelegram =
-      useCallback(
-        async (): Promise<void> => {
-          if (
-            !currentUserId ||
-            isTransmitting
-          ) {
+        }
+    }, [
+        isCurrent,
+        currentUserId,
+        handleSendFriendRequest,
+        isSearching,
+        searchAgentTag,
+    ]);
+    const handleDispatchTelegram = useCallback(async (): Promise<void> => {
+        if (!isCurrent() || telegramLockRef.current) {
             return;
-          }
-
-          const message =
-            telegramText
-              .trim()
-              .slice(
-                0,
-                MAX_TELEGRAM_LENGTH,
-              );
-
-          if (
-            !message
-          ) {
-            showAccessibleAlert(
-              'Empty Telegram',
-              'Enter a message before transmitting the signal.',
-            );
-
+        }
+        const message = telegramText
+            .trim()
+            .slice(0, MAX_TELEGRAM_LENGTH);
+        if (!message) {
+            showAccessibleAlert('Empty Telegram', 'Enter a message before transmitting the signal.');
             return;
-          }
-
-          setIsTransmitting(
-            true,
-          );
-
-          try {
-            const messageReference =
-              doc(
-                collection(
-                  db,
-                  'messages',
-                ),
-              );
-
-            const activityReference =
-              doc(
-                collection(
-                  db,
-                  'activity_feed',
-                ),
-              );
-
-            const preview =
-              message.length >
-              40
-                ? `${message.slice(
-                    0,
-                    40,
-                  )}…`
+        }
+        telegramLockRef.current = true;
+        setIsTransmitting(true);
+        try {
+            const messageReference = doc(collection(db, 'messages'));
+            const activityReference = doc(collection(db, 'activity_feed'));
+            const preview = message.length >
+                40
+                ? `${message.slice(0, 40)}…`
                 : message;
-
-            const batch =
-              writeBatch(
-                db,
-              );
-
-            batch.set(
-              messageReference,
-              {
-                messageId:
-                  messageReference.id,
-
-                senderId:
-                  currentUserId,
-
-                senderName:
-                  currentUsername,
-
-                text:
-                  message,
-
-                createdAt:
-                  serverTimestamp(),
-
-                type:
-                  'GLOBAL_DISPATCH',
-              },
-            );
-
-            batch.set(
-              activityReference,
-              {
-                userId:
-                  currentUserId,
-
-                username:
-                  currentUsername,
-
-                type:
-                  'TELEGRAM_DISPATCH',
-
-                message:
-                  `DISPATCHED TELEGRAM: "${preview}"`,
-
-                targetId:
-                  messageReference.id,
-
-                createdAt:
-                  serverTimestamp(),
-              },
-            );
-
+            const batch = writeBatch(db);
+            batch.set(messageReference, {
+                messageId: messageReference.id,
+                senderId: currentUserId,
+                senderName: currentUsername,
+                text: message,
+                createdAt: serverTimestamp(),
+                type: 'GLOBAL_DISPATCH',
+            });
+            batch.set(activityReference, {
+                userId: currentUserId,
+                username: currentUsername,
+                type: 'TELEGRAM_DISPATCH',
+                message: `DISPATCHED TELEGRAM: "${preview}"`,
+                targetId: messageReference.id,
+                createdAt: serverTimestamp(),
+            });
             await batch.commit();
-
-            if (
-              !isMountedRef.current
-            ) {
-              return;
+            if (!isCurrent()) {
+                return;
             }
-
-            setTelegramText(
-              '',
-            );
-
-            showAccessibleAlert(
-              'Signal Transmitted',
-              'Your Telegram was dispatched to the Explorer network.',
-            );
-          } catch (
-            error: unknown
-          ) {
-            logDevelopmentWarning(
-              '[Treasi Social] Telegram transmission failed:',
-              error,
-            );
-
-            showAccessibleAlert(
-              'Transmission Failed',
-              'The Telegram could not be dispatched. Check your connection and try again.',
-            );
-          } finally {
-            if (
-              isMountedRef.current
-            ) {
-              setIsTransmitting(
-                false,
-              );
+            setTelegramText('');
+            showAccessibleAlert('Signal Transmitted', 'Your Telegram was dispatched to the Explorer network.');
+        }
+        catch (error: unknown) {
+            logDevelopmentWarning('[Treasi Social] Telegram transmission failed:', error);
+            if (isCurrent()) showAccessibleAlert('Transmission Failed', 'The Telegram could not be dispatched. Check your connection and try again.');
+        }
+        finally {
+            telegramLockRef.current = false;
+            if (isCurrent()) {
+                setIsTransmitting(false);
             }
-          }
-        },
-        [
-          currentUserId,
-          currentUsername,
-          isTransmitting,
-          telegramText,
-        ],
-      );
-
-    /* ---------------------------------------------------------------------- */
-    /* Retry                                                                  */
-    /* ---------------------------------------------------------------------- */
-
-    const handleRetry =
-      useCallback(
-        (): void => {
-          setExplorerError(
-            null,
-          );
-
-          setTelegramError(
-            null,
-          );
-
-          setProfileError(
-            null,
-          );
-
-          setFriendshipErrors({
-            outgoing:
-              null,
-            incoming:
-              null,
-          });
-
-          setLoadingExplorers(
-            true,
-          );
-
-          setLoadingDispatches(
-            true,
-          );
-
-          setRetryKey(
-            (
-              current,
-            ) =>
-              current + 1,
-          );
-
-          AccessibilityInfo
-            .announceForAccessibility(
-              'Retrying Explorer network synchronisation.',
-            );
-        },
-        [],
-      );
-
-    /* ---------------------------------------------------------------------- */
-    /* UI status                                                              */
-    /* ---------------------------------------------------------------------- */
-
-    const friendshipErrorText =
-      useMemo(
-        () =>
-          [
-            friendshipErrors
-              .incoming,
-            friendshipErrors
-              .outgoing,
-          ]
-            .filter(
-              (
-                value,
-              ): value is string =>
-                Boolean(
-                  value,
-                ),
-            )
-            .join(
-              ' · ',
-            ),
-        [
-          friendshipErrors,
-        ],
-      );
-
-    const networkErrorText =
-      useMemo(
-        () =>
-          [
-            profileError,
-            explorerError,
-            friendshipErrorText,
-            locationPublishError,
-          ]
-            .filter(
-              (
-                value,
-              ): value is string =>
-                Boolean(
-                  value,
-                ),
-            )
-            .join(
-              ' · ',
-            ),
-        [
-          explorerError,
-          friendshipErrorText,
-          locationPublishError,
-          profileError,
-        ],
-      );
-
-    const locationStatusText =
-      useMemo(
-        () => {
-          switch (
-            locationStatus
-          ) {
+        }
+    }, [
+        isCurrent,
+        currentUserId,
+        currentUsername,
+        isTransmitting,
+        telegramText,
+    ]);
+    const handleRetry = useCallback((): void => {
+        setExplorerError(null);
+        setTelegramError(null);
+        setProfileError(null);
+        setFriendshipErrors({
+            outgoing: null,
+            incoming: null,
+        });
+        setLoadingExplorers(true);
+        setLoadingDispatches(true);
+        setRetryKey((current) => current + 1);
+        AccessibilityInfo
+            .announceForAccessibility('Retrying Explorer network synchronisation.');
+    }, []);
+    const friendshipErrorText = useMemo(() => [
+        friendshipErrors
+            .incoming,
+        friendshipErrors
+            .outgoing,
+    ]
+        .filter((value): value is string => Boolean(value))
+        .join(' · '), [
+        friendshipErrors,
+    ]);
+    const networkErrorText = useMemo(() => [
+        profileError,
+        explorerError,
+        friendshipErrorText,
+        locationPublishError,
+    ]
+        .filter((value): value is string => Boolean(value))
+        .join(' · '), [
+        explorerError,
+        friendshipErrorText,
+        locationPublishError,
+        profileError,
+    ]);
+    const locationStatusText = useMemo(() => {
+        switch (locationStatus) {
             case 'CHECKING':
-              return 'CHECKING LOCAL POSITION';
-
+                return 'CHECKING LOCAL POSITION';
             case 'READY':
-              return currentCoordinates
-                ? 'LOCAL POSITION READY'
-                : 'POSITION UNAVAILABLE';
-
+                return currentCoordinates
+                    ? 'LOCAL POSITION READY'
+                    : 'POSITION UNAVAILABLE';
             case 'PERMISSION_REQUIRED':
-              return 'LOCATION ACCESS NOT YET ENABLED';
-
+                return 'LOCATION ACCESS NOT YET ENABLED';
             case 'DENIED':
-              return 'LOCATION ACCESS DENIED';
-
+                return 'LOCATION ACCESS DENIED';
             case 'SERVICES_OFF':
-              return 'DEVICE LOCATION SERVICES OFF';
-
+                return 'DEVICE LOCATION SERVICES OFF';
             default:
-              return Platform.OS ===
-                'web'
-                ? 'BROWSER LOCATION UNAVAILABLE'
-                : 'DEVICE LOCATION UNAVAILABLE';
-          }
-        },
-        [
-          currentCoordinates,
-          locationStatus,
-        ],
-      );
-
-    const locationActionLabel =
-      useMemo(
-        () => {
-          if (
-            locationStatus ===
-            'CHECKING'
-          ) {
+                return Platform.OS ===
+                    'web'
+                    ? 'BROWSER LOCATION UNAVAILABLE'
+                    : 'DEVICE LOCATION UNAVAILABLE';
+        }
+    }, [
+        currentCoordinates,
+        locationStatus,
+    ]);
+    const locationActionLabel = useMemo(() => {
+        if (locationStatus ===
+            'CHECKING') {
             return 'CHECKING';
-          }
-
-          if (
-            Platform.OS !==
-              'web' &&
-            (
-              locationServicesEnabled ===
+        }
+        if (Platform.OS !==
+            'web' &&
+            (locationServicesEnabled ===
                 false ||
-              (
-                locationPermissionStatus ===
-                  Location
-                    .PermissionStatus
-                    .DENIED &&
-                !canAskLocationAgain
-              )
-            )
-          ) {
+                (locationPermissionStatus ===
+                    Location
+                        .PermissionStatus
+                        .DENIED &&
+                    !canAskLocationAgain))) {
             return 'OPEN SETTINGS';
-          }
-
-          if (
+        }
+        if (locationStatus ===
+            'PERMISSION_REQUIRED' ||
             locationStatus ===
-              'PERMISSION_REQUIRED' ||
-            locationStatus ===
-              'DENIED'
-          ) {
+                'DENIED') {
             return 'ENABLE LOCATION';
-          }
-
-          return 'REFRESH POSITION';
-        },
-        [
-          canAskLocationAgain,
-          locationPermissionStatus,
-          locationServicesEnabled,
-          locationStatus,
-        ],
-      );
-
-    const telemetrySharingEnabled =
-      currentUserProfile
+        }
+        return 'REFRESH POSITION';
+    }, [
+        canAskLocationAgain,
+        locationPermissionStatus,
+        locationServicesEnabled,
+        locationStatus,
+    ]);
+    const telemetrySharingEnabled = currentUserProfile
         ?.telemetryEnabled ===
-      true;
-
-    /* ---------------------------------------------------------------------- */
-    /* Render Explorer action                                                 */
-    /* ---------------------------------------------------------------------- */
-
-    const renderExplorerActions =
+        true;
+const renderExplorerActions =
       (
         item:
           NearbyExplorer,
@@ -3332,8 +980,7 @@ export const SocialScreen:
         const friendMeta =
           item.friendMeta;
 
-        const isActing =
-          actionUid ===
+        const isActing = Boolean(actionUid) || actionUid ===
             item.uid ||
           actionUid ===
             friendMeta
@@ -3732,7 +1379,7 @@ export const SocialScreen:
             {/* 60% — TELEGRAM FIELD DESK                                    */}
             {/* ============================================================= */}
 
-            <View
+            <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={{ flexGrow: 1 }}
               style={
                 styles.telegramPanel
               }
@@ -4032,9 +1679,7 @@ export const SocialScreen:
                 </View>
 
                 {telegramError ? (
-                  <View
-                    accessible
-                    accessibilityRole="alert"
+                  <View accessibilityRole="alert"
                     style={
                       styles.lightErrorCard
                     }
@@ -4180,7 +1825,7 @@ export const SocialScreen:
                               accessible={
                                 false
                               }
-                              importantForAccessibility="no-hide-descendants"
+
                               style={
                                 styles.dispatchCardHeader
                               }
@@ -4268,7 +1913,7 @@ export const SocialScreen:
                   TELEGRAMS ARE ASYNCHRONOUS PUBLIC FIELD SIGNALS
                 </Text>
               </View>
-            </View>
+            </ScrollView>
 
             {/* ============================================================= */}
             {/* 40% — EXPLORER NETWORK                                       */}
@@ -4385,9 +2030,7 @@ export const SocialScreen:
                 {/* ---------------------------------------------------------- */}
 
                 {networkErrorText ? (
-                  <View
-                    accessible
-                    accessibilityRole="alert"
+                  <View accessibilityRole="alert"
                     accessibilityLiveRegion="polite"
                     style={
                       styles.darkErrorCard
@@ -4472,9 +2115,7 @@ export const SocialScreen:
                   </Text>
                 </View>
 
-                <View
-                  accessible
-                  accessibilityLabel={`${locationStatusText}. Location sharing is ${
+                <View accessibilityLabel={`${locationStatusText}. Location sharing is ${
                     telemetrySharingEnabled
                       ? 'enabled'
                       : 'disabled'
@@ -4487,7 +2128,7 @@ export const SocialScreen:
                     accessible={
                       false
                     }
-                    importantForAccessibility="no-hide-descendants"
+
                     style={
                       styles.locationStatusRow
                     }
@@ -4754,8 +2395,7 @@ export const SocialScreen:
                             ?.initial ??
                           'E';
 
-                        const isActing =
-                          actionUid ===
+                        const isActing = Boolean(actionUid) || actionUid ===
                           item.friendship
                             .docId;
 
@@ -4765,7 +2405,6 @@ export const SocialScreen:
                               item.friendship
                                 .docId
                             }
-                            accessible
                             accessibilityLabel={`${name}. Pending friend request.`}
                             style={
                               styles.requestCard
@@ -4775,7 +2414,7 @@ export const SocialScreen:
                               accessible={
                                 false
                               }
-                              importantForAccessibility="no-hide-descendants"
+
                               style={
                                 styles.explorerIdentity
                               }
@@ -5000,8 +2639,7 @@ export const SocialScreen:
                             ?.initial ??
                           'E';
 
-                        const isActing =
-                          actionUid ===
+                        const isActing = Boolean(actionUid) || actionUid ===
                           item.friendship
                             .docId;
 
@@ -5011,7 +2649,6 @@ export const SocialScreen:
                               item.friendship
                                 .docId
                             }
-                            accessible
                             accessibilityLabel={`${name}. Active Explorer link.`}
                             style={
                               styles.activeLinkCard
@@ -5021,7 +2658,7 @@ export const SocialScreen:
                               accessible={
                                 false
                               }
-                              importantForAccessibility="no-hide-descendants"
+
                               style={
                                 styles.explorerIdentity
                               }
@@ -5238,7 +2875,6 @@ export const SocialScreen:
                           key={
                             item.uid
                           }
-                          accessible
                           accessibilityLabel={`${item.name}. Approximately ${item.distanceFormatted} away.${
                             item.friendMeta
                               ? ` Link status ${item.friendMeta.status}.`
@@ -5252,7 +2888,7 @@ export const SocialScreen:
                             accessible={
                               false
                             }
-                            importantForAccessibility="no-hide-descendants"
+
                             style={
                               styles.explorerIdentity
                             }
@@ -5304,12 +2940,7 @@ export const SocialScreen:
                             </View>
                           </View>
 
-                          <View
-                            accessible={
-                              false
-                            }
-                            importantForAccessibility="no-hide-descendants"
-                          >
+                          <View>
                             {renderExplorerActions(
                               item,
                             )}
@@ -5361,8 +2992,7 @@ export const SocialScreen:
           {/* Callsign search modal                                           */}
           {/* ================================================================ */}
 
-          <Modal
-            visible={
+          <Modal supportedOrientations={['portrait', 'portrait-upside-down', 'landscape-left', 'landscape-right']} visible={
               friendModalVisible
             }
             transparent
@@ -5415,8 +3045,7 @@ export const SocialScreen:
                 }}
               />
 
-              <View
-                accessible
+              <ScrollView keyboardShouldPersistTaps="handled" bounces={false}
                 accessibilityViewIsModal
                 accessibilityLabel="Link a new Explorer"
                 onAccessibilityEscape={() => {
@@ -5509,9 +3138,7 @@ export const SocialScreen:
                 </View>
 
                 {searchError ? (
-                  <View
-                    accessible
-                    accessibilityRole="alert"
+                  <View accessibilityRole="alert"
                     accessibilityLiveRegion="assertive"
                     style={
                       styles.searchErrorCard
@@ -5539,7 +3166,7 @@ export const SocialScreen:
                 </Text>
 
                 <TextInput
-                  accessibilityLabelledBy="social-callsign-label"
+                  accessibilityLabel="Explorer callsign"
                   accessibilityHint="Enter the exact Explorer callsign."
                   autoCapitalize="characters"
                   autoCorrect={
@@ -5663,7 +3290,7 @@ export const SocialScreen:
                       : 'SEND LINK REQUEST'}
                   </Text>
                 </Pressable>
-              </View>
+              </ScrollView>
             </KeyboardAvoidingView>
           </Modal>
         </View>
