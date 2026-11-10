@@ -36,7 +36,7 @@ interface LocationState {
   locationServicesEnabled: boolean | null;
 }
 
-export function useDashboardLocation() {
+export function useDashboardLocation(batterySaver = false) {
   const [state, setState] = useState<LocationState>({
     userLocation: null,
     locationFixSource: 'none',
@@ -144,7 +144,9 @@ export function useDashboardLocation() {
 
       let registrationExpired = false;
       const registration = Location.watchPositionAsync({
-        accuracy: Location.Accuracy.Balanced, timeInterval: 5_000, distanceInterval: 15,
+        accuracy: Location.Accuracy.Balanced,
+        timeInterval: batterySaver ? 15_000 : 5_000,
+        distanceInterval: batterySaver ? 50 : 15,
       }, applyLiveFix, () => {
         if (!isCurrent()) return;
         setState(current => ({ ...current, isInitialisingLocation: false,
@@ -169,7 +171,7 @@ export function useDashboardLocation() {
         locationError: error instanceof Error && error.message.startsWith('LOCATION REQUIRES')
           ? error.message : 'LOCATION COULD NOT BE STARTED. CHECK SETTINGS AND RETRY LOCATION.' }));
     }
-  }, [stop]);
+  }, [batterySaver, stop]);
 
   useEffect(() => {
     mounted.current = true;

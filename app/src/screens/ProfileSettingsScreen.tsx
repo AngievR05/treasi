@@ -31,7 +31,6 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 
 import {
-  onAuthStateChanged,
   collection,
   deleteField,
   doc,
@@ -46,6 +45,7 @@ import {
 } from 'firebase/firestore';
 
 import {
+  onAuthStateChanged,
   reload,
   sendEmailVerification,
   sendPasswordResetEmail,
@@ -222,7 +222,7 @@ const SETTINGS:
       'battery-half-outline',
 
     description:
-      'Save the reduced-power preference for location and sensor features that support battery optimisation.',
+      'Reduce Dashboard location update frequency. Hunt keeps its normal GPS precision.',
   },
 
   {
@@ -236,7 +236,7 @@ const SETTINGS:
       'moon-outline',
 
     description:
-      'Save your night-interface preference for screens that support alternate field presentation.',
+      'Use a dimmer palette in Profile and Settings.',
   },
 ];
 
@@ -297,6 +297,15 @@ const announce = (
 };
 
 // Shows matching visual and accessibility feedback.
+const showSettingsAlert = (title: string, message: string, buttons?: AlertButton[]): void => {
+  if (Platform.OS === 'web' && typeof window !== 'undefined') {
+    const action = buttons?.find(button => button.style !== 'cancel');
+    if (action) {
+      if (window.confirm(`${title}\n\n${message}`)) action.onPress?.();
+    } else window.alert(`${title}\n\n${message}`);
+  } else Alert.alert(title, message, buttons);
+};
+
 const showAccessibleAlert = (
   title: string,
   message: string,
@@ -305,7 +314,7 @@ const showAccessibleAlert = (
     `${title}. ${message}`,
   );
 
-  Alert.alert(
+  showSettingsAlert(
     title,
     message,
   );
@@ -488,6 +497,8 @@ const getFriendlyError = (
 /* Profile Settings Screen                                                    */
 /* -------------------------------------------------------------------------- */
 
+type FieldColours = Record<keyof typeof COLOURS, string>;
+
 export const ProfileSettingsScreen:
   React.FC<
     ProfileSettingsScreenProps
@@ -519,18 +530,35 @@ export const ProfileSettingsScreen:
       NavigationTab =
       'PROFILE';
 
-    const currentFirebaseUser =
-      auth.currentUser;
+    const [currentFirebaseUser, setCurrentFirebaseUser] = useState(auth.currentUser);
+    useEffect(() => onAuthStateChanged(auth, setCurrentFirebaseUser), []);
 
     const currentUid =
       currentFirebaseUser
-        ?.uid ??
-      parentUserData
         ?.uid ??
       '';
 
     const isMountedRef =
       useRef(true);
+    const editingIdentityRef = useRef(false);
+    const pendingActionsRef = useRef(new Set<string>());
+    const sessionRef = useRef({ uid: currentUid, version: 0 });
+    if (sessionRef.current.uid !== currentUid) {
+      sessionRef.current = { uid: currentUid, version: sessionRef.current.version + 1 };
+      pendingActionsRef.current = new Set();
+    }
+    const currentSession = sessionRef.current;
+    const beginAction = useCallback((key: string) => {
+      const uid = auth.currentUser?.uid;
+      const session = currentSession;
+      const locks = pendingActionsRef.current;
+      if (!uid || uid !== currentUid || sessionRef.current !== session || uid !== session.uid || locks.has(key)) return null;
+      locks.add(key);
+      return {
+        isCurrent: () => isMountedRef.current && auth.currentUser?.uid === uid && sessionRef.current === session,
+        release: () => locks.delete(key),
+      };
+    }, [currentSession, currentUid]);
 
     /* ---------------------------------------------------------------------- */
     /* Profile state                                                          */
@@ -711,6 +739,30 @@ export const ProfileSettingsScreen:
     ] =
       useState(false);
 
+    const colours = useMemo<Record<keyof typeof COLOURS, string>>(() => nightModeEnabled ? {
+      ...COLOURS,
+      ink900: '#F6EFD9', ink700: '#D8CFBA', bronze700: '#C3A06A', bronze600: '#B08D57',
+      rust800: '#F0A584', rust700: '#F0A584', rust600: '#D88461', success700: '#BFE3C0',
+    } : COLOURS, [nightModeEnabled]);
+    const styles = useMemo(() => {
+      const base = createStyles(COLOURS);
+      if (!nightModeEnabled) return base;
+      return Object.fromEntries(Object.entries(base).map(([name, style]) => [name,
+        Object.fromEntries(Object.entries(style).map(([property, value]) => {
+          if (property === 'backgroundColor') {
+            if (value === COLOURS.parchment100) return [property, '#243126'];
+            if (value === COLOURS.parchment200) return [property, '#1C261D'];
+            if (value === '#F1D3C9') return [property, '#422A24'];
+          }
+          if (property === 'color' || property === 'borderColor') {
+            const token = (Object.keys(COLOURS) as (keyof typeof COLOURS)[]).find(key => COLOURS[key] === value);
+            if (token) return [property, colours[token]];
+          }
+          return [property, value];
+        })),
+      ])) as typeof base;
+    }, [colours, nightModeEnabled]);
+
     /* ---------------------------------------------------------------------- */
     /* Onboarding / accessibility                                             */
     /* ---------------------------------------------------------------------- */
@@ -726,6 +778,19 @@ export const ProfileSettingsScreen:
       setReduceMotionEnabled,
     ] =
       useState(false);
+
+    useEffect(() => {
+      editingIdentityRef.current = false;
+      setLocalUserData(null);
+      setCallsign(''); setOriginalCallsign(''); setCallsignError(null);
+      setIsEditingIdentity(false); setVerificationSent(false);
+      setOnboardingVisible(false); setDeleteModalVisible(false); setDeleteConfirmation('');
+      setIsSavingSetting(null); setIsClearingLocation(false); setIsResettingPreferences(false);
+      setIsSavingIdentity(false); setIsSigningOut(false); setIsSendingVerification(false);
+      setIsSendingPasswordReset(false); setIsDeletingAccount(false);
+      setHapticFeedbackEnabled(true); setMotionSensitivityEnabled(false);
+      setBatteryOptimizerEnabled(false); setNightModeEnabled(false); setTelemetryEnabled(false);
+    }, [currentUid]);
 
     /* ---------------------------------------------------------------------- */
     /* Lifecycle                                                              */
@@ -807,13 +872,11 @@ export const ProfileSettingsScreen:
             ) ||
             'EXPLORER';
 
-          setCallsign(
-            username,
-          );
-
-          setOriginalCallsign(
-            username,
-          );
+          if (!editingIdentityRef.current) {
+            setCallsign(username);
+            setOriginalCallsign(username);
+          }
+          if (pendingActionsRef.current.has('preferences')) return;
 
           setHapticFeedbackEnabled(
             data.hapticFeedbackEnabled !==
@@ -849,7 +912,7 @@ export const ProfileSettingsScreen:
 
     useEffect(() => {
       if (
-        parentUserData
+        parentUserData && parentUserData.uid === currentUid
       ) {
         applyProfileData(
           parentUserData,
@@ -858,6 +921,7 @@ export const ProfileSettingsScreen:
     }, [
       applyProfileData,
       parentUserData,
+      currentUid,
     ]);
 
     /* ---------------------------------------------------------------------- */
@@ -865,6 +929,7 @@ export const ProfileSettingsScreen:
     /* ---------------------------------------------------------------------- */
 
     useEffect(() => {
+      let active = true;
       const user =
         auth.currentUser;
 
@@ -910,6 +975,7 @@ export const ProfileSettingsScreen:
           (
             snapshot,
           ) => {
+            if (!active) return;
             if (
               !snapshot.exists()
             ) {
@@ -917,6 +983,7 @@ export const ProfileSettingsScreen:
                 'Your Firebase sign-in is active, but the Treasi profile document could not be found.',
               );
 
+              setLocalUserData(null);
               setIsLoadingProfile(
                 false,
               );
@@ -941,6 +1008,7 @@ export const ProfileSettingsScreen:
           (
             error,
           ) => {
+            if (!active) return;
             logDevelopmentWarning(
               '[Treasi Profile] Profile subscription failed:',
               error,
@@ -959,10 +1027,10 @@ export const ProfileSettingsScreen:
           },
         );
 
-      return unsubscribe;
+      return () => { active = false; unsubscribe(); };
     }, [
       applyProfileData,
-      parentUserData,
+      currentUid,
       retryKey,
     ]);
 
@@ -976,11 +1044,9 @@ export const ProfileSettingsScreen:
           fields:
             Partial<UserDocument>,
         ): Promise<void> => {
+          const session = sessionRef.current;
           const uid =
-            auth.currentUser
-              ?.uid ??
-            localUserData
-              ?.uid;
+            auth.currentUser?.uid;
 
           if (!uid) {
             throw new Error(
@@ -1010,6 +1076,7 @@ export const ProfileSettingsScreen:
             );
           }
 
+          if (!isMountedRef.current || auth.currentUser?.uid !== uid || sessionRef.current !== session) return;
           setLocalUserData(
             (
               previous,
@@ -1126,70 +1193,74 @@ export const ProfileSettingsScreen:
           nextValue:
             boolean,
         ): Promise<void> => {
-          if (
-            isSavingSetting
-          ) {
-            return;
-          }
+          const action = beginAction('preferences');
+          if (!action) return;
+          try {
+            if (
+              isSavingSetting
+            ) {
+              return;
+            }
 
-          const previousValue =
-            getSettingValue(
+            const previousValue =
+              getSettingValue(
+                key,
+              );
+
+            setSettingValue(
+              key,
+              nextValue,
+            );
+
+            setIsSavingSetting(
               key,
             );
 
-          setSettingValue(
-            key,
-            nextValue,
-          );
-
-          setIsSavingSetting(
-            key,
-          );
-
-          try {
-            /*
-             * Disabling location sharing also deletes the previously stored
-             * shared position immediately instead of leaving stale telemetry.
-             */
-            if (
-              key ===
+            try {
+              /*
+               * Disabling location sharing also deletes the previously stored
+               * shared position immediately instead of leaving stale telemetry.
+               */
+              if (
+                key ===
                 'telemetryEnabled' &&
-              !nextValue
-            ) {
-              const uid =
-                auth.currentUser
-                  ?.uid;
+                !nextValue
+              ) {
+                const uid =
+                  auth.currentUser
+                    ?.uid;
 
-              if (!uid) {
-                throw new Error(
-                  'No authenticated Explorer session was found.',
+                if (!uid) {
+                  throw new Error(
+                    'No authenticated Explorer session was found.',
+                  );
+                }
+
+                await updateDoc(
+                  doc(
+                    db,
+                    'users',
+                    uid,
+                  ),
+                  {
+                    telemetryEnabled:
+                      false,
+
+                    location:
+                      deleteField(),
+
+                    updatedAt:
+                      serverTimestamp(),
+                  },
                 );
-              }
+                if (!action.isCurrent()) return;
 
-              await updateDoc(
-                doc(
-                  db,
-                  'users',
-                  uid,
-                ),
-                {
-                  telemetryEnabled:
-                    false,
-
-                  location:
-                    deleteField(),
-
-                  updatedAt:
-                    serverTimestamp(),
-                },
-              );
-
-              setLocalUserData(
-                (
-                  previous,
-                ) =>
-                  previous
-                    ? {
+                setLocalUserData(
+                  (
+                    previous,
+                  ) =>
+                    previous
+                      ? {
                         ...previous,
 
                         telemetryEnabled:
@@ -1198,45 +1269,50 @@ export const ProfileSettingsScreen:
                         location:
                           null,
                       }
-                    : previous,
-              );
+                      : previous,
+                );
 
-              return;
-            }
+                return;
+              }
 
-            await persistUserFields(
-              {
-                [key]:
-                  nextValue,
-              } as
+              await persistUserFields(
+                {
+                  [key]:
+                    nextValue,
+                } as
                 Partial<UserDocument>,
-            );
-          } catch (
-            error: unknown
-          ) {
-            setSettingValue(
-              key,
-              previousValue,
-            );
-
-            showAccessibleAlert(
-              'Preference Error',
-              getFriendlyError(
-                error,
-                'Treasi could not save this preference.',
-              ),
-            );
-          } finally {
-            if (
-              isMountedRef.current
-            ) {
-              setIsSavingSetting(
-                null,
               );
+              if (!action.isCurrent()) return;
+            } catch (
+            error: unknown
+            ) {
+              if (!action.isCurrent()) return;
+              setSettingValue(
+                key,
+                previousValue,
+              );
+
+              showAccessibleAlert(
+                'Preference Error',
+                getFriendlyError(
+                  error,
+                  'Treasi could not save this preference.',
+                ),
+              );
+            } finally {
+              if (
+                action.isCurrent()
+              ) {
+                setIsSavingSetting(
+                  null,
+                );
+              }
             }
-          }
+
+          } finally { action.release(); }
         },
         [
+          beginAction,
           getSettingValue,
           isSavingSetting,
           persistUserFields,
@@ -1251,49 +1327,53 @@ export const ProfileSettingsScreen:
     const handleClearSharedLocation =
       useCallback(
         async (): Promise<void> => {
-          const user =
-            auth.currentUser;
-
-          if (
-            !user ||
-            isClearingLocation
-          ) {
-            return;
-          }
-
-          setIsClearingLocation(
-            true,
-          );
-
+          const action = beginAction('preferences');
+          if (!action) return;
           try {
-            await updateDoc(
-              doc(
-                db,
-                'users',
-                user.uid,
-              ),
-              {
-                telemetryEnabled:
-                  false,
+            const user =
+              auth.currentUser;
 
-                location:
-                  deleteField(),
+            if (
+              !user ||
+              isClearingLocation
+            ) {
+              return;
+            }
 
-                updatedAt:
-                  serverTimestamp(),
-              },
+            setIsClearingLocation(
+              true,
             );
 
-            setTelemetryEnabled(
-              false,
-            );
+            try {
+              await updateDoc(
+                doc(
+                  db,
+                  'users',
+                  user.uid,
+                ),
+                {
+                  telemetryEnabled:
+                    false,
 
-            setLocalUserData(
-              (
-                previous,
-              ) =>
-                previous
-                  ? {
+                  location:
+                    deleteField(),
+
+                  updatedAt:
+                    serverTimestamp(),
+                },
+              );
+              if (!action.isCurrent()) return;
+
+              setTelemetryEnabled(
+                false,
+              );
+
+              setLocalUserData(
+                (
+                  previous,
+                ) =>
+                  previous
+                    ? {
                       ...previous,
 
                       telemetryEnabled:
@@ -1302,34 +1382,38 @@ export const ProfileSettingsScreen:
                       location:
                         null,
                     }
-                  : previous,
-            );
-
-            showAccessibleAlert(
-              'Location Sharing Cleared',
-              'Your saved shared position was removed and Location Sharing was switched off.',
-            );
-          } catch (
-            error: unknown
-          ) {
-            showAccessibleAlert(
-              'Location Error',
-              getFriendlyError(
-                error,
-                'Treasi could not clear your shared position.',
-              ),
-            );
-          } finally {
-            if (
-              isMountedRef.current
-            ) {
-              setIsClearingLocation(
-                false,
+                    : previous,
               );
+
+              showAccessibleAlert(
+                'Location Sharing Cleared',
+                'Your saved shared position was removed and Location Sharing was switched off.',
+              );
+            } catch (
+            error: unknown
+            ) {
+              if (!action.isCurrent()) return;
+              showAccessibleAlert(
+                'Location Error',
+                getFriendlyError(
+                  error,
+                  'Treasi could not clear your shared position.',
+                ),
+              );
+            } finally {
+              if (
+                action.isCurrent()
+              ) {
+                setIsClearingLocation(
+                  false,
+                );
+              }
             }
-          }
+
+          } finally { action.release(); }
         },
         [
+          beginAction,
           isClearingLocation,
         ],
       );
@@ -1341,64 +1425,68 @@ export const ProfileSettingsScreen:
     const executePreferenceReset =
       useCallback(
         async (): Promise<void> => {
-          const user =
-            auth.currentUser;
-
-          if (
-            !user ||
-            isResettingPreferences
-          ) {
-            return;
-          }
-
-          setIsResettingPreferences(
-            true,
-          );
-
+          const action = beginAction('preferences');
+          if (!action) return;
           try {
-            await updateDoc(
-              doc(
-                db,
-                'users',
-                user.uid,
-              ),
-              {
-                ...DEFAULT_SETTINGS,
+            const user =
+              auth.currentUser;
 
-                location:
-                  deleteField(),
+            if (
+              !user ||
+              isResettingPreferences
+            ) {
+              return;
+            }
 
-                updatedAt:
-                  serverTimestamp(),
-              },
-            );
-
-            setHapticFeedbackEnabled(
+            setIsResettingPreferences(
               true,
             );
 
-            setMotionSensitivityEnabled(
-              false,
-            );
+            try {
+              await updateDoc(
+                doc(
+                  db,
+                  'users',
+                  user.uid,
+                ),
+                {
+                  ...DEFAULT_SETTINGS,
 
-            setBatteryOptimizerEnabled(
-              false,
-            );
+                  location:
+                    deleteField(),
 
-            setNightModeEnabled(
-              false,
-            );
+                  updatedAt:
+                    serverTimestamp(),
+                },
+              );
+              if (!action.isCurrent()) return;
 
-            setTelemetryEnabled(
-              false,
-            );
+              setHapticFeedbackEnabled(
+                true,
+              );
 
-            setLocalUserData(
-              (
-                previous,
-              ) =>
-                previous
-                  ? {
+              setMotionSensitivityEnabled(
+                false,
+              );
+
+              setBatteryOptimizerEnabled(
+                false,
+              );
+
+              setNightModeEnabled(
+                false,
+              );
+
+              setTelemetryEnabled(
+                false,
+              );
+
+              setLocalUserData(
+                (
+                  previous,
+                ) =>
+                  previous
+                    ? {
                       ...previous,
 
                       ...DEFAULT_SETTINGS,
@@ -1406,34 +1494,38 @@ export const ProfileSettingsScreen:
                       location:
                         null,
                     }
-                  : previous,
-            );
-
-            showAccessibleAlert(
-              'Preferences Restored',
-              'Treasi preferences were restored to their default values. Stored location sharing was also cleared.',
-            );
-          } catch (
-            error: unknown
-          ) {
-            showAccessibleAlert(
-              'Reset Failed',
-              getFriendlyError(
-                error,
-                'Treasi could not restore your default preferences.',
-              ),
-            );
-          } finally {
-            if (
-              isMountedRef.current
-            ) {
-              setIsResettingPreferences(
-                false,
+                    : previous,
               );
+
+              showAccessibleAlert(
+                'Preferences Restored',
+                'Treasi preferences were restored to their default values. Stored location sharing was also cleared.',
+              );
+            } catch (
+            error: unknown
+            ) {
+              if (!action.isCurrent()) return;
+              showAccessibleAlert(
+                'Reset Failed',
+                getFriendlyError(
+                  error,
+                  'Treasi could not restore your default preferences.',
+                ),
+              );
+            } finally {
+              if (
+                action.isCurrent()
+              ) {
+                setIsResettingPreferences(
+                  false,
+                );
+              }
             }
-          }
+
+          } finally { action.release(); }
         },
         [
+          beginAction,
           isResettingPreferences,
         ],
       );
@@ -1447,7 +1539,7 @@ export const ProfileSettingsScreen:
             return;
           }
 
-          Alert.alert(
+          showSettingsAlert(
             'RESET FIELD PREFERENCES',
             'Restore feedback, motion, battery, display and location-sharing preferences to their Treasi defaults?',
             [
@@ -1509,6 +1601,7 @@ export const ProfileSettingsScreen:
             null,
           );
 
+          editingIdentityRef.current = true;
           setIsEditingIdentity(
             true,
           );
@@ -1530,6 +1623,7 @@ export const ProfileSettingsScreen:
             null,
           );
 
+          editingIdentityRef.current = false;
           setIsEditingIdentity(
             false,
           );
@@ -1542,283 +1636,292 @@ export const ProfileSettingsScreen:
     const handleSaveIdentity =
       useCallback(
         async (): Promise<void> => {
-          const user:
-            User | null =
-            auth.currentUser;
+          const action = beginAction('identity');
+          if (!action) return;
+          try {
+            const user:
+              User | null =
+              auth.currentUser;
 
-          if (
-            !user ||
-            isSavingIdentity
-          ) {
-            return;
-          }
+            if (
+              !user ||
+              isSavingIdentity
+            ) {
+              return;
+            }
 
-          const nextCallsign =
-            normaliseCallsign(
-              callsign,
-            );
+            const nextCallsign =
+              normaliseCallsign(
+                callsign,
+              );
 
-          if (
-            !CALLSIGN_REGEX.test(
-              nextCallsign,
-            )
-          ) {
-            const message =
-              'Use 3–24 characters. The first character must be a letter or number; only letters, numbers, underscores and hyphens are allowed.';
+            if (
+              !CALLSIGN_REGEX.test(
+                nextCallsign,
+              )
+            ) {
+              const message =
+                'Use 3–24 characters. The first character must be a letter or number; only letters, numbers, underscores and hyphens are allowed.';
 
-            setCallsignError(
-              message,
-            );
+              setCallsignError(
+                message,
+              );
 
-            announce(
-              `Invalid callsign. ${message}`,
-            );
+              announce(
+                `Invalid callsign. ${message}`,
+              );
 
-            return;
-          }
+              return;
+            }
 
-          if (
-            nextCallsign ===
-            normaliseCallsign(
-              originalCallsign,
-            )
-          ) {
-            setCallsign(
-              nextCallsign,
+            if (
+              nextCallsign ===
+              normaliseCallsign(
+                originalCallsign,
+              )
+            ) {
+              setCallsign(
+                nextCallsign,
+              );
+
+              setCallsignError(
+                null,
+              );
+
+              editingIdentityRef.current = false;
+              setIsEditingIdentity(
+                false,
+              );
+
+              return;
+            }
+
+            setIsSavingIdentity(
+              true,
             );
 
             setCallsignError(
               null,
             );
 
-            setIsEditingIdentity(
-              false,
-            );
-
-            return;
-          }
-
-          setIsSavingIdentity(
-            true,
-          );
-
-          setCallsignError(
-            null,
-          );
-
-          const previousAuthName =
-            user.displayName;
-
-          try {
-            /*
-             * The current schema does not provide an atomic callsign
-             * reservation collection, so this is a best-effort duplicate
-             * check rather than a strict uniqueness guarantee.
-             */
-            const duplicateQuery =
-              query(
-                collection(
-                  db,
-                  'users',
-                ),
-
-                where(
-                  'username',
-                  '==',
-                  nextCallsign,
-                ),
-
-                limit(2),
-              );
-
-            const duplicateSnapshot =
-              await getDocs(
-                duplicateQuery,
-              );
-
-            const duplicateExists =
-              duplicateSnapshot
-                .docs
-                .some(
-                  (
-                    snapshotDocument,
-                  ) =>
-                    snapshotDocument.id !==
-                    user.uid,
-                );
-
-            if (
-              duplicateExists
-            ) {
-              setCallsignError(
-                'That Explorer callsign is already in use.',
-              );
-
-              announce(
-                'That Explorer callsign is already in use.',
-              );
-
-              return;
-            }
-
-            await updateProfile(
-              user,
-              {
-                displayName:
-                  nextCallsign,
-              },
-            );
+            const previousAuthName =
+              user.displayName;
 
             try {
-              const userReference =
-                doc(
-                  db,
-                  'users',
-                  user.uid,
-                );
-
-              const activityReference =
-                doc(
+              /*
+               * The current schema does not provide an atomic callsign
+               * reservation collection, so this is a best-effort duplicate
+               * check rather than a strict uniqueness guarantee.
+               */
+              const duplicateQuery =
+                query(
                   collection(
                     db,
-                    'activity_feed',
+                    'users',
                   ),
-                );
 
-              const batch =
-                writeBatch(
-                  db,
-                );
-
-              batch.update(
-                userReference,
-                {
-                  username:
+                  where(
+                    'username',
+                    '==',
                     nextCallsign,
+                  ),
 
-                  updatedAt:
-                    serverTimestamp(),
-                },
-              );
-
-              batch.set(
-                activityReference,
-                {
-                  activityId:
-                    activityReference.id,
-
-                  userId:
-                    user.uid,
-
-                  username:
-                    nextCallsign,
-
-                  type:
-                    'PROFILE_UPDATED',
-
-                  message:
-                    'UPDATED EXPLORER CALLSIGN',
-
-                  targetId:
-                    user.uid,
-
-                  createdAt:
-                    serverTimestamp(),
-                },
-              );
-
-              await batch.commit();
-            } catch (
-              firestoreError:
-                unknown
-            ) {
-              /*
-               * Roll back the Auth display name when Firestore could not
-               * complete the corresponding identity update.
-               */
-              try {
-                await updateProfile(
-                  user,
-                  {
-                    displayName:
-                      previousAuthName,
-                  },
+                  limit(2),
                 );
-              } catch (
-                rollbackError:
-                  unknown
+
+              const duplicateSnapshot =
+                await getDocs(
+                  duplicateQuery,
+                );
+
+              if (!action.isCurrent()) return;
+              const duplicateExists =
+                duplicateSnapshot
+                  .docs
+                  .some(
+                    (
+                      snapshotDocument,
+                    ) =>
+                      snapshotDocument.id !==
+                      user.uid,
+                  );
+
+              if (
+                duplicateExists
               ) {
-                logDevelopmentWarning(
-                  '[Treasi Profile] Auth display-name rollback failed:',
-                  rollbackError,
+                setCallsignError(
+                  'That Explorer callsign is already in use.',
                 );
+
+                announce(
+                  'That Explorer callsign is already in use.',
+                );
+
+                return;
               }
 
-              throw firestoreError;
-            }
+              await updateProfile(
+                user,
+                {
+                  displayName:
+                    nextCallsign,
+                },
+              );
 
-            if (
-              !isMountedRef.current
-            ) {
-              return;
-            }
+              try {
+                const userReference =
+                  doc(
+                    db,
+                    'users',
+                    user.uid,
+                  );
 
-            setCallsign(
-              nextCallsign,
-            );
+                const activityReference =
+                  doc(
+                    collection(
+                      db,
+                      'activity_feed',
+                    ),
+                  );
 
-            setOriginalCallsign(
-              nextCallsign,
-            );
+                const batch =
+                  writeBatch(
+                    db,
+                  );
 
-            setLocalUserData(
-              (
-                previous,
-              ) =>
-                previous
-                  ? {
+                batch.update(
+                  userReference,
+                  {
+                    username:
+                      nextCallsign,
+
+                    updatedAt:
+                      serverTimestamp(),
+                  },
+                );
+
+                batch.set(
+                  activityReference,
+                  {
+                    activityId:
+                      activityReference.id,
+
+                    userId:
+                      user.uid,
+
+                    username:
+                      nextCallsign,
+
+                    type:
+                      'PROFILE_UPDATED',
+
+                    message:
+                      'UPDATED EXPLORER CALLSIGN',
+
+                    targetId:
+                      user.uid,
+
+                    createdAt:
+                      serverTimestamp(),
+                  },
+                );
+
+                await batch.commit();
+              } catch (
+              firestoreError:
+                unknown
+              ) {
+                /*
+                 * Roll back the Auth display name when Firestore could not
+                 * complete the corresponding identity update.
+                 */
+                try {
+                  await updateProfile(
+                    user,
+                    {
+                      displayName:
+                        previousAuthName,
+                    },
+                  );
+                } catch (
+                rollbackError:
+                  unknown
+                ) {
+                  logDevelopmentWarning(
+                    '[Treasi Profile] Auth display-name rollback failed:',
+                    rollbackError,
+                  );
+                }
+
+                throw firestoreError;
+              }
+
+              if (
+                !action.isCurrent()
+              ) {
+                return;
+              }
+
+              setCallsign(
+                nextCallsign,
+              );
+
+              setOriginalCallsign(
+                nextCallsign,
+              );
+
+              setLocalUserData(
+                (
+                  previous,
+                ) =>
+                  previous
+                    ? {
                       ...previous,
 
                       username:
                         nextCallsign,
                     }
-                  : previous,
-            );
-
-            setIsEditingIdentity(
-              false,
-            );
-
-            announce(
-              `Explorer callsign updated to ${nextCallsign}.`,
-            );
-          } catch (
-            error: unknown
-          ) {
-            const message =
-              getFriendlyError(
-                error,
-                'Treasi could not update your Explorer identity.',
+                    : previous,
               );
 
-            setCallsignError(
-              message,
-            );
-
-            announce(
-              `Profile update failed. ${message}`,
-            );
-          } finally {
-            if (
-              isMountedRef.current
-            ) {
-              setIsSavingIdentity(
+              setIsEditingIdentity(
                 false,
               );
+
+              announce(
+                `Explorer callsign updated to ${nextCallsign}.`,
+              );
+            } catch (
+            error: unknown
+            ) {
+              if (!action.isCurrent()) return;
+              const message =
+                getFriendlyError(
+                  error,
+                  'Treasi could not update your Explorer identity.',
+                );
+
+              setCallsignError(
+                message,
+              );
+
+              announce(
+                `Profile update failed. ${message}`,
+              );
+            } finally {
+              if (
+                action.isCurrent()
+              ) {
+                setIsSavingIdentity(
+                  false,
+                );
+              }
             }
-          }
+
+          } finally { action.release(); }
         },
         [
+          beginAction,
           callsign,
           isSavingIdentity,
           originalCallsign,
@@ -1832,61 +1935,69 @@ export const ProfileSettingsScreen:
     const handleSendVerification =
       useCallback(
         async (): Promise<void> => {
-          const user =
-            auth.currentUser;
-
-          if (
-            !user ||
-            user.emailVerified ||
-            isSendingVerification
-          ) {
-            return;
-          }
-
-          setIsSendingVerification(
-            true,
-          );
-
+          const action = beginAction('verification');
+          if (!action) return;
           try {
-            await sendEmailVerification(
-              user,
-            );
+            const user =
+              auth.currentUser;
 
             if (
-              !isMountedRef.current
+              !user ||
+              user.emailVerified ||
+              isSendingVerification
             ) {
               return;
             }
 
-            setVerificationSent(
+            setIsSendingVerification(
               true,
             );
 
-            showAccessibleAlert(
-              'Verification Sent',
-              'Firebase sent a verification link to your account email address.',
-            );
-          } catch (
-            error: unknown
-          ) {
-            showAccessibleAlert(
-              'Verification Failed',
-              getFriendlyError(
-                error,
-                'Treasi could not send the verification email.',
-              ),
-            );
-          } finally {
-            if (
-              isMountedRef.current
-            ) {
-              setIsSendingVerification(
-                false,
+            try {
+              await sendEmailVerification(
+                user,
               );
+              if (!action.isCurrent()) return;
+
+              if (
+                !action.isCurrent()
+              ) {
+                return;
+              }
+
+              setVerificationSent(
+                true,
+              );
+
+              showAccessibleAlert(
+                'Verification Sent',
+                'Firebase sent a verification link to your account email address.',
+              );
+            } catch (
+            error: unknown
+            ) {
+              if (!action.isCurrent()) return;
+              showAccessibleAlert(
+                'Verification Failed',
+                getFriendlyError(
+                  error,
+                  'Treasi could not send the verification email.',
+                ),
+              );
+            } finally {
+              if (
+                action.isCurrent()
+              ) {
+                setIsSendingVerification(
+                  false,
+                );
+              }
             }
-          }
+
+          } finally { action.release(); }
         },
         [
+          beginAction,
           isSendingVerification,
         ],
       );
@@ -1898,54 +2009,62 @@ export const ProfileSettingsScreen:
     const handlePasswordReset =
       useCallback(
         async (): Promise<void> => {
-          const email =
-            auth.currentUser
-              ?.email ??
-            localUserData
-              ?.email;
-
-          if (
-            !email ||
-            isSendingPasswordReset
-          ) {
-            return;
-          }
-
-          setIsSendingPasswordReset(
-            true,
-          );
-
+          const action = beginAction('password');
+          if (!action) return;
           try {
-            await sendPasswordResetEmail(
-              auth,
-              email,
+            const email =
+              auth.currentUser
+                ?.email ??
+              localUserData
+                ?.email;
+
+            if (
+              !email ||
+              isSendingPasswordReset
+            ) {
+              return;
+            }
+
+            setIsSendingPasswordReset(
+              true,
             );
 
-            showAccessibleAlert(
-              'Reset Email Sent',
-              'Firebase sent password-reset instructions to your account email address.',
-            );
-          } catch (
-            error: unknown
-          ) {
-            showAccessibleAlert(
-              'Password Reset Failed',
-              getFriendlyError(
-                error,
-                'Treasi could not send the password-reset email.',
-              ),
-            );
-          } finally {
-            if (
-              isMountedRef.current
-            ) {
-              setIsSendingPasswordReset(
-                false,
+            try {
+              await sendPasswordResetEmail(
+                auth,
+                email,
               );
+              if (!action.isCurrent()) return;
+
+              showAccessibleAlert(
+                'Reset Email Sent',
+                'Firebase sent password-reset instructions to your account email address.',
+              );
+            } catch (
+            error: unknown
+            ) {
+              if (!action.isCurrent()) return;
+              showAccessibleAlert(
+                'Password Reset Failed',
+                getFriendlyError(
+                  error,
+                  'Treasi could not send the password-reset email.',
+                ),
+              );
+            } finally {
+              if (
+                action.isCurrent()
+              ) {
+                setIsSendingPasswordReset(
+                  false,
+                );
+              }
             }
-          }
+
+          } finally { action.release(); }
         },
         [
+          beginAction,
           isSendingPasswordReset,
           localUserData
             ?.email,
@@ -1959,58 +2078,66 @@ export const ProfileSettingsScreen:
     const handleRefreshProfile =
       useCallback(
         async (): Promise<void> => {
-          setProfileError(
-            null,
-          );
-
-          setIsLoadingProfile(
-            true,
-          );
-
+          const action = beginAction('refresh');
+          if (!action) return;
           try {
-            const user =
-              auth.currentUser;
+            setProfileError(
+              null,
+            );
 
-            if (user) {
-              await reload(
-                user,
-              );
+            setIsLoadingProfile(
+              true,
+            );
 
-              setAuthRefreshKey(
+            try {
+              const user =
+                auth.currentUser;
+
+              if (user) {
+                await reload(
+                  user,
+                );
+                if (!action.isCurrent()) return;
+
+                setAuthRefreshKey(
+                  (
+                    current,
+                  ) =>
+                    current + 1,
+                );
+              }
+
+              setRetryKey(
                 (
                   current,
                 ) =>
                   current + 1,
               );
+
+              announce(
+                'Explorer profile refresh started.',
+              );
+            } catch (
+            error: unknown
+            ) {
+              if (!action.isCurrent()) return;
+              setIsLoadingProfile(
+                false,
+              );
+
+              showAccessibleAlert(
+                'Refresh Failed',
+                getFriendlyError(
+                  error,
+                  'Treasi could not refresh the account status.',
+                ),
+              );
             }
 
-            setRetryKey(
-              (
-                current,
-              ) =>
-                current + 1,
-            );
-
-            announce(
-              'Explorer profile refresh started.',
-            );
-          } catch (
-            error: unknown
-          ) {
-            setIsLoadingProfile(
-              false,
-            );
-
-            showAccessibleAlert(
-              'Refresh Failed',
-              getFriendlyError(
-                error,
-                'Treasi could not refresh the account status.',
-              ),
-            );
-          }
+          } finally { action.release(); }
         },
-        [],
+        [
+          beginAction,],
       );
 
     /* ---------------------------------------------------------------------- */
@@ -2052,6 +2179,18 @@ export const ProfileSettingsScreen:
         [],
       );
 
+    useEffect(() => {
+      let resumeRequired = AppState.currentState === 'background';
+      const subscription = AppState.addEventListener('change', nextState => {
+        if (nextState === 'background') resumeRequired = true;
+        if (nextState === 'active' && resumeRequired) {
+          resumeRequired = false;
+          void handleRefreshProfile();
+        }
+      });
+      return () => subscription.remove();
+    }, [handleRefreshProfile]);
+
     /* ---------------------------------------------------------------------- */
     /* Sign out                                                               */
     /* ---------------------------------------------------------------------- */
@@ -2059,43 +2198,51 @@ export const ProfileSettingsScreen:
     const executeSignOut =
       useCallback(
         async (): Promise<void> => {
-          if (
-            isSigningOut
-          ) {
-            return;
-          }
-
-          setIsSigningOut(
-            true,
-          );
-
+          const action = beginAction('signOut');
+          if (!action) return;
           try {
-            await signOut(
-              auth,
+            if (
+              isSigningOut
+            ) {
+              return;
+            }
+
+            setIsSigningOut(
+              true,
             );
 
-            onSignOut();
-          } catch (
-            error: unknown
-          ) {
-            showAccessibleAlert(
-              'Sign Out Failed',
-              getFriendlyError(
-                error,
-                'Treasi could not end the current Explorer session.',
-              ),
-            );
-          } finally {
-            if (
-              isMountedRef.current
-            ) {
-              setIsSigningOut(
-                false,
+            try {
+              await signOut(
+                auth,
               );
+              if (!isMountedRef.current || (auth.currentUser && !action.isCurrent())) return;
+
+              onSignOut();
+            } catch (
+            error: unknown
+            ) {
+              if (!action.isCurrent()) return;
+              showAccessibleAlert(
+                'Sign Out Failed',
+                getFriendlyError(
+                  error,
+                  'Treasi could not end the current Explorer session.',
+                ),
+              );
+            } finally {
+              if (
+                action.isCurrent()
+              ) {
+                setIsSigningOut(
+                  false,
+                );
+              }
             }
-          }
+
+          } finally { action.release(); }
         },
         [
+          beginAction,
           isSigningOut,
           onSignOut,
         ],
@@ -2163,84 +2310,91 @@ export const ProfileSettingsScreen:
     const handleConfirmDeleteAccount =
       useCallback(
         async (): Promise<void> => {
-          if (
-            deleteConfirmation
-              .trim()
-              .toUpperCase() !==
-            'DELETE'
-          ) {
-            return;
-          }
-
-          /*
-           * Do not delete Firebase Auth alone. Doing so would leave the
-           * Firestore profile and email behind because the current rules
-           * intentionally prohibit client deletion of user documents.
-           */
-          if (
-            !onDeleteAccount
-          ) {
-            showAccessibleAlert(
-              'Secure Deletion Not Configured',
-              'Treasi will not delete only your Firebase sign-in while leaving your profile data behind. A secure server-side account deletion handler must be configured before this operation can be enabled.',
-            );
-
-            return;
-          }
-
-          if (
-            isDeletingAccount
-          ) {
-            return;
-          }
-
-          setIsDeletingAccount(
-            true,
-          );
-
+          const action = beginAction('delete');
+          if (!action) return;
           try {
-            await onDeleteAccount();
-
             if (
-              !isMountedRef.current
+              deleteConfirmation
+                .trim()
+                .toUpperCase() !==
+              'DELETE'
             ) {
               return;
             }
 
-            setDeleteModalVisible(
-              false,
-            );
-
-            setDeleteConfirmation(
-              '',
-            );
-
             /*
-             * The parent navigator may safely redirect after the secure
-             * deletion handler has removed the account.
+             * Do not delete Firebase Auth alone. Doing so would leave the
+             * Firestore profile and email behind because the current rules
+             * intentionally prohibit client deletion of user documents.
              */
-            onSignOut();
-          } catch (
-            error: unknown
-          ) {
-            showAccessibleAlert(
-              'Account Deletion Failed',
-              getFriendlyError(
-                error,
-                'Treasi could not securely delete the account.',
-              ),
-            );
-          } finally {
             if (
-              isMountedRef.current
+              !onDeleteAccount
             ) {
-              setIsDeletingAccount(
+              showAccessibleAlert(
+                'Secure Deletion Not Configured',
+                'Treasi will not delete only your Firebase sign-in while leaving your profile data behind. A secure server-side account deletion handler must be configured before this operation can be enabled.',
+              );
+
+              return;
+            }
+
+            if (
+              isDeletingAccount
+            ) {
+              return;
+            }
+
+            setIsDeletingAccount(
+              true,
+            );
+
+            try {
+              await onDeleteAccount();
+
+              if (
+                !isMountedRef.current || (auth.currentUser && !action.isCurrent())
+              ) {
+                return;
+              }
+
+              setDeleteModalVisible(
                 false,
               );
+
+              setDeleteConfirmation(
+                '',
+              );
+
+              /*
+               * The parent navigator may safely redirect after the secure
+               * deletion handler has removed the account.
+               */
+              onSignOut();
+            } catch (
+            error: unknown
+            ) {
+              if (!action.isCurrent()) return;
+              showAccessibleAlert(
+                'Account Deletion Failed',
+                getFriendlyError(
+                  error,
+                  'Treasi could not securely delete the account.',
+                ),
+              );
+            } finally {
+              if (
+                action.isCurrent()
+              ) {
+                setIsDeletingAccount(
+                  false,
+                );
+              }
             }
-          }
+
+          } finally { action.release(); }
         },
         [
+          beginAction,
           deleteConfirmation,
           isDeletingAccount,
           onDeleteAccount,
@@ -2345,6 +2499,7 @@ export const ProfileSettingsScreen:
         isLoadingUserData &&
         !localUserData
       );
+    const isPreferenceBusy = Boolean(isSavingSetting || isResettingPreferences || isClearingLocation);
 
     /* ---------------------------------------------------------------------- */
     /* Setting renderer                                                       */
@@ -2369,7 +2524,6 @@ export const ProfileSettingsScreen:
             key={
               config.key
             }
-            accessible
             accessibilityLabel={`${config.label}. ${
               value
                 ? 'On'
@@ -2399,7 +2553,7 @@ export const ProfileSettingsScreen:
                   }
                   size={18}
                   color={
-                    COLOURS.rust700
+                    colours.rust700
                   }
                 />
               </View>
@@ -2443,11 +2597,12 @@ export const ProfileSettingsScreen:
                 <ActivityIndicator
                   size="small"
                   color={
-                    COLOURS.rust700
+                    colours.rust700
                   }
                 />
               ) : (
                 <Switch
+                  accessibilityHint={config.description}
                   accessibilityLabel={
                     config.label
                   }
@@ -2458,20 +2613,20 @@ export const ProfileSettingsScreen:
 
                     disabled:
                       Boolean(
-                        isSavingSetting,
+                        isPreferenceBusy,
                       ),
                   }}
                   disabled={
                     Boolean(
-                      isSavingSetting,
+                      isPreferenceBusy,
                     )
                   }
                   ios_backgroundColor={
-                    COLOURS.bronze600
+                    colours.bronze600
                   }
                   thumbColor={
                     value
-                      ? COLOURS.parchment100
+                      ? colours.parchment100
                       : '#7A6B58'
                   }
                   trackColor={{
@@ -2479,7 +2634,7 @@ export const ProfileSettingsScreen:
                       '#B7A98C',
 
                     true:
-                      COLOURS.rust700,
+                      colours.rust700,
                   }}
                   value={
                     value
@@ -2520,7 +2675,7 @@ export const ProfileSettingsScreen:
           <ActivityIndicator
             size="large"
             color={
-              COLOURS.bronze400
+              colours.bronze400
             }
           />
 
@@ -2550,7 +2705,7 @@ export const ProfileSettingsScreen:
             name="person-circle-outline"
             size={52}
             color={
-              COLOURS.bronze400
+              colours.bronze400
             }
           />
 
@@ -2583,7 +2738,7 @@ export const ProfileSettingsScreen:
                 name="arrow-back"
                 size={17}
                 color={
-                  COLOURS.parchment100
+                  colours.parchment100
                 }
               />
 
@@ -2657,6 +2812,7 @@ export const ProfileSettingsScreen:
           {/* ================================================================ */}
 
           <View
+            testID="settings-panel"
             style={[
               styles.settingsPanel,
 
@@ -2683,7 +2839,7 @@ export const ProfileSettingsScreen:
                   name="options-outline"
                   size={20}
                   color={
-                    COLOURS.rust700
+                    colours.rust700
                   }
                 />
 
@@ -2723,7 +2879,7 @@ export const ProfileSettingsScreen:
                 <ActivityIndicator
                   size="small"
                   color={
-                    COLOURS.rust700
+                    colours.rust700
                   }
                 />
               ) : null}
@@ -2731,7 +2887,6 @@ export const ProfileSettingsScreen:
 
             {profileError ? (
               <View
-                accessible
                 accessibilityRole="alert"
                 accessibilityLiveRegion="polite"
                 style={
@@ -2742,7 +2897,7 @@ export const ProfileSettingsScreen:
                   name="warning-outline"
                   size={18}
                   color={
-                    COLOURS.rust800
+                    colours.rust800
                   }
                 />
 
@@ -2814,7 +2969,7 @@ export const ProfileSettingsScreen:
                   name="pulse-outline"
                   size={16}
                   color={
-                    COLOURS.rust700
+                    colours.rust700
                   }
                 />
 
@@ -2854,7 +3009,7 @@ export const ProfileSettingsScreen:
                   name="shield-checkmark-outline"
                   size={16}
                   color={
-                    COLOURS.rust700
+                    colours.rust700
                   }
                 />
 
@@ -2873,21 +3028,13 @@ export const ProfileSettingsScreen:
               )}
 
               <View
-                accessible
-                accessibilityLabel={`Saved shared position: ${
-                  hasSharedLocation
-                    ? 'present'
-                    : 'none'
-                }.`}
                 style={
                   styles.statusStrip
                 }
               >
                 <View
-                  accessible={
-                    false
-                  }
-                  importantForAccessibility="no-hide-descendants"
+                  accessible
+                  accessibilityLabel={`Saved shared position: ${hasSharedLocation ? 'present' : 'none'}.`}
                   style={
                     styles.statusStripIdentity
                   }
@@ -2901,8 +3048,8 @@ export const ProfileSettingsScreen:
                     size={16}
                     color={
                       hasSharedLocation
-                        ? COLOURS.success700
-                        : COLOURS.bronze700
+                        ? colours.success700
+                        : colours.bronze700
                     }
                   />
 
@@ -2937,7 +3084,7 @@ export const ProfileSettingsScreen:
                   accessibilityHint="Turns Location Sharing off and removes the stored position from your Firestore profile."
                   accessibilityState={{
                     disabled:
-                      isClearingLocation ||
+                      isPreferenceBusy ||
                       (
                         !hasSharedLocation &&
                         !telemetryEnabled
@@ -2947,7 +3094,7 @@ export const ProfileSettingsScreen:
                       isClearingLocation,
                   }}
                   disabled={
-                    isClearingLocation ||
+                    isPreferenceBusy ||
                     (
                       !hasSharedLocation &&
                       !telemetryEnabled
@@ -2979,7 +3126,7 @@ export const ProfileSettingsScreen:
                     <ActivityIndicator
                       size="small"
                       color={
-                        COLOURS.ink900
+                        colours.ink900
                       }
                     />
                   ) : (
@@ -2988,7 +3135,7 @@ export const ProfileSettingsScreen:
                         name="trash-bin-outline"
                         size={16}
                         color={
-                          COLOURS.ink900
+                          colours.ink900
                         }
                       />
 
@@ -3017,7 +3164,7 @@ export const ProfileSettingsScreen:
                   name="information-circle-outline"
                   size={17}
                   color={
-                    COLOURS.bronze700
+                    colours.bronze700
                   }
                 />
 
@@ -3051,7 +3198,7 @@ export const ProfileSettingsScreen:
                   name="contrast-outline"
                   size={16}
                   color={
-                    COLOURS.rust700
+                    colours.rust700
                   }
                 />
 
@@ -3102,7 +3249,7 @@ export const ProfileSettingsScreen:
                       name="accessibility-outline"
                       size={18}
                       color={
-                        COLOURS.rust700
+                        colours.rust700
                       }
                     />
                   </View>
@@ -3172,7 +3319,7 @@ export const ProfileSettingsScreen:
                   name="map-outline"
                   size={16}
                   color={
-                    COLOURS.rust700
+                    colours.rust700
                   }
                 />
 
@@ -3213,7 +3360,7 @@ export const ProfileSettingsScreen:
                     name="book-outline"
                     size={21}
                     color={
-                      COLOURS.rust700
+                      colours.rust700
                     }
                   />
 
@@ -3246,7 +3393,7 @@ export const ProfileSettingsScreen:
                     name="chevron-forward"
                     size={17}
                     color={
-                      COLOURS.bronze700
+                      colours.bronze700
                     }
                   />
                 </Pressable>
@@ -3271,7 +3418,7 @@ export const ProfileSettingsScreen:
                     name="settings-outline"
                     size={21}
                     color={
-                      COLOURS.rust700
+                      colours.rust700
                     }
                   />
 
@@ -3304,7 +3451,7 @@ export const ProfileSettingsScreen:
                     name="open-outline"
                     size={17}
                     color={
-                      COLOURS.bronze700
+                      colours.bronze700
                     }
                   />
                 </Pressable>
@@ -3333,7 +3480,7 @@ export const ProfileSettingsScreen:
                     <ActivityIndicator
                       size="small"
                       color={
-                        COLOURS.rust700
+                        colours.rust700
                       }
                     />
                   ) : (
@@ -3341,7 +3488,7 @@ export const ProfileSettingsScreen:
                       name="refresh-outline"
                       size={21}
                       color={
-                        COLOURS.rust700
+                        colours.rust700
                       }
                     />
                   )}
@@ -3375,7 +3522,7 @@ export const ProfileSettingsScreen:
                     name="chevron-forward"
                     size={17}
                     color={
-                      COLOURS.bronze700
+                      colours.bronze700
                     }
                   />
                 </Pressable>
@@ -3399,7 +3546,7 @@ export const ProfileSettingsScreen:
                   name="key-outline"
                   size={16}
                   color={
-                    COLOURS.rust700
+                    colours.rust700
                   }
                 />
 
@@ -3453,7 +3600,7 @@ export const ProfileSettingsScreen:
                       <ActivityIndicator
                         size="small"
                         color={
-                          COLOURS.rust700
+                          colours.rust700
                         }
                       />
                     ) : (
@@ -3461,7 +3608,7 @@ export const ProfileSettingsScreen:
                         name="mail-unread-outline"
                         size={21}
                         color={
-                          COLOURS.rust700
+                          colours.rust700
                         }
                       />
                     )}
@@ -3497,7 +3644,7 @@ export const ProfileSettingsScreen:
                       name="chevron-forward"
                       size={17}
                       color={
-                        COLOURS.bronze700
+                        colours.bronze700
                       }
                     />
                   </Pressable>
@@ -3514,7 +3661,7 @@ export const ProfileSettingsScreen:
                       name="checkmark-circle"
                       size={21}
                       color={
-                        COLOURS.success700
+                        colours.success700
                       }
                     />
 
@@ -3577,7 +3724,7 @@ export const ProfileSettingsScreen:
                     <ActivityIndicator
                       size="small"
                       color={
-                        COLOURS.rust700
+                        colours.rust700
                       }
                     />
                   ) : (
@@ -3585,7 +3732,7 @@ export const ProfileSettingsScreen:
                       name="key-outline"
                       size={21}
                       color={
-                        COLOURS.rust700
+                        colours.rust700
                       }
                     />
                   )}
@@ -3619,7 +3766,7 @@ export const ProfileSettingsScreen:
                     name="chevron-forward"
                     size={17}
                     color={
-                      COLOURS.bronze700
+                      colours.bronze700
                     }
                   />
                 </Pressable>
@@ -3643,7 +3790,7 @@ export const ProfileSettingsScreen:
                   name="refresh-circle-outline"
                   size={16}
                   color={
-                    COLOURS.rust700
+                    colours.rust700
                   }
                 />
 
@@ -3663,13 +3810,13 @@ export const ProfileSettingsScreen:
                 accessibilityHint="Resets saved feedback, motion, battery, display and location-sharing preferences."
                 accessibilityState={{
                   disabled:
-                    isResettingPreferences,
+                    isPreferenceBusy,
 
                   busy:
                     isResettingPreferences,
                 }}
                 disabled={
-                  isResettingPreferences
+                  isPreferenceBusy
                 }
                 onPress={
                   handleResetPreferences
@@ -3691,7 +3838,7 @@ export const ProfileSettingsScreen:
                   <ActivityIndicator
                     size="small"
                     color={
-                      COLOURS.ink900
+                      colours.ink900
                     }
                   />
                 ) : (
@@ -3699,7 +3846,7 @@ export const ProfileSettingsScreen:
                     name="refresh-outline"
                     size={18}
                     color={
-                      COLOURS.ink900
+                      colours.ink900
                     }
                   />
                 )}
@@ -3748,7 +3895,7 @@ export const ProfileSettingsScreen:
                   name="warning-outline"
                   size={16}
                   color={
-                    COLOURS.rust800
+                    colours.rust800
                   }
                 />
 
@@ -3802,7 +3949,7 @@ export const ProfileSettingsScreen:
                     <ActivityIndicator
                       size="small"
                       color={
-                        COLOURS.parchment100
+                        colours.parchment100
                       }
                     />
                   ) : (
@@ -3810,7 +3957,7 @@ export const ProfileSettingsScreen:
                       name="log-out-outline"
                       size={18}
                       color={
-                        COLOURS.parchment100
+                        colours.parchment100
                       }
                     />
                   )}
@@ -3846,7 +3993,7 @@ export const ProfileSettingsScreen:
                     name="trash-outline"
                     size={18}
                     color={
-                      COLOURS.rust800
+                      colours.rust800
                     }
                   />
 
@@ -3922,7 +4069,7 @@ export const ProfileSettingsScreen:
                     name="person-circle-outline"
                     size={19}
                     color={
-                      COLOURS.bronze400
+                      colours.bronze400
                     }
                   />
 
@@ -3970,7 +4117,7 @@ export const ProfileSettingsScreen:
                       name="arrow-back"
                       size={18}
                       color={
-                        COLOURS.bronze400
+                        colours.bronze400
                       }
                     />
                   </Pressable>
@@ -4004,7 +4151,7 @@ export const ProfileSettingsScreen:
                       name="person"
                       size={31}
                       color={
-                        COLOURS.parchment100
+                        colours.parchment100
                       }
                     />
                   </View>
@@ -4039,10 +4186,10 @@ export const ProfileSettingsScreen:
                           }
                           placeholder="EXPLORER_CALLSIGN"
                           placeholderTextColor={
-                            COLOURS.bronze700
+                            colours.bronze700
                           }
                           selectionColor={
-                            COLOURS.rust700
+                            colours.rust700
                           }
                           value={
                             callsign
@@ -4136,7 +4283,7 @@ export const ProfileSettingsScreen:
                         name="shield-checkmark"
                         size={13}
                         color={
-                          COLOURS.parchment100
+                          colours.parchment100
                         }
                       />
 
@@ -4192,7 +4339,7 @@ export const ProfileSettingsScreen:
                         <ActivityIndicator
                           size="small"
                           color={
-                            COLOURS.parchment100
+                            colours.parchment100
                           }
                         />
                       ) : (
@@ -4200,7 +4347,7 @@ export const ProfileSettingsScreen:
                           name="checkmark"
                           size={17}
                           color={
-                            COLOURS.parchment100
+                            colours.parchment100
                           }
                         />
                       )}
@@ -4270,7 +4417,7 @@ export const ProfileSettingsScreen:
                       name="create-outline"
                       size={16}
                       color={
-                        COLOURS.ink900
+                        colours.ink900
                       }
                     />
 
@@ -4342,7 +4489,7 @@ export const ProfileSettingsScreen:
                   name="document-text-outline"
                   size={15}
                   color={
-                    COLOURS.bronze400
+                    colours.bronze400
                   }
                 />
 
@@ -4567,7 +4714,7 @@ export const ProfileSettingsScreen:
                   name="checkmark-done-circle-outline"
                   size={15}
                   color={
-                    COLOURS.bronze400
+                    colours.bronze400
                   }
                 />
 
@@ -4602,8 +4749,8 @@ export const ProfileSettingsScreen:
                     size={18}
                     color={
                       hapticFeedbackEnabled
-                        ? COLOURS.success300
-                        : COLOURS.bronze400
+                        ? colours.success300
+                        : colours.bronze400
                     }
                   />
 
@@ -4641,7 +4788,7 @@ export const ProfileSettingsScreen:
                     name="pulse-outline"
                     size={18}
                     color={
-                      COLOURS.bronze400
+                      colours.bronze400
                     }
                   />
 
@@ -4678,7 +4825,7 @@ export const ProfileSettingsScreen:
                   name="information-circle-outline"
                   size={16}
                   color={
-                    COLOURS.bronze400
+                    colours.bronze400
                   }
                 />
 
@@ -4715,6 +4862,8 @@ export const ProfileSettingsScreen:
         {/* ================================================================== */}
 
         <Modal
+          testID="settings-onboarding-modal"
+          supportedOrientations={['portrait', 'portrait-upside-down', 'landscape-left', 'landscape-right']}
           visible={
             onboardingVisible
           }
@@ -4783,7 +4932,7 @@ export const ProfileSettingsScreen:
                 name="close"
                 size={22}
                 color={
-                  COLOURS.parchment100
+                  colours.parchment100
                 }
               />
 
@@ -4803,6 +4952,8 @@ export const ProfileSettingsScreen:
         {/* ================================================================== */}
 
         <Modal
+          testID="settings-delete-modal"
+          supportedOrientations={['portrait', 'portrait-upside-down', 'landscape-left', 'landscape-right']}
           visible={
             deleteModalVisible
           }
@@ -4834,8 +4985,10 @@ export const ProfileSettingsScreen:
                 : undefined
             }
           >
+            <ScrollView style={styles.deleteModalScroll}
+              contentContainerStyle={styles.deleteModalScrollContent}
+              keyboardShouldPersistTaps="handled">
             <View
-              accessible
               accessibilityViewIsModal
               accessibilityLabel="Delete Treasi account confirmation"
               onAccessibilityEscape={() => {
@@ -4860,7 +5013,7 @@ export const ProfileSettingsScreen:
                   name="warning-outline"
                   size={30}
                   color={
-                    COLOURS.danger300
+                    colours.danger300
                   }
                 />
               </View>
@@ -4897,7 +5050,7 @@ export const ProfileSettingsScreen:
                     name="lock-closed-outline"
                     size={18}
                     color={
-                      COLOURS.warning300
+                      colours.warning300
                     }
                   />
 
@@ -4935,10 +5088,10 @@ export const ProfileSettingsScreen:
                     maxLength={6}
                     placeholder="DELETE"
                     placeholderTextColor={
-                      COLOURS.bronze700
+                      colours.bronze700
                     }
                     selectionColor={
-                      COLOURS.danger300
+                      colours.danger300
                     }
                     value={
                       deleteConfirmation
@@ -5060,7 +5213,7 @@ export const ProfileSettingsScreen:
                     <ActivityIndicator
                       size="small"
                       color={
-                        COLOURS.parchment100
+                        colours.parchment100
                       }
                     />
                   ) : (
@@ -5068,7 +5221,7 @@ export const ProfileSettingsScreen:
                       name="trash-outline"
                       size={17}
                       color={
-                        COLOURS.parchment100
+                        colours.parchment100
                       }
                     />
                   )}
@@ -5085,6 +5238,7 @@ export const ProfileSettingsScreen:
                 </Pressable>
               </View>
             </View>
+            </ScrollView>
           </KeyboardAvoidingView>
         </Modal>
       </KeyboardAvoidingView>
@@ -5097,7 +5251,7 @@ export default ProfileSettingsScreen;
 /* Styles                                                                     */
 /* -------------------------------------------------------------------------- */
 
-const styles =
+const createStyles = (COLOURS: FieldColours) =>
   StyleSheet.create({
     screen: {
       flex: 1,
@@ -6310,6 +6464,16 @@ const styles =
       padding: 20,
       backgroundColor:
         COLOURS.overlay,
+    },
+
+    deleteModalScroll: {
+      width: '100%',
+      flexShrink: 1,
+    },
+
+    deleteModalScrollContent: {
+      alignItems: 'center',
+      paddingVertical: 8,
     },
 
     deleteModalCard: {

@@ -7,7 +7,8 @@ module.exports = {
   preset: 'jest-expo/ios',
   testMatch: ['**/__tests__/**/*.test.js'],
   clearMocks: true,
-  testTimeout: 15_000,
+  // The first iOS render loads native mocks lazily, which can be slow on Windows.
+  testTimeout: 30_000,
   moduleNameMapper: {
     '^expo-modules-core$': require.resolve('expo-modules-core', { paths: [require.resolve('expo/package.json')] }),
     '^expo-modules-core/(.*)$': `${expoModulesCore}/$1`,

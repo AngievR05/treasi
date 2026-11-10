@@ -495,7 +495,7 @@ export const DashboardScreen:
 
     const { userLocation, locationFixSource, isInitialisingLocation, locationError,
       locationPermissionStatus, canAskLocationAgain, locationServicesEnabled,
-      startLocationService } = useDashboardLocation();
+      startLocationService } = useDashboardLocation(userData?.batteryOptimizerEnabled === true);
 
     /* ---------------------------------------------------------------------- */
     /* Map state                                                             */

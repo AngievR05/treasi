@@ -180,3 +180,16 @@ test('freshness rejects invalid coordinates, future timestamps, and stale fixes'
   expect(isFreshLocation(position(60_000))).toBe(false);
   expect(isFreshLocation({ ...position(), coords: { latitude: 95, longitude: 0 } })).toBe(false);
 });
+
+test('Battery Saver reduces Dashboard update frequency without lowering GPS accuracy', async () => {
+  const { rerender } = await renderHook(saver => useDashboardLocation(saver), { initialProps: false });
+  expect(Location.watchPositionAsync).toHaveBeenLastCalledWith(
+    expect.objectContaining({ accuracy: Location.Accuracy.Balanced, distanceInterval: 15, timeInterval: 5_000 }),
+    expect.any(Function), expect.any(Function),
+  );
+  await rerender(true);
+  expect(Location.watchPositionAsync).toHaveBeenLastCalledWith(
+    expect.objectContaining({ accuracy: Location.Accuracy.Balanced, distanceInterval: 50, timeInterval: 15_000 }),
+    expect.any(Function), expect.any(Function),
+  );
+});
