@@ -345,6 +345,15 @@ export const FieldMap =
     href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
     crossorigin=""
   />
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@6.17.0/dist/maplibre-gl.css" />
+  <script type="importmap">
+    {
+      "imports": {
+        "leaflet": "https://unpkg.com/leaflet@1.9.4/dist/leaflet-src.esm.js",
+        "maplibre-gl": "https://unpkg.com/maplibre-gl@6.17.0/dist/maplibre-gl.mjs"
+      }
+    }
+  </script>
 
   <style>
     :root {
@@ -381,12 +390,39 @@ export const FieldMap =
         ${COLOURS.parchment};
     }
 
-    .leaflet-tile-pane {
+    .maplibregl-canvas {
       filter:
         sepia(.24)
         saturate(.72)
         contrast(.94)
         brightness(1.02);
+    }
+
+    #basemap-status {
+      position: absolute;
+      z-index: 1000;
+      bottom: 56px;
+      left: 50%;
+      transform: translateX(-50%);
+      max-width: calc(100% - 32px);
+      padding: 8px 12px;
+      background: ${COLOURS.parchmentLight};
+      color: ${COLOURS.ink};
+      border: 1px solid ${COLOURS.brass};
+      border-radius: 5px;
+      font-size: 12px;
+      text-align: center;
+    }
+
+    #retry-basemap {
+      color: ${COLOURS.ink};
+      background: ${COLOURS.parchmentLight};
+      border: 1px solid ${COLOURS.brass};
+      border-radius: 3px;
+      margin: 6px 0 0;
+      padding: 8px;
+      font: inherit;
+      cursor: pointer;
     }
 
     .leaflet-control-zoom {
@@ -544,13 +580,13 @@ export const FieldMap =
     aria-label="Treasi field map"
   ></div>
 
-  <script
-    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
-    crossorigin=""
-  ></script>
+  <div id="basemap-status" hidden>
+    <div role="status">Background map unavailable. You can still use the cache markers.</div>
+    <button id="retry-basemap" type="button">Retry background map</button>
+  </div>
 
   <script>
-    (function () {
+    (async function () {
       'use strict';
 
       const CHANNEL =
@@ -581,10 +617,10 @@ export const FieldMap =
         }
       }
 
-      if (
-        typeof window.L ===
-        'undefined'
-      ) {
+      let L;
+      try {
+        L = await import('leaflet');
+      } catch (_) {
         send({
           type:
             'TREASI_MAP_ERROR',
@@ -719,6 +755,11 @@ export const FieldMap =
               attributionControl:
                 true,
 
+              minZoom: 2,
+              maxZoom: 19,
+              maxBounds: [[-85.051129, -Infinity], [85.051129, Infinity]],
+              maxBoundsViscosity: 1,
+
               keyboard:
                 true,
 
@@ -747,34 +788,50 @@ export const FieldMap =
           }
         );
 
-        const tiles =
-          L.tileLayer(
-            'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
-            {
-              minZoom:
-                2,
+        const basemapStatus = document.getElementById('basemap-status');
+        const retryBasemap = document.getElementById('retry-basemap');
+        let basemap;
+        let basemapAttempt = 0;
+        let basemapTimer;
 
-              maxZoom:
-                19,
-
-              attribution:
-                '&copy; OpenStreetMap contributors'
-            }
-          );
-
-        tiles.on(
-          'tileerror',
-          function () {
-            /*
-             * Tile errors may be temporary, so the base parchment
-             * remains usable without forcing the map to unmount.
-             */
+        async function loadBasemap() {
+          const attempt = ++basemapAttempt;
+          clearTimeout(basemapTimer);
+          basemapStatus.hidden = true;
+          if (basemap) {
+            map.removeLayer(basemap);
+            basemap = undefined;
           }
-        );
 
-        tiles.addTo(
-          map
-        );
+          function showFailure() {
+            if (attempt !== basemapAttempt) return;
+            clearTimeout(basemapTimer);
+            basemapStatus.hidden = false;
+          }
+
+          basemapTimer = setTimeout(showFailure, 15000);
+          try {
+            const { maplibreGL } = await import('https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.1.4/dist/leaflet-maplibre-gl.mjs');
+            if (attempt !== basemapAttempt) return;
+            basemap = maplibreGL({
+              style: 'https://tiles.openfreemap.org/styles/liberty',
+              attribution: '<a href="https://openfreemap.org/" target="_blank" rel="noopener noreferrer">OpenFreeMap</a> · <a href="https://openmaptiles.org/" target="_blank" rel="noopener noreferrer">© OpenMapTiles</a> · <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">© OpenStreetMap contributors</a>',
+            });
+            basemap.addTo(map);
+            const vectorMap = basemap.getMaplibreMap();
+            vectorMap.on('error', showFailure);
+            vectorMap.once('load', () => {
+              if (attempt !== basemapAttempt) return;
+              clearTimeout(basemapTimer);
+              basemapStatus.hidden = true;
+            });
+          } catch (_) {
+            showFailure();
+          }
+        }
+
+        retryBasemap.addEventListener('click', loadBasemap);
+        void loadBasemap();
 
         const treasureLayer =
           L.layerGroup()
@@ -1483,7 +1540,7 @@ export const FieldMap =
                 html,
 
               sandbox:
-                'allow-scripts',
+                'allow-scripts allow-popups allow-popups-to-escape-sandbox',
 
               referrerPolicy:
                 'no-referrer',

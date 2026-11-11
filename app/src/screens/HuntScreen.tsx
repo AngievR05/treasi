@@ -37,6 +37,7 @@ import * as ScreenOrientation from 'expo-screen-orientation';
 import { onAuthStateChanged } from 'firebase/auth';
 import { readDashboardProfile, readDashboardTreasure } from '../utils/dashboardData';
 import { HUNT_LOCATION_MAX_AGE_MS, isFreshHuntFix, withHuntTimeout } from '../utils/huntValidation';
+import { getHuntPosition, watchHuntPosition } from '../utils/huntLocation';
 
 import Svg, {
   Line,
@@ -87,16 +88,20 @@ const CACHED_LOCATION_REQUIRED_ACCURACY_METRES =
   100;
 
 const LOCATION_ACQUISITION_TIMEOUT_MS =
-  20_000;
+  30_000;
 
 const LOCATION_UPDATE_INTERVAL_MS =
   1_000;
 
 const LOCATION_DISTANCE_INTERVAL_METRES =
-  1;
+  0;
+
+const LOCATION_REFRESH_INTERVAL_MS = 4_000;
 
 const LOCATION_FRESHNESS_TICK_MS =
   2_000;
+
+const RECENT_TRACKING_FIX_MS = 4_000;
 
 const SHAKE_COOLDOWN_MS =
   2_000;
@@ -1236,6 +1241,7 @@ export const HuntScreen:
       useRef<ReturnType<typeof setTimeout> | null>(
         null,
       );
+    const locationRefreshRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
     const latestLiveLocationRef =
       useRef<Location.LocationObject | null>(
@@ -1398,6 +1404,7 @@ export const HuntScreen:
         headingSubscriptionRef.current =
           null;
 
+        if (locationRefreshRef.current !== null) clearInterval(locationRefreshRef.current);
         if (
           locationWatchdogRef.current
         ) {
@@ -2067,6 +2074,10 @@ export const HuntScreen:
           locationSubscriptionRef.current =
             null;
 
+          if (locationRefreshRef.current !== null) {
+            clearInterval(locationRefreshRef.current);
+            locationRefreshRef.current = null;
+          }
           clearLocationWatchdog();
         },
         [
@@ -2101,7 +2112,7 @@ export const HuntScreen:
           location:
             Location.LocationObject,
           source:
-            LocationFixSource,
+            'cached' | 'watcher' | 'one-shot',
         ): void => {
           if (
             !isMountedRef.current ||
@@ -2112,7 +2123,12 @@ export const HuntScreen:
 
           if (source === 'cached' && latestLiveLocationRef.current) return;
           if (!Number.isFinite(location.timestamp) || location.timestamp > Date.now() + 1_000 ||
-              (source === 'live' && !isFreshHuntFix(location))) return;
+              (source === 'cached'
+                ? Date.now() - location.timestamp > CACHED_LOCATION_MAX_AGE_MS
+                : !isFreshHuntFix(location))) return;
+
+          const previousFix = latestLiveLocationRef.current;
+          if (previousFix && location.timestamp < previousFix.timestamp) return;
 
           const {
             latitude,
@@ -2129,7 +2145,7 @@ export const HuntScreen:
           ) {
             if (
               source ===
-              'live'
+              'watcher'
             ) {
               setGpsStatus(
                 'ERROR',
@@ -2143,27 +2159,20 @@ export const HuntScreen:
             return;
           }
 
-          /*
-           * Ignore an older live fix if a newer one has already arrived from
-           * the foreground watcher.
-           */
-          if (
-            source ===
-              'live' &&
-            latestLiveLocationRef.current &&
-            location.timestamp <
-              latestLiveLocationRef.current
-                .timestamp
-          ) {
-            return;
-          }
-
           const nextAccuracy =
             isValidAccuracy(
               accuracy,
             )
               ? accuracy
               : null;
+
+          // The parallel startup request can return a coarse position after tracking
+          // has already found a better fix. Keep the recent tracking position in that case.
+          const previousAccuracy = previousFix?.coords.accuracy;
+          if (source === 'one-shot' && previousFix &&
+              Date.now() - previousFix.timestamp <= RECENT_TRACKING_FIX_MS &&
+              isValidAccuracy(previousAccuracy) &&
+              (nextAccuracy === null || nextAccuracy > previousAccuracy)) return;
 
           const nextDistance =
             getDistanceInMetres(
@@ -2332,6 +2341,10 @@ export const HuntScreen:
           latestLiveLocationRef.current =
             null;
 
+          setDistance(null);
+          setTargetBearing(null);
+          targetBearingRef.current = null;
+          setGpsAccuracy(null);
           setLatestLocationTimestamp(
             null,
           );
@@ -2524,30 +2537,56 @@ export const HuntScreen:
                   requestPermission,
               };
 
+            const isCurrent = () => isMountedRef.current && requestSequence === locationRequestSequenceRef.current;
+            clearLocationWatchdog();
+            locationWatchdogRef.current = setTimeout(() => {
+              if (!isCurrent() || latestLiveLocationRef.current) return;
+
+              setGpsStatus('ERROR');
+              setLocationErrorMessage(
+                'Still looking for a live position. Hunt will keep trying. Move to an area with a clearer view of the sky.',
+              );
+            }, LOCATION_ACQUISITION_TIMEOUT_MS);
+
+            // The device decides when to deliver watch updates. Ask for a fresh
+            // fix during gaps, keeping only one request in flight per session.
+            let refreshInProgress = false;
+            const refreshPosition = async () => {
+              const lastFix = latestLiveLocationRef.current;
+              if (!isCurrent() || refreshInProgress ||
+                  (lastFix && Date.now() - lastFix.timestamp < LOCATION_REFRESH_INTERVAL_MS)) return;
+
+              refreshInProgress = true;
+              try {
+                const position = await getHuntPosition(locationOptions, LOCATION_ACQUISITION_TIMEOUT_MS);
+                if (isCurrent()) applyLocation(position, 'one-shot');
+              } catch (error) {
+                if (isCurrent()) logDevelopmentWarning('[Treasi Hunt] Location refresh unavailable:', error);
+              } finally {
+                refreshInProgress = false;
+              }
+            };
+            locationRefreshRef.current = setInterval(refreshPosition, LOCATION_REFRESH_INTERVAL_MS);
+            void refreshPosition();
+
             let registrationExpired = false;
-            const registration = Location.watchPositionAsync(
+            const registration = watchHuntPosition(
                   locationOptions,
 
                   (
                     location,
                   ) => {
-                    if (!isMountedRef.current || requestSequence !== locationRequestSequenceRef.current) return;
+                    if (!isCurrent()) return;
                     applyLocation(
                       location,
-                      'live',
+                      'watcher',
                     );
                   },
 
                   (
                     message,
                   ) => {
-                    if (
-                      !isMountedRef.current ||
-                      requestSequence !==
-                        locationRequestSequenceRef.current
-                    ) {
-                      return;
-                    }
+                    if (!isCurrent()) return;
 
                     logDevelopmentWarning(
                       '[Treasi Hunt] Location watcher error:',
@@ -2566,19 +2605,26 @@ export const HuntScreen:
                     );
 
                     setLocationErrorMessage(
-                      'Live location updates were interrupted.',
+                      'Live updates were interrupted. Hunt is refreshing your location automatically.',
                     );
+                    void refreshPosition();
                   },
                 ).then(subscription => {
                   if (registrationExpired || !isMountedRef.current || requestSequence !== locationRequestSequenceRef.current) subscription.remove();
                   return subscription;
                 });
+
             let subscription: Location.LocationSubscription;
             try {
               subscription = await withHuntTimeout(registration, 10_000);
             } catch (error) {
               registrationExpired = true;
-              throw error;
+              if (isCurrent() && !latestLiveLocationRef.current) {
+                setGpsStatus('ERROR');
+                setLocationErrorMessage('Continuous updates are unavailable. Hunt is refreshing your location automatically.');
+              }
+              if (isCurrent()) logDevelopmentWarning('[Treasi Hunt] Location watcher unavailable:', error);
+              return;
             }
 
 
@@ -2594,81 +2640,6 @@ export const HuntScreen:
 
             locationSubscriptionRef.current =
               subscription;
-
-            /*
-             * A one-shot high-accuracy request runs alongside the watcher.
-             * Hunt does not block waiting for it because some indoor GPS fixes
-             * take a long time.
-             */
-            void Location
-              .getCurrentPositionAsync(
-                {
-                  accuracy:
-                    Platform.OS ===
-                      'web'
-                      ? Location
-                          .Accuracy
-                          .High
-                      : Location
-                          .Accuracy
-                          .BestForNavigation,
-
-                  mayShowUserSettingsDialog:
-                    requestPermission,
-                },
-              )
-              .then(
-                (
-                  currentPosition,
-                ) => {
-                  if (
-                    requestSequence ===
-                      locationRequestSequenceRef.current &&
-                    isMountedRef.current
-                  ) {
-                    applyLocation(
-                      currentPosition,
-                      'live',
-                    );
-                  }
-                },
-              )
-              .catch(
-                (
-                  error:
-                    unknown,
-                ) => {
-                  logDevelopmentWarning(
-                    '[Treasi Hunt] One-shot location fix unavailable:',
-                    error,
-                  );
-                },
-              );
-
-            clearLocationWatchdog();
-
-            locationWatchdogRef.current =
-              setTimeout(
-                () => {
-                  if (
-                    !isMountedRef.current ||
-                    requestSequence !==
-                      locationRequestSequenceRef.current ||
-                    latestLiveLocationRef.current
-                  ) {
-                    return;
-                  }
-
-                  setGpsStatus(
-                    'ERROR',
-                  );
-
-                  setLocationErrorMessage(
-                    'Treasi has not received a fresh live position. Move to an area with a clearer view of the sky, then retry.',
-                  );
-                },
-                LOCATION_ACQUISITION_TIMEOUT_MS,
-              );
           } catch (
             error: unknown
           ) {
@@ -3417,7 +3388,11 @@ export const HuntScreen:
                     )} metres.`
                   : '';
 
-              return `The current location is not precise enough for excavation.${accuracyText} Hunt needs accuracy of 15 metres or better and a reported distance within 5 metres. Move outdoors with a clear view of the sky, keep the phone steady, and allow 20–30 seconds for a better fix. Enable Precise Location in iOS Settings, then retry.`;
+              const recovery = Platform.OS === 'web'
+                ? 'Try Hunt on a GPS-enabled phone outdoors, then retry location.'
+                : 'Move outdoors with a clear view of the sky and allow 20–30 seconds for a better fix.';
+              const preciseLocationTip = Platform.OS === 'ios' ? ' Check that Precise Location is enabled in iOS Settings.' : '';
+              return `The current location is not precise enough for excavation.${accuracyText} Hunt needs accuracy of 15 metres or better and a reported distance within 5 metres. ${recovery}${preciseLocationTip}`;
             }
 
             case 'OK':
@@ -3428,7 +3403,7 @@ export const HuntScreen:
           if (
             !isLiveFixFresh
           ) {
-            return 'The last live position is too old. Wait for a fresh GPS update before excavating.';
+            return 'Hunt is refreshing your location. Excavation will be available once a fresh fix puts you within range.';
           }
 
           if (
@@ -5143,7 +5118,12 @@ export const HuntScreen:
                 }
               >
                 <Text accessibilityLiveRegion="polite" style={styles.locationExplanation}>{navigationGuidance}</Text>
-                {gpsAccuracy !== null && <Text style={styles.headingAccuracyText}>STRAIGHT-LINE ESTIMATE · GPS ±{Math.round(gpsAccuracy)} M</Text>}
+                {distance !== null && (
+                  <Text style={styles.headingAccuracyText}>
+                    {isLiveFixFresh ? 'LIVE STRAIGHT-LINE ESTIMATE' : 'LAST KNOWN DISTANCE ESTIMATE'}
+                    {gpsAccuracy !== null ? ` · GPS ±${Math.round(gpsAccuracy)} M` : ' · GPS ACCURACY UNKNOWN'}
+                  </Text>
+                )}
                 <OdometerDisplay
                   value={
                     formattedDistance

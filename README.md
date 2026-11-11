@@ -250,7 +250,7 @@ The Dashboard acts as the main operational view and includes:
 - Location recovery controls.
 - Cache creation access.
 
-Native devices use `react-native-maps`. Web uses a dedicated `FieldMap.web.tsx` implementation with Leaflet and OpenStreetMap tiles.
+Native devices use `react-native-maps`. Web uses `FieldMap.web.tsx` with Leaflet markers and an OpenFreeMap background rendered by MapLibre.
 
 ### Treasure Creation and Inventory
 
@@ -1120,7 +1120,7 @@ Client-side checks improve the interface but are **not a replacement for Firebas
 ### Web
 
 - Runs through Expo Web on localhost.
-- Uses the dedicated Leaflet/OpenStreetMap field-map implementation.
+- Uses Leaflet with an OpenFreeMap background. Cache markers remain interactive if the background is unavailable.
 - Uses browser geolocation where available.
 - Does not pretend to provide the same native compass behaviour as iOS/Android.
 - Sensor-driven interactions degrade to accessible controls.

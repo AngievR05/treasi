@@ -1,0 +1,741 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    /* ---------------------------------------------------------------------- */
+    /* Authentication helpers                                                 */
+    /* ---------------------------------------------------------------------- */
+
+    // Checks that the request comes from a signed-in Firebase user.
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Checks that the authenticated user owns the supplied user document.
+    function isOwner(userId) {
+      return isAuthenticated()
+        && request.auth.uid == userId;
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /* Shared validation helpers                                               */
+    /* ---------------------------------------------------------------------- */
+
+    // Validates common username requirements used throughout Treasi.
+    function isValidUsername(username) {
+      return username is string
+        && username.size() >= 1
+        && username.size() <= 60;
+    }
+
+    // Validates a standard Firebase email field.
+    function isValidEmail(email) {
+      return email is string
+        && email.size() >= 3
+        && email.size() <= 254;
+    }
+
+    // Validates an optional GeoPoint value.
+    function isValidOptionalLocation(data) {
+      return data.get('location', null) == null
+        || data.get('location', null) is latlng;
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /* Collection 1: users                                                    */
+    /* ---------------------------------------------------------------------- */
+
+    function isValidUserDocument(data, userId) {
+      return data.keys().hasAll([
+          'uid',
+          'username',
+          'email',
+          'totalPoints',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'uid',
+          'username',
+          'email',
+          'totalPoints',
+          'hasCompletedOnboarding',
+          'telemetryEnabled',
+          'hapticFeedbackEnabled',
+          'motionSensitivityEnabled',
+          'batteryOptimizerEnabled',
+          'nightModeEnabled',
+          'skipOnboardingAuthFlow',
+          'location',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.uid is string
+        && data.uid == userId
+        && isValidUsername(data.username)
+        && isValidEmail(data.email)
+        && data.totalPoints is int
+        && data.totalPoints >= 0
+        && data.get('hasCompletedOnboarding', false) is bool
+        && data.get('telemetryEnabled', false) is bool
+        && data.get('hapticFeedbackEnabled', false) is bool
+        && data.get('motionSensitivityEnabled', false) is bool
+        && data.get('batteryOptimizerEnabled', false) is bool
+        && data.get('nightModeEnabled', false) is bool
+        && data.get('skipOnboardingAuthFlow', false) is bool
+        && isValidOptionalLocation(data)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidUserCreate(data, userId) {
+      return isValidUserDocument(data, userId)
+
+        // Supports normal registration at zero points and the Hunt recovery flow.
+        && (
+          data.totalPoints == 0
+          || data.totalPoints == 100
+        )
+
+        // Prevents users from creating a profile for another authenticated email.
+        && (
+          request.auth.token.get('email', '') == ''
+          || data.email == request.auth.token.get('email', '')
+        );
+    }
+
+    function hasImmutableUserIdentity() {
+      return request.resource.data.uid == resource.data.uid
+        && request.resource.data.email == resource.data.email
+        && request.resource.data.createdAt == resource.data.createdAt;
+    }
+
+    function isValidUserSettingsUpdate(userId) {
+      return request.resource.data
+          .diff(resource.data)
+          .affectedKeys()
+          .hasOnly([
+            'username',
+            'hasCompletedOnboarding',
+            'telemetryEnabled',
+            'hapticFeedbackEnabled',
+            'motionSensitivityEnabled',
+            'batteryOptimizerEnabled',
+            'nightModeEnabled',
+            'skipOnboardingAuthFlow',
+            'location',
+            'updatedAt'
+          ])
+        && isValidUserDocument(request.resource.data, userId)
+        && request.resource.data.totalPoints == resource.data.totalPoints;
+    }
+
+    function isValidPointsUpdate(userId) {
+      return request.resource.data
+          .diff(resource.data)
+          .affectedKeys()
+          .hasOnly([
+            'totalPoints',
+            'updatedAt'
+          ])
+        && request.resource.data
+          .diff(resource.data)
+          .affectedKeys()
+          .hasAny([
+            'totalPoints'
+          ])
+        && isValidUserDocument(request.resource.data, userId)
+
+        // Treasi currently awards exactly 100 points for a discovery.
+        && request.resource.data.totalPoints
+          == resource.data.totalPoints + 100;
+    }
+
+    match /users/{userId} {
+
+      // Leaderboard and Social currently require authenticated profile reads.
+      allow read: if isAuthenticated();
+
+      // Users may only create their own profile document.
+      allow create: if isOwner(userId)
+        && isValidUserCreate(request.resource.data, userId);
+
+      // Users may update their own settings/profile or receive a 100-point award.
+      allow update: if isOwner(userId)
+        && hasImmutableUserIdentity()
+        && (
+          isValidUserSettingsUpdate(userId)
+          || isValidPointsUpdate(userId)
+        );
+
+      // Account profile documents remain non-deletable from the client.
+      allow delete: if false;
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /* Collection 2: treasures                                                */
+    /* ---------------------------------------------------------------------- */
+
+    function isValidTreasureDocument(data, treasureId) {
+      return data.keys().hasAll([
+          'treasureId',
+          'creatorId',
+          'creatorName',
+          'title',
+          'hint',
+          'payloadText',
+          'location',
+          'isArchived',
+          'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'treasureId',
+          'creatorId',
+          'creatorName',
+          'title',
+          'hint',
+          'payloadText',
+          'imageUrl',
+          'location',
+          'geohash',
+          'isArchived',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.treasureId is string
+        && data.treasureId == treasureId
+        && data.creatorId is string
+        && data.creatorId.size() > 0
+        && data.creatorName is string
+        && data.creatorName.size() >= 1
+        && data.creatorName.size() <= 100
+        && data.title is string
+        && data.title.size() >= 3
+        && data.title.size() <= 80
+        && data.hint is string
+        && data.hint.size() <= 500
+        && data.payloadText is string
+        && data.payloadText.size() <= 1000
+        && data.get('imageUrl', '') is string
+        && data.get('imageUrl', '').size() <= 2048
+        && data.location is latlng
+        && (!('geohash' in data)
+          || (data.geohash is string
+            && data.geohash.matches('^[0123456789bcdefghjkmnpqrstuvwxyz]{10}$')))
+        && data.isArchived is bool
+        && data.createdAt is timestamp
+        && data.get('updatedAt', data.createdAt) is timestamp;
+    }
+
+    function isValidTreasureCreate(data, treasureId) {
+      return isAuthenticated()
+        && isValidTreasureDocument(data, treasureId)
+        && data.creatorId == request.auth.uid
+        && data.isArchived == false;
+    }
+
+    function isValidTreasureUpdate(treasureId) {
+      return isAuthenticated()
+        && resource.data.creatorId == request.auth.uid
+
+        // Critical ownership and location fields cannot be reassigned.
+        && request.resource.data.creatorId == resource.data.creatorId
+        && request.resource.data.creatorName == resource.data.creatorName
+        && request.resource.data.treasureId == resource.data.treasureId
+        && request.resource.data.location == resource.data.location
+        && request.resource.data.createdAt == resource.data.createdAt
+
+        // An older cache may gain an index key, but an existing key is immutable.
+        && (!('geohash' in resource.data)
+          || request.resource.data.get('geohash', null) == resource.data.geohash)
+
+        // Only editable cache metadata, archive state and index initialization may change.
+        && request.resource.data
+          .diff(resource.data)
+          .affectedKeys()
+          .hasOnly([
+            'title',
+            'hint',
+            'payloadText',
+            'imageUrl',
+            'geohash',
+            'isArchived',
+            'updatedAt'
+          ])
+
+        && isValidTreasureDocument(
+          request.resource.data,
+          treasureId
+        );
+    }
+
+    match /treasures/{treasureId} {
+
+      // Authenticated explorers may view field caches.
+      allow read: if isAuthenticated();
+
+      // Only authenticated creators may bury valid caches.
+      allow create: if isValidTreasureCreate(
+        request.resource.data,
+        treasureId
+      );
+
+      // Only the original creator may edit or archive the cache.
+      allow update: if isValidTreasureUpdate(treasureId);
+
+      // Only the original creator may permanently remove the cache.
+      allow delete: if isAuthenticated()
+        && resource.data.creatorId == request.auth.uid;
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /* Collection 3: discoveries                                              */
+    /* ---------------------------------------------------------------------- */
+
+    function isValidDiscoveryCreate(data, discoveryId) {
+      return isAuthenticated()
+
+        && data.keys().hasAll([
+          'discoveryId',
+          'treasureId',
+          'hunterId',
+          'unlockedAt'
+        ])
+
+        && data.keys().hasOnly([
+          'discoveryId',
+          'treasureId',
+          'hunterId',
+          'unlockedAt'
+        ])
+
+        && data.discoveryId is string
+        && data.discoveryId == discoveryId
+
+        && data.treasureId is string
+        && data.treasureId.size() > 0
+
+        && data.hunterId is string
+        && data.hunterId == request.auth.uid
+
+        // Matches Treasi's deterministic hunter_treasure document ID.
+        && data.discoveryId
+          == data.hunterId + '_' + data.treasureId
+
+        && data.unlockedAt is timestamp
+
+        // A discovery may only reference a real, active treasure.
+        && exists(
+          /databases/$(database)/documents/treasures/$(data.treasureId)
+        )
+
+        && get(
+          /databases/$(database)/documents/treasures/$(data.treasureId)
+        ).data.isArchived == false;
+    }
+
+    function isTreasureCreatorForDiscovery(data) {
+      return data.treasureId is string
+
+        && exists(
+          /databases/$(database)/documents/treasures/$(data.treasureId)
+        )
+
+        && get(
+          /databases/$(database)/documents/treasures/$(data.treasureId)
+        ).data.creatorId == request.auth.uid;
+    }
+
+    match /discoveries/{discoveryId} {
+
+      // Discovery records are required for Hunt and Inventory queries.
+      allow read: if isAuthenticated();
+
+      // Hunters may only create their own deterministic discovery record.
+      allow create: if isValidDiscoveryCreate(
+        request.resource.data,
+        discoveryId
+      );
+
+      // Discovery history is immutable after it is recorded.
+      allow update: if false;
+
+      // Hunters may remove their own record, and treasure creators may
+      // remove related records during permanent cache deletion.
+      allow delete: if isAuthenticated()
+        && (
+          resource.data.hunterId == request.auth.uid
+          || isTreasureCreatorForDiscovery(resource.data)
+        );
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /* Collection 4: messages                                                 */
+    /* ---------------------------------------------------------------------- */
+
+    function isValidMessageCreate(data, messageId) {
+      return isAuthenticated()
+
+        && data.keys().hasAll([
+          'senderId',
+          'senderName',
+          'text',
+          'createdAt',
+          'type'
+        ])
+
+        && data.keys().hasOnly([
+          'messageId',
+          'senderId',
+          'senderName',
+          'text',
+          'createdAt',
+          'type',
+          'recipientId'
+        ])
+
+        // messageId is optional but must match the document ID when supplied.
+        && data.get('messageId', messageId) == messageId
+
+        && data.senderId is string
+        && data.senderId == request.auth.uid
+
+        && data.senderName is string
+        && data.senderName.size() >= 1
+        && data.senderName.size() <= 100
+
+        && data.text is string
+        && data.text.size() >= 1
+        && data.text.size() <= 500
+
+        && data.createdAt is timestamp
+
+        && data.type is string
+        && (
+          data.type == 'GLOBAL_DISPATCH'
+          || data.type == 'PRIVATE'
+        )
+
+        // Private messages require a valid recipient.
+        && (
+          data.type != 'PRIVATE'
+          || (
+            data.get('recipientId', '') is string
+            && data.get('recipientId', '').size() > 0
+            && data.get('recipientId', '') != request.auth.uid
+            && exists(
+              /databases/$(database)/documents/users/$(data.get('recipientId', ''))
+            )
+          )
+        );
+    }
+
+    function canReadMessage(data) {
+      return isAuthenticated()
+        && (
+          data.type == 'GLOBAL_DISPATCH'
+          || data.senderId == request.auth.uid
+          || data.get('recipientId', '') == request.auth.uid
+        );
+    }
+
+    match /messages/{messageId} {
+
+      // Global Telegrams are visible to authenticated explorers.
+      allow read: if canReadMessage(resource.data);
+
+      // Message ownership is tied to the authenticated sender.
+      allow create: if isValidMessageCreate(
+        request.resource.data,
+        messageId
+      );
+
+      // Sent Telegrams cannot be edited after transmission.
+      allow update: if false;
+
+      // Senders may remove their own message if needed.
+      allow delete: if isAuthenticated()
+        && resource.data.senderId == request.auth.uid;
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /* Collection 5: friendships                                              */
+    /* ---------------------------------------------------------------------- */
+
+    function isFriendshipParticipant(data) {
+      return isAuthenticated()
+        && (
+          data.requesterId == request.auth.uid
+          || data.receiverId == request.auth.uid
+        );
+    }
+
+    function isValidFriendshipCreate(data, friendshipId) {
+      return isAuthenticated()
+
+        && data.keys().hasAll([
+          'friendshipId',
+          'requesterId',
+          'receiverId',
+          'status',
+          'createdAt',
+          'updatedAt'
+        ])
+
+        && data.keys().hasOnly([
+          'friendshipId',
+          'requesterId',
+          'receiverId',
+          'status',
+          'createdAt',
+          'updatedAt'
+        ])
+
+        && data.friendshipId is string
+        && data.friendshipId == friendshipId
+
+        && data.requesterId is string
+        && data.requesterId == request.auth.uid
+
+        && data.receiverId is string
+        && data.receiverId.size() > 0
+        && data.receiverId != request.auth.uid
+
+        // Treasi generates friendship IDs from the two participant UIDs.
+        && (
+          friendshipId
+            == data.requesterId + '_' + data.receiverId
+          || friendshipId
+            == data.receiverId + '_' + data.requesterId
+        )
+
+        && data.status == 'pending'
+
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp
+
+        // Friend requests may only target a real Treasi account.
+        && exists(
+          /databases/$(database)/documents/users/$(data.receiverId)
+        );
+    }
+
+    function isValidFriendshipUpdate() {
+      return isFriendshipParticipant(resource.data)
+
+        // Participants and creation metadata cannot be reassigned.
+        && request.resource.data.friendshipId
+          == resource.data.friendshipId
+
+        && request.resource.data.requesterId
+          == resource.data.requesterId
+
+        && request.resource.data.receiverId
+          == resource.data.receiverId
+
+        && request.resource.data.createdAt
+          == resource.data.createdAt
+
+        && request.resource.data
+          .diff(resource.data)
+          .affectedKeys()
+          .hasOnly([
+            'status',
+            'updatedAt'
+          ])
+
+        && request.resource.data.updatedAt is timestamp
+
+        // Only the receiver may accept or decline a pending request.
+        && (
+          (
+            resource.data.status == 'pending'
+            && request.auth.uid == resource.data.receiverId
+            && (
+              request.resource.data.status == 'accepted'
+              || request.resource.data.status == 'declined'
+            )
+          )
+
+          // Either participant may block an existing relationship.
+          || (
+            request.resource.data.status == 'blocked'
+            && (
+              request.auth.uid == resource.data.requesterId
+              || request.auth.uid == resource.data.receiverId
+            )
+          )
+        );
+    }
+
+    match /friendships/{friendshipId} {
+
+      // Friendship documents are private to their two participants.
+      allow read: if isFriendshipParticipant(resource.data);
+
+      // A signed-in explorer may create a pending request from themselves.
+      allow create: if isValidFriendshipCreate(
+        request.resource.data,
+        friendshipId
+      );
+
+      // Status transitions are restricted to authorised participants.
+      allow update: if isValidFriendshipUpdate();
+
+      // Either participant may cancel or remove the relationship.
+      allow delete: if isFriendshipParticipant(resource.data);
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /* Collection 6: userAchievements                                         */
+    /* ---------------------------------------------------------------------- */
+
+    function isValidAchievementCreate(data, achievementId) {
+      return isAuthenticated()
+
+        && data.keys().hasAll([
+          'achievementId',
+          'userId',
+          'badgeKey',
+          'title',
+          'description',
+          'unlockedAt'
+        ])
+
+        && data.keys().hasOnly([
+          'achievementId',
+          'userId',
+          'badgeKey',
+          'title',
+          'description',
+          'unlockedAt'
+        ])
+
+        && data.achievementId is string
+        && data.achievementId == achievementId
+
+        && data.userId is string
+        && data.userId == request.auth.uid
+
+        && data.badgeKey is string
+        && data.badgeKey.size() >= 1
+        && data.badgeKey.size() <= 100
+
+        && data.title is string
+        && data.title.size() >= 1
+        && data.title.size() <= 100
+
+        && data.description is string
+        && data.description.size() <= 500
+
+        && data.unlockedAt is timestamp;
+    }
+
+    match /userAchievements/{achievementId} {
+
+      // Achievements are private to the account that owns them.
+      allow read: if isAuthenticated()
+        && resource.data.userId == request.auth.uid;
+
+      // Users may only create achievement records assigned to themselves.
+      allow create: if isValidAchievementCreate(
+        request.resource.data,
+        achievementId
+      );
+
+      // Earned achievements remain immutable.
+      allow update: if false;
+
+      // Achievement history is retained permanently.
+      allow delete: if false;
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /* Collection 7: activity_feed                                            */
+    /* ---------------------------------------------------------------------- */
+
+    function isValidActivityType(activityType) {
+      return activityType == 'TREASURE_HIDDEN'
+        || activityType == 'TREASURE_FOUND'
+        || activityType == 'TREASURE_ARCHIVED'
+        || activityType == 'TELEGRAM_DISPATCH'
+        || activityType == 'FRIEND_REQUEST'
+        || activityType == 'FRIEND_ACCEPTED'
+        || activityType == 'PROFILE_UPDATED';
+    }
+
+    function isValidActivityCreate(data, activityId) {
+      return isAuthenticated()
+
+        && data.keys().hasAll([
+          'userId',
+          'username',
+          'type',
+          'message',
+          'targetId',
+          'createdAt'
+        ])
+
+        && data.keys().hasOnly([
+          'activityId',
+          'userId',
+          'username',
+          'type',
+          'message',
+          'targetId',
+          'createdAt'
+        ])
+
+        // activityId is optional but must match when provided.
+        && data.get('activityId', activityId) == activityId
+
+        && data.userId is string
+        && data.userId == request.auth.uid
+
+        && data.username is string
+        && data.username.size() >= 1
+        && data.username.size() <= 100
+
+        && data.type is string
+        && isValidActivityType(data.type)
+
+        && data.message is string
+        && data.message.size() >= 1
+        && data.message.size() <= 600
+
+        && data.targetId is string
+        && data.targetId.size() >= 1
+        && data.targetId.size() <= 256
+
+        && data.createdAt is timestamp;
+    }
+
+    match /activity_feed/{activityId} {
+
+      // Dashboard field signals are visible to authenticated explorers.
+      allow read: if isAuthenticated();
+
+      // Users may only publish activity records attributed to themselves.
+      allow create: if isValidActivityCreate(
+        request.resource.data,
+        activityId
+      );
+
+      // Activity history cannot be modified after publication.
+      allow update: if false;
+
+      // Activity history is intentionally retained for audit consistency.
+      allow delete: if false;
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /* Default deny                                                           */
+    /* ---------------------------------------------------------------------- */
+
+    // Any collection not explicitly declared above is inaccessible.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

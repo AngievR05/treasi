@@ -6,10 +6,12 @@ Inventory retains its separate owner query so distant and archived owned caches 
 
 ## Required before releasing these clients
 
-1. Merge the entries in `../firestore.indexes.json` with the project's existing index configuration. Deploy the `treasures` collection index (`isArchived` ascending, `geohash` ascending) and the existing messages index. `../firebase.json` configures index deployment only; no security rules are supplied or changed. With an authenticated Firebase CLI, deploy indexes from the repository root using `firebase deploy --only firestore:indexes --project YOUR_PROJECT_ID`. Preserve unrelated indexes already used by the project.
+1. Merge the entries in `../firestore.indexes.json` with the project's existing index configuration. Deploy the `treasures` collection index (`isArchived` ascending, `geohash` ascending) and the existing messages index. With an authenticated Firebase CLI, deploy indexes from the repository root using `firebase deploy --only firestore:indexes --project YOUR_PROJECT_ID`. Preserve unrelated indexes already used by the project.
 2. Backfill existing treasures, including archives, with the script below. **Treasures without a geohash do not participate in nearby queries.** Run and verify the migration before releasing the new clients.
-3. Confirm deployed rules allow the new queries and owner-authorized create/edit/restore writes containing `geohash`. All writers must update geohash atomically whenever coordinates change; upgrade older clients or enforce the indexing contract on the backend.
-4. Verify both nearby screens against real records before release. Test a nearby cache, a distant cache, an archived owned cache, moving a cache across the radius, and a missing-index or permission error.
+3. Review `../firestore.rules` against the project's live rules before deploying `firebase deploy --only firestore:rules --project YOUR_PROJECT_ID`. The cache rules accept a ten-character `geohash` on creation and let the owner initialize it on a legacy record. The existing hash and location are immutable to clients. Older clients can still create caches without a hash, but those caches require backfill to appear in nearby queries.
+4. Verify both nearby screens against real records before release. Test a nearby cache, a distant cache, an archived owned cache, and a missing-index or permission error.
+
+To check the cache write rules without touching a live database, start a Firestore emulator using `firestore.rules` and the project ID `demo-treasi-cache`, then run `node app/scripts/check-cache-rules.cjs` from the repository root. The script expects the emulator on `127.0.0.1:8189`; set `TREASI_EMULATOR_PORT` if you use a different port.
 
 ## Backfill tool
 

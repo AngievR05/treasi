@@ -1,7 +1,7 @@
 import { Geodesic } from 'geographiclib-geodesic';
 import React from 'react';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react-native';
-import { AccessibilityInfo, Alert, AppState, Linking } from 'react-native';
+import { AccessibilityInfo, Alert, AppState, Linking, Platform } from 'react-native';
 import * as Location from 'expo-location';
 import { Accelerometer } from 'expo-sensors';
 import * as Haptics from 'expo-haptics';
@@ -133,6 +133,43 @@ test('a stalled cache lookup does not delay live tracking and cannot overwrite a
   expect(screen.getByLabelText('Excavate treasure')).toBeEnabled();
 });
 
+test('web Hunt requests fresh high-accuracy fixes and keeps 30 m when a coarse startup fix reports 73 m', async () => {
+  jest.replaceProperty(Platform, 'OS', 'web');
+  const original = Object.getOwnPropertyDescriptor(navigator, 'geolocation');
+  const geolocation = {
+    watchPosition: jest.fn(() => 42),
+    getCurrentPosition: jest.fn(),
+    clearWatch: jest.fn(),
+  };
+  Object.defineProperty(navigator, 'geolocation', { configurable: true, value: geolocation });
+  try {
+    const view = await mount();
+    const [watchUpdate, , watchOptions] = geolocation.watchPosition.mock.calls[0];
+    const [startupUpdate, , startupOptions] = geolocation.getCurrentPosition.mock.calls[0];
+    expect(watchOptions).toMatchObject({ enableHighAccuracy: true, maximumAge: 0 });
+    expect(startupOptions).toMatchObject({ enableHighAccuracy: true, maximumAge: 0 });
+
+    function fixAtDistance(metres, accuracy) {
+      const point = Geodesic.WGS84.Direct(-25.89, 28.18, 90, metres);
+      return fix({ coords: { latitude: point.lat2, longitude: point.lon2, accuracy } });
+    }
+
+    await act(() => watchUpdate(fixAtDistance(30, 5)));
+    expect(screen.getByLabelText('Distance to target: 30 metres')).toBeTruthy();
+    await act(() => jest.advanceTimersByTime(1_000));
+    await act(() => startupUpdate(fixAtDistance(73, 65)));
+    expect(screen.getByLabelText('Distance to target: 30 metres')).toBeTruthy();
+
+    await act(() => watchUpdate(fixAtDistance(12, 4)));
+    expect(screen.getByLabelText('Distance to target: 12 metres')).toBeTruthy();
+    await view.unmount();
+    expect(geolocation.clearWatch).toHaveBeenCalledWith(42);
+  } finally {
+    if (original) Object.defineProperty(navigator, 'geolocation', original);
+    else delete navigator.geolocation;
+  }
+});
+
 test('cached positions cannot authorise excavation', async () => {
   Location.getLastKnownPositionAsync.mockResolvedValue(fix()); await mount();
   await press('Check excavation readiness'); expect(runTransaction).not.toHaveBeenCalled();
@@ -156,6 +193,44 @@ test('an expired fix exposes location recovery and a new fix restores excavation
   expect(screen.getByLabelText('RETRY LOCATION')).toBeEnabled();
   await press('Check excavation readiness'); expect(runTransaction).not.toHaveBeenCalled();
   await position(fix()); expect(screen.getByLabelText('Excavate treasure')).toBeEnabled();
+});
+
+test('Hunt updates the distance through a quiet watcher and recovers from a failed refresh', async () => {
+  const refreshes = [];
+  Location.getCurrentPositionAsync.mockImplementation(() => new Promise((resolve, reject) => {
+    refreshes.push({ resolve, reject });
+  }));
+  const atDistance = metres => {
+    const point = Geodesic.WGS84.Direct(-25.89, 28.18, 90, metres);
+    return fix({ coords: { latitude: point.lat2, longitude: point.lon2, accuracy: 5 } });
+  };
+
+  await mount();
+  expect(Location.watchPositionAsync).toHaveBeenCalledWith(
+    expect.objectContaining({ distanceInterval: 0 }), expect.any(Function), expect.any(Function),
+  );
+  await position(atDistance(30));
+  await act(() => refreshes[0].resolve(atDistance(30)));
+  expect(screen.getByLabelText('Distance to target: 30 metres')).toBeTruthy();
+
+  await act(() => jest.advanceTimersByTime(4_000));
+  await act(() => refreshes[1].reject(new Error('Temporarily unavailable')));
+  await act(() => jest.advanceTimersByTime(8_000));
+  expect(refreshes).toHaveLength(3);
+  await act(() => refreshes[2].resolve(atDistance(12)));
+  expect(screen.getByLabelText('Distance to target: 12 metres')).toBeTruthy();
+
+  await act(() => jest.advanceTimersByTime(4_000));
+  await act(() => refreshes[3].resolve(atDistance(3)));
+  expect(screen.getByLabelText('Distance to target: 3 metres')).toBeTruthy();
+  expect(screen.getByLabelText('Excavate treasure')).toBeEnabled();
+
+  await act(() => jest.advanceTimersByTime(4_000));
+  await act(() => stateChange('background'));
+  await act(() => refreshes[4].resolve(atDistance(1)));
+  await act(() => jest.advanceTimersByTime(20_000));
+  expect(refreshes).toHaveLength(5);
+  expect(screen.queryByLabelText('Distance to target: 1 metres')).toBeNull();
 });
 
 test('does not award points for an owned or archived cache', async () => {
@@ -286,6 +361,16 @@ test('GPS startup and no-fix timeouts offer recovery instead of an endless spinn
   Location.watchPositionAsync.mockImplementationOnce(pending);
   await mount(); await act(() => jest.advanceTimersByTime(10_000));
   expect(screen.getByLabelText('RETRY LOCATION')).toBeEnabled();
+});
+
+test('a location fix arriving after watcher registration times out still restores Hunt', async () => {
+  let completeRefresh;
+  Location.watchPositionAsync.mockImplementationOnce(pending);
+  Location.getCurrentPositionAsync.mockImplementationOnce(() => new Promise(resolve => { completeRefresh = resolve; }));
+  await mount();
+  await act(() => jest.advanceTimersByTime(18_000));
+  await act(() => completeRefresh(fix()));
+  expect(screen.getByLabelText('Excavate treasure')).toBeEnabled();
 });
 
 test('compass registration timeout falls back to bearing and removes a late subscription', async () => {
