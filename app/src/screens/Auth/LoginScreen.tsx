@@ -398,8 +398,8 @@ export const LoginScreen:
     const insets =
       useSafeAreaInsets();
 
-    const isLandscape =
-      width > height;
+    const availableWidth = width - Math.max(insets.left, 16) - Math.max(insets.right, 16);
+    const useSplitLayout = width > height && availableWidth >= 540;
 
     const isCompact =
       height < 430;
@@ -1213,6 +1213,7 @@ export const LoginScreen:
             }
             contentContainerStyle={[
               styles.scrollContainer,
+              (isCompact || keyboardVisible) && styles.scrollContainerTopAligned,
 
               {
                 paddingLeft:
@@ -1257,7 +1258,7 @@ export const LoginScreen:
 
                 {
                   flexDirection:
-                    isLandscape
+                    useSplitLayout
                       ? 'row'
                       : 'column',
                 },
@@ -1271,14 +1272,14 @@ export const LoginScreen:
                 style={[[
                   styles.parchmentCard,
 
-                  isLandscape
+                  useSplitLayout
                     ? styles.leftLandscape
                     : styles.fullWidthCard,
                 ], keyboardVisible && { flex: 1, width: '100%' }]}
               >
                 <View
                   style={
-                    styles.dashedBorderFrame
+                    [styles.dashedBorderFrame, (isCompact || keyboardVisible) && styles.ticketTopAligned]
                   }
                 >
                   <View
@@ -1920,7 +1921,7 @@ export const LoginScreen:
                 style={[[
                   styles.consoleCard,
 
-                  isLandscape
+                  useSplitLayout
                     ? styles.rightLandscape
                     : styles.fullWidthCard,
                 ], keyboardVisible && { display: 'none' }]}
@@ -2245,6 +2246,10 @@ const styles =
         'center',
     },
 
+    scrollContainerTopAligned: {
+      justifyContent: 'flex-start',
+    },
+
     layoutSplitWrapper: {
       width: '100%',
 
@@ -2334,6 +2339,10 @@ const styles =
 
       justifyContent:
         'center',
+    },
+
+    ticketTopAligned: {
+      justifyContent: 'flex-start',
     },
 
     ticketHeader: {

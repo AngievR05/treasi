@@ -39,7 +39,8 @@ const profile = (changes = {}) => ({
 });
 const emit = async (changes = {}) => act(() => mockObservers.get('users/explorer').next({ exists: () => true, data: () => profile(changes) }));
 const press = label => fireEvent.press(screen.getByLabelText(label));
-const toggle = (label, value) => fireEvent(screen.getByRole('switch', { name: label }), 'valueChange', value);
+const preferenceSwitch = label => screen.getByRole('switch', { name: label });
+const toggle = label => fireEvent.press(preferenceSwitch(label));
 const mount = async (props = {}, changes = {}) => {
   const result = await render(<ProfileSettingsScreen onSignOut={jest.fn()} {...props} />);
   await emit(changes);
@@ -75,8 +76,8 @@ afterEach(async () => {
 test('loads all five preferences as individually accessible iOS switches', async () => {
   await mount();
   expect(screen.getAllByRole('switch')).toHaveLength(5);
-  expect(screen.getByRole('switch', { name: 'HAPTIC FEEDBACK' })).toHaveProp('value', true);
-  expect(screen.getByRole('switch', { name: 'LOCATION SHARING' })).toHaveProp('value', false);
+  expect(preferenceSwitch('HAPTIC FEEDBACK')).toBeChecked();
+  expect(preferenceSwitch('LOCATION SHARING')).not.toBeChecked();
 });
 
 test.each([
@@ -85,34 +86,34 @@ test.each([
   ['BATTERY SAVER PREFERENCE', true, 'batteryOptimizerEnabled'],
   ['LOCATION SHARING', true, 'telemetryEnabled'],
 ])('persists %s to the authenticated profile', async (label, value, field) => {
-  await mount(); await toggle(label, value);
+  await mount(); await toggle(label);
   expect(updateDoc).toHaveBeenCalledWith(expect.objectContaining({ path: 'users/explorer' }), {
     [field]: value, updatedAt: 'server-timestamp',
   });
-  expect(screen.getByRole('switch', { name: label })).toHaveProp('value', value);
+  expect(preferenceSwitch(label)).toHaveProp('accessibilityState', expect.objectContaining({ checked: value }));
 });
 
 test('Night Field changes the palette and rolls back when saving fails', async () => {
   await mount();
   expect(screen.getByTestId('settings-panel')).toHaveStyle({ backgroundColor: '#E8DCC0' });
-  await toggle('NIGHT FIELD PREFERENCE', true);
+  await toggle('NIGHT FIELD PREFERENCE');
   expect(screen.getByTestId('settings-panel')).toHaveStyle({ backgroundColor: '#1C261D' });
   updateDoc.mockRejectedValueOnce(new Error('network unavailable'));
-  await toggle('NIGHT FIELD PREFERENCE', false);
-  expect(screen.getByRole('switch', { name: 'NIGHT FIELD PREFERENCE' })).toHaveProp('value', true);
+  await toggle('NIGHT FIELD PREFERENCE');
+  expect(preferenceSwitch('NIGHT FIELD PREFERENCE')).toBeChecked();
   expect(screen.getByTestId('settings-panel')).toHaveStyle({ backgroundColor: '#1C261D' });
   expect(Alert.alert).toHaveBeenLastCalledWith('Preference Error', 'network unavailable', undefined);
 });
 
 test('a failed toggle restores its previous value', async () => {
   await mount(); updateDoc.mockRejectedValueOnce(new Error('permission denied'));
-  await toggle('HAPTIC FEEDBACK', false);
-  expect(screen.getByRole('switch', { name: 'HAPTIC FEEDBACK' })).toHaveProp('value', true);
+  await toggle('HAPTIC FEEDBACK');
+  expect(preferenceSwitch('HAPTIC FEEDBACK')).toBeChecked();
 });
 
 test('turning sharing off atomically clears the saved coordinates', async () => {
   await mount({}, { telemetryEnabled: true, location: { latitude: 1, longitude: 2 } });
-  await toggle('LOCATION SHARING', false);
+  await toggle('LOCATION SHARING');
   expect(updateDoc).toHaveBeenCalledWith(expect.anything(), {
     telemetryEnabled: false, location: 'delete-field', updatedAt: 'server-timestamp',
   });
@@ -130,13 +131,16 @@ test('serialises competing preference mutations and does not overwrite optimisti
   await mount();
   await press('Restore default Treasi preferences');
   const confirm = Alert.alert.mock.calls.at(-1)[2][1].onPress;
-  await toggle('HAPTIC FEEDBACK', false);
+  await toggle('HAPTIC FEEDBACK');
+  expect(preferenceSwitch('HAPTIC FEEDBACK')).toBeBusy();
+  expect(preferenceSwitch('HAPTIC FEEDBACK')).toBeDisabled();
   await emit({ hapticFeedbackEnabled: true });
   expect(screen.getByLabelText('Restore default Treasi preferences')).toBeDisabled();
   await act(() => confirm());
   expect(updateDoc).toHaveBeenCalledTimes(1);
   await act(() => finish());
-  expect(screen.getByRole('switch', { name: 'HAPTIC FEEDBACK' })).toHaveProp('value', false);
+  expect(preferenceSwitch('HAPTIC FEEDBACK')).not.toBeChecked();
+  expect(preferenceSwitch('HAPTIC FEEDBACK')).toBeEnabled();
 });
 
 test('restores defaults only after confirmation and clears location sharing', async () => {
@@ -149,7 +153,7 @@ test('restores defaults only after confirmation and clears location sharing', as
     hapticFeedbackEnabled: true, motionSensitivityEnabled: false, nightModeEnabled: false,
     batteryOptimizerEnabled: false, telemetryEnabled: false, location: 'delete-field',
   }));
-  expect(screen.getByRole('switch', { name: 'NIGHT FIELD PREFERENCE' })).toHaveProp('value', false);
+  expect(preferenceSwitch('NIGHT FIELD PREFERENCE')).not.toBeChecked();
 });
 
 test('live profile events preserve an unfinished callsign draft', async () => {
@@ -275,7 +279,7 @@ test('requires DELETE and invokes the configured deletion handler once', async (
 test('clears old profile data and discards the completion of an earlier account save', async () => {
   let finish;
   updateDoc.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
-  await mount(); await toggle('NIGHT FIELD PREFERENCE', true);
+  await mount(); await toggle('NIGHT FIELD PREFERENCE');
   await act(() => { mockAuth.currentUser = null; mockAuthChange(null); });
   await act(() => finish());
   expect(screen.getByText('NO ACTIVE EXPLORER SESSION')).toBeTruthy();

@@ -417,52 +417,14 @@ interface OdometerDigitProps {
   character: string;
 }
 
-const OdometerDigit:
-  React.FC<
-    OdometerDigitProps
-  > = ({
-    character,
-  }) => {
-    if (
-      character === ' '
-    ) {
-      return (
-        <View
-          style={
-            styles.odometerSpacer
-          }
-        />
-      );
-    }
-
-    return (
-      <View
-        accessible={
-          false
-        }
-        importantForAccessibility="no-hide-descendants"
-        style={
-          styles.odometerBox
-        }
-      >
-        <View
-          style={
-            styles.odometerSplitLine
-          }
-        />
-
-        <Text
-          style={
-            styles.odometerText
-          }
-        >
-          {
-            character
-          }
-        </Text>
-      </View>
-    );
-  };
+const OdometerDigit: React.FC<OdometerDigitProps> = ({ character }) => (
+  <View style={styles.odometerBox}>
+    <View style={styles.odometerSplitLine} />
+    <Text maxFontSizeMultiplier={1.4} style={styles.odometerText}>
+      {character}
+    </Text>
+  </View>
+);
 
 interface OdometerDisplayProps {
   value: string;
@@ -470,37 +432,21 @@ interface OdometerDisplayProps {
   accessibilityValue: string;
 }
 
-const OdometerDisplay:
-  React.FC<
-    OdometerDisplayProps
-  > = ({
-    value,
-    accessibilityValue,
-  }) => (
-    <View
-      accessible
-      accessibilityLabel={`Distance to target: ${accessibilityValue}`}
-      style={
-        styles.odometerContainer
-      }
-    >
-      {value
-        .split('')
-        .map(
-          (
-            character,
-            index,
-          ) => (
-            <OdometerDigit
-              key={`${character}-${index}`}
-              character={
-                character
-              }
-            />
-          ),
-        )}
-    </View>
-  );
+const OdometerDisplay: React.FC<OdometerDisplayProps> = ({ value, accessibilityValue }) => {
+    const [reading, unit] = value.split(' ');
+    return (
+      <View accessible accessibilityLabel={`Distance to target: ${accessibilityValue}`}>
+        <View aria-hidden importantForAccessibility="no-hide-descendants" style={styles.odometerContainer}>
+          <View style={styles.odometerDigits}>
+            {Array.from(reading, (character, index) => (
+              <OdometerDigit key={index} character={character} />
+            ))}
+          </View>
+          <Text style={styles.odometerUnit}>{unit}</Text>
+        </View>
+      </View>
+    );
+  };
 
 /* -------------------------------------------------------------------------- */
 /* Compass                                                                    */
@@ -855,9 +801,9 @@ export const HuntScreen:
     } =
       useWindowDimensions();
 
-    const isLandscape =
-      windowWidth >
-      windowHeight;
+    const horizontalPadding = Math.max(insets.left, 8) + Math.max(insets.right, 8);
+    const verticalPadding = Math.max(insets.top, 8) + Math.max(insets.bottom, 8);
+    const useSplitLayout = windowWidth > windowHeight && windowWidth - horizontalPadding >= 540;
     const [interfaceOrientation, setInterfaceOrientation] = useState<ScreenOrientation.Orientation | null>(null);
     useEffect(() => {
       if (Platform.OS !== 'ios') return;
@@ -4364,7 +4310,7 @@ export const HuntScreen:
       Math.max(
         174,
         Math.min(
-          isLandscape
+          useSplitLayout
             ? windowHeight *
                 0.48
             : windowWidth *
@@ -4837,10 +4783,7 @@ export const HuntScreen:
               minHeight:
                 Math.max(
                   0,
-                  windowHeight -
-                    insets.top -
-                    insets.bottom -
-                    16,
+                  windowHeight - verticalPadding,
                 ),
             },
           ]}
@@ -4855,7 +4798,7 @@ export const HuntScreen:
 
               {
                 flexDirection:
-                  isLandscape
+                  useSplitLayout
                     ? 'row'
                     : 'column',
               },
@@ -4869,7 +4812,7 @@ export const HuntScreen:
               style={[
                 styles.leftViewport,
 
-                isLandscape
+                useSplitLayout
                   ? styles.leftViewportLandscape
                   : styles.leftViewportPortrait,
               ]}
@@ -4958,6 +4901,19 @@ export const HuntScreen:
                       : 'WAIT'}
                   </Text>
                 </View>
+              </View>
+
+              <View style={styles.telemetryGroup}>
+                <OdometerDisplay value={formattedDistance} accessibilityValue={accessibleDistance} />
+                <Text maxFontSizeMultiplier={1.5} style={styles.targetSubtext}>
+                  TO TARGET · {DISCOVERY_RADIUS_METRES} M DIG RADIUS
+                </Text>
+                {distance !== null && (
+                  <Text style={styles.headingAccuracyText}>
+                    {isLiveFixFresh ? 'LIVE STRAIGHT-LINE ESTIMATE' : 'LAST KNOWN DISTANCE ESTIMATE'}
+                    {gpsAccuracy !== null ? ` · GPS ±${Math.round(gpsAccuracy)} M` : ' · GPS ACCURACY UNKNOWN'}
+                  </Text>
+                )}
               </View>
 
               <View
@@ -5118,33 +5074,6 @@ export const HuntScreen:
                 }
               >
                 <Text accessibilityLiveRegion="polite" style={styles.locationExplanation}>{navigationGuidance}</Text>
-                {distance !== null && (
-                  <Text style={styles.headingAccuracyText}>
-                    {isLiveFixFresh ? 'LIVE STRAIGHT-LINE ESTIMATE' : 'LAST KNOWN DISTANCE ESTIMATE'}
-                    {gpsAccuracy !== null ? ` · GPS ±${Math.round(gpsAccuracy)} M` : ' · GPS ACCURACY UNKNOWN'}
-                  </Text>
-                )}
-                <OdometerDisplay
-                  value={
-                    formattedDistance
-                  }
-                  accessibilityValue={
-                    accessibleDistance
-                  }
-                />
-
-                <Text
-                  maxFontSizeMultiplier={1.5}
-                  style={
-                    styles.targetSubtext
-                  }
-                >
-                  TO TARGET ·{' '}
-                  {
-                    DISCOVERY_RADIUS_METRES
-                  }
-                  M DIG RADIUS
-                </Text>
 
                 <Text
                   maxFontSizeMultiplier={1.5}
@@ -5354,7 +5283,7 @@ export const HuntScreen:
               style={[
                 styles.rightViewport,
 
-                isLandscape
+                useSplitLayout
                   ? styles.rightViewportLandscape
                   : styles.rightViewportPortrait,
               ]}
@@ -5429,17 +5358,7 @@ export const HuntScreen:
                 </Pressable>
               </View>
 
-              <ScrollView
-                style={
-                  styles.consoleScroll
-                }
-                contentContainerStyle={
-                  styles.consoleScrollContent
-                }
-                showsVerticalScrollIndicator={
-                  false
-                }
-              >
+              <View style={styles.consoleContent}>
                 <View
 
                   accessibilityLabel={`${treasure.title || 'Treasure cache'}. Hint: ${
@@ -5589,6 +5508,164 @@ export const HuntScreen:
                     </Pressable>
                   ) : null}
                 </View>
+
+                {/* ---------------------------------------------------------- */}
+                {/* Excavation                                                 */}
+                {/* ---------------------------------------------------------- */}
+
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={
+                    isExcavated
+                      ? 'Excavation complete'
+                      : isArchived
+                        ? 'Treasure archived'
+                        : isOwnTreasure
+                          ? 'Own treasure cannot be excavated'
+                          : isSubmitting
+                            ? 'Excavation transmitting'
+                            : canExcavate
+                              ? 'Excavate treasure'
+                              : 'Check excavation readiness'
+                  }
+                  accessibilityHint={
+                    excavationStatusText
+                  }
+                  accessibilityState={{
+                    disabled:
+                      terminalActionDisabled,
+
+                    busy:
+                      isSubmitting,
+                  }}
+                  disabled={
+                    terminalActionDisabled
+                  }
+                  onPress={() => {
+                    void executeExcavation();
+                  }}
+                  style={({
+                    pressed,
+                  }) => [
+                    styles.excavationCard,
+
+                    canExcavate &&
+                      styles.excavationCardReady,
+
+                    isExcavated &&
+                      styles.excavationCardSuccess,
+
+                    (
+                      isArchived ||
+                      isOwnTreasure
+                    ) &&
+                      styles.excavationCardDisabled,
+
+                    pressed &&
+                      !terminalActionDisabled &&
+                      styles.pressedControl,
+                  ]}
+                >
+                  <View
+                    accessible={false}
+                    importantForAccessibility="no-hide-descendants"
+                    style={
+                      styles.excavationHeader
+                    }
+                  >
+                    {isSubmitting ? (
+                      <ActivityIndicator
+                        size="small"
+                        color={
+                          COLOURS.white
+                        }
+                      />
+                    ) : (
+                      <Ionicons
+                        name={
+                          isExcavated
+                            ? 'checkmark-circle-outline'
+                            : canExcavate
+                              ? 'earth-outline'
+                              : isArchived
+                                ? 'archive-outline'
+                                : isOwnTreasure
+                                  ? 'shield-outline'
+                                  : 'navigate-outline'
+                        }
+                        size={21}
+                        color={
+                          COLOURS.white
+                        }
+                      />
+                    )}
+
+                    <Text
+                      style={
+                        styles.excavationTitle
+                      }
+                    >
+                      {isSubmitting
+                        ? 'TRANSMITTING SIGNAL…'
+                        : isExcavated
+                          ? 'EXCAVATION COMPLETE'
+                          : isArchived
+                            ? 'CACHE ARCHIVED'
+                            : isOwnTreasure
+                              ? 'YOUR OWN CACHE'
+                              : canExcavate
+                                ? 'DIG SITE VERIFIED'
+                                : 'APPROACH TARGET'}
+                    </Text>
+                  </View>
+
+                  <Text
+                    accessibilityLiveRegion="polite"
+                    maxFontSizeMultiplier={1.7}
+                    style={
+                      styles.excavationDescription
+                    }
+                  >
+                    {isExcavated
+                      ? `PAYLOAD: ${
+                          treasure.payloadText
+                            ?.trim() ||
+                          'CACHE UNLOCKED (+100 PTS)'
+                        }`
+                      : excavationStatusText}
+                  </Text>
+
+                  {canExcavate &&
+                  !isSubmitting ? (
+                    <View
+                      accessible={false}
+                      importantForAccessibility="no-hide-descendants"
+                      style={
+                        styles.readyPrompt
+                      }
+                    >
+                      <View
+                        style={
+                          styles.readyPromptLine
+                        }
+                      />
+
+                      <Text
+                        style={
+                          styles.readyPromptText
+                        }
+                      >
+                        TAP TO EXCAVATE
+                      </Text>
+
+                      <View
+                        style={
+                          styles.readyPromptLine
+                        }
+                      />
+                    </View>
+                  ) : null}
+                </Pressable>
 
                 {/* ---------------------------------------------------------- */}
                 {/* Hunt diagnostics                                           */}
@@ -5768,164 +5845,6 @@ export const HuntScreen:
                   </View>
                 </View>
 
-                {/* ---------------------------------------------------------- */}
-                {/* Excavation                                                 */}
-                {/* ---------------------------------------------------------- */}
-
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel={
-                    isExcavated
-                      ? 'Excavation complete'
-                      : isArchived
-                        ? 'Treasure archived'
-                        : isOwnTreasure
-                          ? 'Own treasure cannot be excavated'
-                          : isSubmitting
-                            ? 'Excavation transmitting'
-                            : canExcavate
-                              ? 'Excavate treasure'
-                              : 'Check excavation readiness'
-                  }
-                  accessibilityHint={
-                    excavationStatusText
-                  }
-                  accessibilityState={{
-                    disabled:
-                      terminalActionDisabled,
-
-                    busy:
-                      isSubmitting,
-                  }}
-                  disabled={
-                    terminalActionDisabled
-                  }
-                  onPress={() => {
-                    void executeExcavation();
-                  }}
-                  style={({
-                    pressed,
-                  }) => [
-                    styles.excavationCard,
-
-                    canExcavate &&
-                      styles.excavationCardReady,
-
-                    isExcavated &&
-                      styles.excavationCardSuccess,
-
-                    (
-                      isArchived ||
-                      isOwnTreasure
-                    ) &&
-                      styles.excavationCardDisabled,
-
-                    pressed &&
-                      !terminalActionDisabled &&
-                      styles.pressedControl,
-                  ]}
-                >
-                  <View
-                    accessible={false}
-                    importantForAccessibility="no-hide-descendants"
-                    style={
-                      styles.excavationHeader
-                    }
-                  >
-                    {isSubmitting ? (
-                      <ActivityIndicator
-                        size="small"
-                        color={
-                          COLOURS.white
-                        }
-                      />
-                    ) : (
-                      <Ionicons
-                        name={
-                          isExcavated
-                            ? 'checkmark-circle-outline'
-                            : canExcavate
-                              ? 'earth-outline'
-                              : isArchived
-                                ? 'archive-outline'
-                                : isOwnTreasure
-                                  ? 'shield-outline'
-                                  : 'navigate-outline'
-                        }
-                        size={21}
-                        color={
-                          COLOURS.white
-                        }
-                      />
-                    )}
-
-                    <Text
-                      style={
-                        styles.excavationTitle
-                      }
-                    >
-                      {isSubmitting
-                        ? 'TRANSMITTING SIGNAL…'
-                        : isExcavated
-                          ? 'EXCAVATION COMPLETE'
-                          : isArchived
-                            ? 'CACHE ARCHIVED'
-                            : isOwnTreasure
-                              ? 'YOUR OWN CACHE'
-                              : canExcavate
-                                ? 'DIG SITE VERIFIED'
-                                : 'APPROACH TARGET'}
-                    </Text>
-                  </View>
-
-                  <Text
-                    accessibilityLiveRegion="polite"
-                    maxFontSizeMultiplier={1.7}
-                    style={
-                      styles.excavationDescription
-                    }
-                  >
-                    {isExcavated
-                      ? `PAYLOAD: ${
-                          treasure.payloadText
-                            ?.trim() ||
-                          'CACHE UNLOCKED (+100 PTS)'
-                        }`
-                      : excavationStatusText}
-                  </Text>
-
-                  {canExcavate &&
-                  !isSubmitting ? (
-                    <View
-                      accessible={false}
-                      importantForAccessibility="no-hide-descendants"
-                      style={
-                        styles.readyPrompt
-                      }
-                    >
-                      <View
-                        style={
-                          styles.readyPromptLine
-                        }
-                      />
-
-                      <Text
-                        style={
-                          styles.readyPromptText
-                        }
-                      >
-                        TAP TO EXCAVATE
-                      </Text>
-
-                      <View
-                        style={
-                          styles.readyPromptLine
-                        }
-                      />
-                    </View>
-                  ) : null}
-                </Pressable>
-
                 {shouldOfferMotionPermission ? (
                   <Pressable
                     accessibilityRole="button"
@@ -6030,7 +5949,7 @@ export const HuntScreen:
                     ABANDON HUNT
                   </Text>
                 </Pressable>
-              </ScrollView>
+              </View>
             </View>
           </View>
         </ScrollView>
@@ -6348,8 +6267,6 @@ const styles =
 
     leftViewportPortrait: {
       width: '100%',
-
-      minHeight: 480,
     },
 
     rightViewport: {
@@ -6376,8 +6293,6 @@ const styles =
 
     rightViewportPortrait: {
       width: '100%',
-
-      minHeight: 520,
     },
 
     /* ---------------------------------------------------------------------- */
@@ -6701,14 +6616,14 @@ const styles =
       marginTop: 2,
 
       color:
-        COLOURS.brass500,
+        COLOURS.brass400,
 
       fontFamily:
         MONO_FONT,
 
-      fontSize: 7.5,
+      fontSize: 10,
 
-      lineHeight: 11,
+      lineHeight: 15,
 
       textAlign: 'center',
     },
@@ -6730,19 +6645,22 @@ const styles =
 
       flexWrap: 'wrap',
 
-      alignItems: 'center',
+      alignItems: 'baseline',
 
       justifyContent: 'center',
+
+      columnGap: 6,
     },
 
-    odometerSpacer: {
-      width: 8,
+    odometerDigits: {
+      flexDirection: 'row',
+      gap: 3,
     },
 
     odometerBox: {
-      minWidth: 27,
+      minWidth: 24,
 
-      height: 40,
+      minHeight: 40,
 
       paddingHorizontal: 4,
 
@@ -6760,7 +6678,6 @@ const styles =
 
       alignItems: 'center',
 
-      marginHorizontal: 2,
     },
 
     odometerSplitLine: {
@@ -6790,6 +6707,13 @@ const styles =
 
       fontFamily:
         MONO_BOLD_FONT,
+    },
+
+    odometerUnit: {
+      color: COLOURS.parchment200,
+      fontFamily: MONO_BOLD_FONT,
+      fontSize: 13,
+      fontWeight: '800',
     },
 
     targetSubtext: {
@@ -6936,9 +6860,9 @@ const styles =
       color:
         COLOURS.brass400,
 
-      fontSize: 9,
+      fontSize: 11,
 
-      lineHeight: 14,
+      lineHeight: 16,
 
       textAlign: 'center',
     },
@@ -6947,7 +6871,7 @@ const styles =
       minHeight:
         MIN_TOUCH_TARGET,
 
-      minWidth: 190,
+      maxWidth: '100%',
 
       marginTop: 9,
 
@@ -6975,6 +6899,7 @@ const styles =
     },
 
     locationActionButtonText: {
+      flexShrink: 1,
       color:
         COLOURS.white,
 
@@ -7128,13 +7053,7 @@ const styles =
       borderRadius: 24,
     },
 
-    consoleScroll: {
-      flex: 1,
-
-      minHeight: 0,
-    },
-
-    consoleScrollContent: {
+    consoleContent: {
       paddingTop: 10,
 
       paddingBottom: 8,

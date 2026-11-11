@@ -22,7 +22,6 @@ import {
   Pressable,
   ScrollView,
   StyleSheet,
-  Switch,
   Text,
   TextInput,
   useWindowDimensions,
@@ -2523,17 +2522,15 @@ export const ProfileSettingsScreen:
         const saving =
           isSavingSetting ===
           config.key;
+        const togglePreference = () => {
+          if (!isPreferenceBusy) void handleToggleChange(config.key, !value);
+        };
 
         return (
           <View
             key={
               config.key
             }
-            accessibilityLabel={`${config.label}. ${
-              value
-                ? 'On'
-                : 'Off'
-            }. ${config.description}`}
             style={
               styles.settingCard
             }
@@ -2593,68 +2590,38 @@ export const ProfileSettingsScreen:
               </View>
             </View>
 
-            <View
-              style={
-                styles.settingControl
-              }
+            <Pressable
+              accessibilityRole="switch"
+              accessibilityLabel={config.label}
+              accessibilityHint={config.description}
+              accessibilityState={{ checked: value, disabled: isPreferenceBusy, busy: saving }}
+              disabled={isPreferenceBusy}
+              onPress={togglePreference}
+              onKeyDown={Platform.OS === 'web' ? event => {
+                // Pressable handles Enter on web. Switches also respond to Space.
+                if (event.nativeEvent.key !== ' ') return;
+                event.preventDefault();
+                if (!event.nativeEvent.repeat) togglePreference();
+              } : undefined}
+              style={({ pressed }) => [
+                styles.settingControl,
+                (pressed || (isPreferenceBusy && !saving)) && styles.settingControlDimmed,
+              ]}
             >
-              {saving ? (
-                <ActivityIndicator
-                  size="small"
-                  color={
-                    colours.rust700
-                  }
-                />
-              ) : (
-                <Switch
-                  accessibilityHint={config.description}
-                  accessibilityLabel={
-                    config.label
-                  }
-                  accessibilityRole="switch"
-                  accessibilityState={{
-                    checked:
-                      value,
-
-                    disabled:
-                      Boolean(
-                        isPreferenceBusy,
-                      ),
-                  }}
-                  disabled={
-                    Boolean(
-                      isPreferenceBusy,
-                    )
-                  }
-                  ios_backgroundColor={
-                    colours.bronze600
-                  }
-                  thumbColor={
-                    value
-                      ? colours.parchment100
-                      : '#7A6B58'
-                  }
-                  trackColor={{
-                    false:
-                      '#B7A98C',
-
-                    true:
-                      colours.rust700,
-                  }}
-                  value={
-                    value
-                  }
-                  onValueChange={(
-                    nextValue,
-                  ) => {
-                    void handleToggleChange(
-                      config.key,
-                      nextValue,
-                    );
-                  }}
-                />
-              )}
-            </View>
+              <View
+                aria-hidden
+                importantForAccessibility="no-hide-descendants"
+                style={[
+                  styles.settingTrack,
+                  value ? styles.settingTrackOn : styles.settingTrackOff,
+                  { borderColor: value ? colours.rust700 : colours.bronze600 },
+                ]}
+              >
+                <View style={styles.settingThumb}>
+                  {saving && <ActivityIndicator size="small" color={COLOURS.rust700} />}
+                </View>
+              </View>
+            </Pressable>
           </View>
         );
       };
@@ -3290,6 +3257,7 @@ export const ProfileSettingsScreen:
                     reduceMotionEnabled
                       ? styles.systemBadgeOn
                       : styles.systemBadgeOff,
+                    nightModeEnabled && (reduceMotionEnabled ? styles.systemBadgeOnNight : styles.systemBadgeOffNight),
                   ]}
                 >
                   <Text
@@ -5538,7 +5506,7 @@ const createStyles = (COLOURS: FieldColours) =>
       alignItems:
         'center',
       backgroundColor:
-        '#E3D5B8',
+        COLOURS.parchment200,
       borderRadius: 19,
       borderWidth: 1,
       borderColor:
@@ -5555,8 +5523,8 @@ const createStyles = (COLOURS: FieldColours) =>
         COLOURS.ink900,
       fontFamily:
         MONO_BOLD_FONT,
-      fontSize: 10,
-      lineHeight: 15,
+      fontSize: 11,
+      lineHeight: 16,
       fontWeight: '800',
       letterSpacing: 0.4,
     },
@@ -5565,18 +5533,51 @@ const createStyles = (COLOURS: FieldColours) =>
       marginTop: 2,
       color:
         COLOURS.ink700,
-      fontSize: 9.5,
-      lineHeight: 14,
+      fontSize: 11,
+      lineHeight: 16,
     },
 
     settingControl: {
-      width: 52,
+      width: 56,
       minHeight: 48,
       flexShrink: 0,
       justifyContent:
         'center',
       alignItems:
         'center',
+    },
+
+    settingControlDimmed: {
+      opacity: 0.6,
+    },
+
+    settingTrack: {
+      width: 48,
+      height: 28,
+      borderWidth: 1,
+      borderRadius: 14,
+      paddingHorizontal: 3,
+      flexDirection: 'row',
+      alignItems: 'center',
+    },
+
+    settingTrackOn: {
+      backgroundColor: COLOURS.rust700,
+      justifyContent: 'flex-end',
+    },
+
+    settingTrackOff: {
+      backgroundColor: '#776649',
+      justifyContent: 'flex-start',
+    },
+
+    settingThumb: {
+      width: 20,
+      height: 20,
+      borderRadius: 10,
+      backgroundColor: COLOURS.white,
+      justifyContent: 'center',
+      alignItems: 'center',
     },
 
     systemBadge: {
@@ -5604,6 +5605,14 @@ const createStyles = (COLOURS: FieldColours) =>
       borderWidth: 1,
       borderColor:
         COLOURS.bronze600,
+    },
+
+    systemBadgeOnNight: {
+      backgroundColor: '#304534',
+    },
+
+    systemBadgeOffNight: {
+      backgroundColor: COLOURS.forest700,
     },
 
     systemBadgeText: {
